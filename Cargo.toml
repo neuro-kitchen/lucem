@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "lumen_py",
+]   # + crates/lumen-<part> (planned: core, io, gpu, ml, view, app, cli)
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"   # burn 0.22 minimum
+authors = ["jesusdpa1"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Versions checked on crates.io 2026-10-14; add each to a crate with `<name>.workspace = true`.
+# Compute (as in dsp-kitchen)
+cubecl = { version = "0.11.0", default-features = false, features = ["std", "stdlib"] }
+burn = { version = "0.22.0", default-features = false }
+# Python bindings (built by maturin, see pyproject.toml)
+pyo3 = { version = "0.29.3" }
+numpy = "0.29.0"
+# UI: GPUI through gpui-kit (re-exports gpui, gpui-base, gpui-component)
+gpui-kit = "0.7.3"

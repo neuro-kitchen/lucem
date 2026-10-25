@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+# data and outputs never in git
+/data/
+*.ome.zarr/
+*.ome.tif
+*.oir
+.env
+# Python
+.venv/
+__pycache__/
+*.py[oc]
+*.so
+.pytest_cache/
