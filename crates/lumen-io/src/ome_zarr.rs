@@ -23,8 +23,12 @@ pub struct OmeZarrContainerInfo {
     pub container_name: String,
     /// Available multiscale pyramid levels from `.zattrs` (e.g. `["s0", "s1", "s2", "s3"]`).
     pub pyramid_levels: Vec<String>,
-    /// Currently loaded pyramid level (e.g. `"s1"`).
+    /// `(level_name, width, height)` for each multiscale pyramid level.
+    pub level_dimensions: Vec<(String, usize, usize)>,
+    /// Currently loaded pyramid level (e.g. `"s2"`).
     pub active_level: String,
+    /// Whether zooming in/out automatically switches the active pyramid level (`s3 ↔ s2 ↔ s1 ↔ s0`).
+    pub auto_pyramid: bool,
     /// Channel labels from `.zattrs` `omero.channels` (e.g. `["DAPI_deblur", "RFP"]`).
     pub channel_labels: Vec<String>,
     /// `None` = composite across channels; `Some(c)` = single channel `c`.
@@ -33,6 +37,41 @@ pub struct OmeZarrContainerInfo {
     pub label_groups: Vec<String>,
     /// `None` = primary image pyramid; `Some(name)` = `labels/<name>/<active_level>`.
     pub active_label_group: Option<String>,
+}
+
+impl OmeZarrContainerInfo {
+    /// Chooses the appropriate pyramid level (`s3..s0`) for a given on-screen `displayed_width`
+    /// in viewport pixels, with hysteresis so scrolling near a threshold does not oscillate.
+    pub fn select_level_for_display_width(&self, displayed_width: f32) -> String {
+        if self.level_dimensions.is_empty() {
+            return self.active_level.clone();
+        }
+        // Sort levels from coarsest (smallest width) to finest (largest width)
+        let mut sorted = self.level_dimensions.clone();
+        sorted.sort_by_key(|&(_, w, _)| w);
+
+        // Find the coarsest level where `level_width * 1.15 >= displayed_width`
+        let mut target_idx = sorted.len() - 1;
+        for (i, &(_, w, _)) in sorted.iter().enumerate() {
+            if (w as f32) * 1.15 >= displayed_width {
+                target_idx = i;
+                break;
+            }
+        }
+
+        // Hysteresis: if currently on a finer level `curr_idx > target_idx`, only step down if
+        // `displayed_width < sorted[target_idx].width * 0.90`.
+        if let Some(curr_idx) = sorted.iter().position(|(l, _, _)| *l == self.active_level) {
+            if curr_idx > target_idx {
+                let step_down_w = sorted[curr_idx - 1].1 as f32;
+                if displayed_width >= step_down_w * 0.90 {
+                    return self.active_level.clone();
+                }
+            }
+        }
+
+        sorted[target_idx].0.clone()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -357,8 +396,25 @@ pub fn inspect_ome_zarr_container(root_dir: &Path) -> IoResult<OmeZarrContainerI
         )));
     }
 
-    // Default to `s2` (or `s1`) when available for instantaneous startup, while allowing interactive
-    // switching to `s1` / `s0` inside the Studio OPERATIONS tree pane.
+    let mut level_dimensions = Vec::new();
+    for lvl in &pyramid_levels {
+        if let Ok(zstr) = fs::read_to_string(root_dir.join(lvl).join(".zarray")) {
+            if let Ok(zmeta) = serde_json::from_str::<ZArrayMeta>(&zstr) {
+                let (h, w) = match zmeta.shape.as_slice() {
+                    &[h, w] => (h, w),
+                    &[_, h, w] => (h, w),
+                    &[_, _, h, w] => (h, w),
+                    _ => (0, 0),
+                };
+                if w > 0 && h > 0 {
+                    level_dimensions.push((lvl.clone(), w, h));
+                }
+            }
+        }
+    }
+
+    // Default to `s2` (or `s1`) when available for instantaneous startup, while allowing automatic
+    // or manual switching to `s1` / `s0` when zooming in.
     let active_level = if pyramid_levels.iter().any(|l| l == "s2") {
         "s2".to_string()
     } else if pyramid_levels.iter().any(|l| l == "s1") {
@@ -383,7 +439,9 @@ pub fn inspect_ome_zarr_container(root_dir: &Path) -> IoResult<OmeZarrContainerI
         root_path: root_dir.to_path_buf(),
         container_name,
         pyramid_levels,
+        level_dimensions,
         active_level,
+        auto_pyramid: true,
         channel_labels,
         active_channel: None,
         label_groups,
@@ -477,6 +535,9 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
     let chunks_x = (width + chunk_x - 1) / chunk_x;
     let sep = &meta.dimension_separator;
 
+    // Collect all chunk tasks across channels and `(cy, cx)` tiles, then decode them in parallel
+    // across CPU worker threads using `std::thread::scope`.
+    let mut chunk_jobs: Vec<(usize, usize, usize, PathBuf)> = Vec::new();
     for c_idx in 0..num_c_load {
         if let Some(only_c) = info.active_channel {
             if c_idx != only_c && num_c_load > 1 {
@@ -492,32 +553,70 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
                     format!("{c_chunk}{sep}{cy_idx}{sep}{cx_idx}")
                 };
                 let chunk_file = array_dir.join(rel_path);
-                if !chunk_file.is_file() {
-                    continue;
+                if chunk_file.is_file() {
+                    chunk_jobs.push((c_idx, cy_idx, cx_idx, chunk_file));
                 }
-                let raw_file = fs::read(&chunk_file)?;
-                let decompressed = match meta.compressor.as_ref().map(|c| c.id.as_str()) {
-                    Some("blosc") => blosc_decompress(&raw_file)?,
-                    None => raw_file,
-                    Some(other) => {
-                        return Err(IoError::OmeZarr(format!("Unsupported Zarr compressor '{other}'")))
-                    }
-                };
-                let vals = decode_elements_to_f32(&decompressed, &meta.dtype)?;
+            }
+        }
+    }
 
-                let y0 = cy_idx * chunk_y;
-                let x0 = cx_idx * chunk_x;
-                let valid_h = (height - y0).min(chunk_y);
-                let valid_w = (width - x0).min(chunk_x);
+    let comp_id = meta.compressor.as_ref().map(|c| c.id.as_str()).unwrap_or("");
+    let dtype_str = meta.dtype.as_str();
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 16);
+    let jobs_per_thread = (chunk_jobs.len() + num_threads - 1).max(1) / num_threads;
 
-                let plane = &mut channel_planes[c_idx];
-                for ly in 0..valid_h {
-                    let src_row = ly * chunk_x;
-                    let dst_row = (y0 + ly) * width + x0;
-                    if src_row + valid_w <= vals.len() {
-                        plane[dst_row..dst_row + valid_w]
-                            .copy_from_slice(&vals[src_row..src_row + valid_w]);
-                    }
+    let decoded_batches: Vec<IoResult<Vec<(usize, usize, usize, Vec<f32>)>>> =
+        std::thread::scope(|s| {
+            let handles: Vec<_> = chunk_jobs
+                .chunks(jobs_per_thread.max(1))
+                .map(|job_slice| {
+                    s.spawn(move || {
+                        let mut out_batch = Vec::with_capacity(job_slice.len());
+                        for (c_idx, cy_idx, cx_idx, chunk_file) in job_slice {
+                            let raw_file = fs::read(chunk_file)?;
+                            let decompressed = match comp_id {
+                                "blosc" => blosc_decompress(&raw_file)?,
+                                "" => raw_file,
+                                other => {
+                                    return Err(IoError::OmeZarr(format!(
+                                        "Unsupported Zarr compressor '{other}'"
+                                    )))
+                                }
+                            };
+                            let vals = decode_elements_to_f32(&decompressed, dtype_str)?;
+                            out_batch.push((*c_idx, *cy_idx, *cx_idx, vals));
+                        }
+                        Ok(out_batch)
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err(IoError::OmeZarr("Chunk worker panicked".into())))
+                })
+                .collect()
+        });
+
+    for batch_res in decoded_batches {
+        for (c_idx, cy_idx, cx_idx, vals) in batch_res? {
+            let y0 = cy_idx * chunk_y;
+            let x0 = cx_idx * chunk_x;
+            let valid_h = (height - y0).min(chunk_y);
+            let valid_w = (width - x0).min(chunk_x);
+
+            let plane = &mut channel_planes[c_idx];
+            for ly in 0..valid_h {
+                let src_row = ly * chunk_x;
+                let dst_row = (y0 + ly) * width + x0;
+                if src_row + valid_w <= vals.len() {
+                    plane[dst_row..dst_row + valid_w]
+                        .copy_from_slice(&vals[src_row..src_row + valid_w]);
                 }
             }
         }
@@ -683,6 +782,10 @@ mod tests {
         assert_eq!(info.pyramid_levels, vec!["s0", "s1", "s2", "s3"]);
         assert_eq!(info.channel_labels, vec!["DAPI_deblur", "RFP"]);
         assert_eq!(info.label_groups, vec!["cells", "nuclei"]);
+        assert_eq!(info.select_level_for_display_width(400.0), "s3");
+        assert_eq!(info.select_level_for_display_width(900.0), "s2");
+        assert_eq!(info.select_level_for_display_width(1800.0), "s1");
+        assert_eq!(info.select_level_for_display_width(3200.0), "s0");
 
         // Test single-channel selection
         info.active_channel = Some(0);
