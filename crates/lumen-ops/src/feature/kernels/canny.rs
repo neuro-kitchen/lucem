@@ -1,4 +1,5 @@
 //! Canny gradient magnitude, quantized orientation sector, and non-maximum suppression kernels.
+#![allow(unused_assignments)]
 
 use cubecl::prelude::*;
 use lumen_core::compute::element_position;
@@ -41,6 +42,7 @@ pub fn canny_grad_dir_kernel<F: lumen_core::element::ImageFloat>(
 
 /// Non-maximum suppression along the quantized gradient direction in `[height, width]`.
 #[cube(launch)]
+#[allow(unused_assignments)]
 pub fn canny_nms_kernel<F: lumen_core::element::ImageFloat>(
     mag: &[F],
     sector: &[u32],

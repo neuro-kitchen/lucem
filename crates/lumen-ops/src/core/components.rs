@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use cubecl::prelude::*;
 use lumen_core::element::{to_f64, ImageFloat};
 use lumen_core::memory::DeviceArray;
-use lumen_core::Shape;
 
 use super::compact::flag_nonzero;
 use super::structuring::StructuringElement;
@@ -279,6 +278,7 @@ pub fn summarize_regions<F: ImageFloat>(
 mod tests {
     use super::*;
     use crate::test_support::runtime_test;
+    use lumen_core::Shape;
 
     fn labels_and_summarizes_in_raster_order(client: &Client) {
         #[rustfmt::skip]

@@ -133,66 +133,62 @@ pub fn marching_squares<F: ImageFloat>(
         }
     }
 
-    // Stitch segments into connected polylines
-    let mut used = vec![false; segments.len()];
-    let mut contours = Vec::new();
+    // Stitch segments into connected polylines in O(S) using a quantized endpoint adjacency table
+    let quantize = |p: [f64; 2]| -> (i64, i64) {
+        ((p[0] * 1_000_000.0).round() as i64, (p[1] * 1_000_000.0).round() as i64)
+    };
     let close_pt = |a: [f64; 2], b: [f64; 2]| -> bool {
         (a[0] - b[0]).abs() <= 1e-6 && (a[1] - b[1]).abs() <= 1e-6
     };
+
+    let mut endpoint_map: HashMap<(i64, i64), Vec<usize>> = HashMap::with_capacity(segments.len() * 2);
+    for (idx, &(a, b)) in segments.iter().enumerate() {
+        endpoint_map.entry(quantize(a)).or_default().push(idx);
+        endpoint_map.entry(quantize(b)).or_default().push(idx);
+    }
+
+    let find_connecting = |pt: [f64; 2], used: &[bool]| -> Option<(usize, [f64; 2])> {
+        let (qx, qy) = quantize(pt);
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if let Some(bucket) = endpoint_map.get(&(qx + dx, qy + dy)) {
+                    for &j in bucket {
+                        if used[j] {
+                            continue;
+                        }
+                        if close_pt(pt, segments[j].0) {
+                            return Some((j, segments[j].1));
+                        } else if close_pt(pt, segments[j].1) {
+                            return Some((j, segments[j].0));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    let mut used = vec![false; segments.len()];
+    let mut contours = Vec::new();
 
     for i in 0..segments.len() {
         if used[i] {
             continue;
         }
         used[i] = true;
-        let mut chain = vec![segments[i].0, segments[i].1];
-        loop {
-            let mut extended = false;
-            let tail = *chain.last().unwrap();
-            for j in 0..segments.len() {
-                if used[j] {
-                    continue;
-                }
-                if close_pt(tail, segments[j].0) {
-                    used[j] = true;
-                    chain.push(segments[j].1);
-                    extended = true;
-                    break;
-                } else if close_pt(tail, segments[j].1) {
-                    used[j] = true;
-                    chain.push(segments[j].0);
-                    extended = true;
-                    break;
-                }
-            }
-            if !extended {
-                break;
-            }
+        let mut chain = std::collections::VecDeque::with_capacity(16);
+        chain.push_back(segments[i].0);
+        chain.push_back(segments[i].1);
+
+        while let Some((j, next_pt)) = find_connecting(*chain.back().unwrap(), &used) {
+            used[j] = true;
+            chain.push_back(next_pt);
         }
-        loop {
-            let mut extended = false;
-            let head = chain[0];
-            for j in 0..segments.len() {
-                if used[j] {
-                    continue;
-                }
-                if close_pt(head, segments[j].1) {
-                    used[j] = true;
-                    chain.insert(0, segments[j].0);
-                    extended = true;
-                    break;
-                } else if close_pt(head, segments[j].0) {
-                    used[j] = true;
-                    chain.insert(0, segments[j].1);
-                    extended = true;
-                    break;
-                }
-            }
-            if !extended {
-                break;
-            }
+        while let Some((j, prev_pt)) = find_connecting(*chain.front().unwrap(), &used) {
+            used[j] = true;
+            chain.push_front(prev_pt);
         }
-        contours.push(chain);
+        contours.push(chain.into_iter().collect());
     }
 
     Ok(contours)

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use cubecl::prelude::*;
-use lumen_core::element::{to_f64, ImageFloat};
+use lumen_core::element::ImageFloat;
 use lumen_core::memory::DeviceArray;
 
 use crate::core::check;
@@ -86,7 +86,6 @@ pub fn region_features<F: ImageFloat>(
     }
 
     let host_labels = labels.to_host(client);
-    let _host_vals: Option<Vec<f64>> = intensity.map(|img| img.to_host(client).into_iter().map(to_f64).collect());
     let dims = labels.dims();
     let strides = labels.shape().strides();
     let ndim = dims.len();
@@ -116,6 +115,7 @@ pub fn region_features<F: ImageFloat>(
         );
     }
 
+    let mut coords = vec![0usize; ndim];
     for (idx, &lbl) in host_labels.iter().enumerate() {
         if lbl == 0 {
             continue;
@@ -123,7 +123,6 @@ pub fn region_features<F: ImageFloat>(
         let c_vec = &centers[&lbl];
         let g = geom_map.get_mut(&lbl).unwrap();
 
-        let mut coords = vec![0usize; ndim];
         for d in 0..ndim {
             let c = (idx / strides[d]) % dims[d];
             coords[d] = c;

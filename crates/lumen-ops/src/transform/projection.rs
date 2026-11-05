@@ -9,8 +9,8 @@ use lumen_core::memory::DeviceArray;
 use lumen_core::Shape;
 
 use super::kernels::{iradon_backproject_kernel, radon_2d_kernel};
+use crate::core::check;
 use crate::core::compact::nonzero_coordinates;
-use crate::core::{check, reduce};
 use crate::error::{OpsError, OpsResult};
 
 /// Output of the 2-D straight-line Hough transform ([`hough_lines`]).

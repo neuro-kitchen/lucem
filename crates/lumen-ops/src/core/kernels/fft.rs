@@ -21,7 +21,6 @@ pub fn dft_axis_kernel<F: lumen_core::element::ImageFloat>(
     let idx = element_position();
     if (idx as u32) < total {
         let e = idx as u32;
-        let k_in = e % inner;
         let freq = (e / inner) % len;
         let base = e - freq * inner;
 

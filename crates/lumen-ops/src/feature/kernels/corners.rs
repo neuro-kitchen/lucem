@@ -1,4 +1,5 @@
 //! Corner detector response kernels: Harris, Shi-Tomasi, Kitchen-Rosenfeld, Förstner, Moravec, and FAST-9.
+#![allow(unused_assignments)]
 
 use cubecl::prelude::*;
 use lumen_core::compute::element_position;
