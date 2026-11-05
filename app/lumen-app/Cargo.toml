@@ -1,0 +1,15 @@
+[package]
+name = "lumen-app"
+description = "Desktop application of lumen (GPUI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "lumen-app"
+path = "src/main.rs"
+
+[dependencies]

@@ -21,12 +21,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
+name = "lumen"
+version = "0.1.0"
+
+[[package]]
+name = "lumen-app"
+version = "0.1.0"
+
+[[package]]
+name = "lumen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lumen-core"
+version = "0.1.0"
+
+[[package]]
+name = "lumen-io"
+version = "0.1.0"
+
+[[package]]
+name = "lumen-ml"
+version = "0.1.0"
+
+[[package]]
+name = "lumen-ops"
+version = "0.1.0"
+
+[[package]]
+name = "lumen-pipeline"
+version = "0.1.0"
+
+[[package]]
 name = "lumen-py"
 version = "0.1.0"
 dependencies = [
  "numpy",
  "pyo3",
 ]
+
+[[package]]
+name = "lumen-view"
+version = "0.1.0"
 
 [[package]]
 name = "matrixmultiply"

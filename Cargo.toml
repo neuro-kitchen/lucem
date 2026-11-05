@@ -1,8 +1,22 @@
 [workspace]
 resolver = "2"
 members = [
+    # Image-processing library
+    "crates/lumen",
+    "crates/lumen-core",
+    "crates/lumen-io",
+    "crates/lumen-ops",
+    "crates/lumen-ml",
+    # Pipeline engine
+    "engine/lumen-pipeline",
+    # Serving
+    "serve/lumen-view",
+    # Front ends
+    "app/lumen-cli",
+    "app/lumen-app",
+    # Bindings
     "bindings/python/lumen-py",
-]   # + crates/lumen-<part>
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +26,14 @@ authors = ["jesusdpa1"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+# Workspace crates
+lumen-core = { path = "crates/lumen-core", version = "0.1.0" }
+lumen-io = { path = "crates/lumen-io", version = "0.1.0" }
+lumen-ops = { path = "crates/lumen-ops", version = "0.1.0" }
+lumen-ml = { path = "crates/lumen-ml", version = "0.1.0" }
+lumen-pipeline = { path = "engine/lumen-pipeline", version = "0.1.0" }
+lumen-view = { path = "serve/lumen-view", version = "0.1.0" }
+
 # Latest stable versions on crates.io 2026-11-05 (cubecl 0.12 / burn 0.23 are pre-releases only);
 # add each to a crate with `<name>.workspace = true`.
 # Compute (as in dsp-kitchen)

@@ -1,0 +1,11 @@
+[package]
+name = "lumen-core"
+description = "Core types and the compute layer of lumen (runtime selection, launch geometry, buffers)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

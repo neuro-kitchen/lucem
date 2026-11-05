@@ -1,0 +1,15 @@
+[package]
+name = "lumen-cli"
+description = "Command-line interface of lumen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "lumen"
+path = "src/main.rs"
+
+[dependencies]
