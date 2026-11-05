@@ -174,7 +174,12 @@ impl PipelineExecutor {
 
         let otsu_level = otsu(client, &current, 64).unwrap_or(0.5 * (s.min + s.max));
         let entropy_bits = shannon_entropy(client, &current, 64, 2.0).unwrap_or(0.0);
-        let sharpness_score = blur_score(client, &current).unwrap_or(0.0);
+        let n_pixels = width * height;
+        let sharpness_score = if n_pixels <= 1_200_000 {
+            blur_score(client, &current).unwrap_or(0.0)
+        } else {
+            0.0
+        };
 
         let contours = if extract_contours {
             marching_squares(client, &current, otsu_level).unwrap_or_default()
@@ -182,11 +187,15 @@ impl PipelineExecutor {
             Vec::new()
         };
 
-        let bin_mask = DeviceArray::<u32>::empty(client, current.shape().clone())?;
-        elementwise::threshold_scalar_into(client, &current, otsu_level, true, &bin_mask)?;
-        let cc = label_components(client, &bin_mask, None)?;
-        let mut regions = if cc.num_labels <= 8192 {
-            region_features(client, &cc.labels, Some(&current)).unwrap_or_default()
+        let mut regions = if n_pixels <= 1_200_000 {
+            let bin_mask = DeviceArray::<u32>::empty(client, current.shape().clone())?;
+            elementwise::threshold_scalar_into(client, &current, otsu_level, true, &bin_mask)?;
+            let cc = label_components(client, &bin_mask, None)?;
+            if cc.num_labels <= 8192 {
+                region_features(client, &cc.labels, Some(&current)).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
         };
