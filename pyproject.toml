@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.15,<2.0"]
+requires = ["maturin>=1.16,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "Fluorescence brain-section analysis in Rust (CubeCL, Burn, GPUI), with a Python SDK"
 readme = "README.md"
 authors = [{ name = "jesusdpa1" }]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
-    "numpy>=2.2",
+    "numpy>=2.5",
 ]
 
 [tool.maturin]
@@ -23,4 +23,4 @@ features = ["extension-module"]
 src = ["lumen_py/lumen_bindings", "lumen_py/lumen"]
 
 [dependency-groups]
-dev = ["maturin>=1.15", "pytest>=9.0", "ruff>=0.16"]
+dev = ["maturin>=1.16", "pytest>=9.2", "ruff>=0.17"]
