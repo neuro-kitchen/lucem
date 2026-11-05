@@ -11,6 +11,8 @@
 
 # Data and outputs (never in git)
 data/
+!**/src/data/
+!**/src/data/**
 .data/
 /data/
 *.ome.zarr/
