@@ -8,4 +8,15 @@ authors.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["wgpu", "cuda", "cpu"]
+wgpu = ["lumen-core/wgpu", "lumen-ops/wgpu"]
+cpu = ["lumen-core/cpu", "lumen-ops/cpu"]
+cuda = ["lumen-core/cuda", "lumen-ops/cuda"]
+hip = ["lumen-core/hip", "lumen-ops/hip"]
+
 [dependencies]
+lumen-core = { workspace = true, default-features = false, features = ["compute"] }
+lumen-io.workspace = true
+lumen-ml.workspace = true
+lumen-ops = { workspace = true, default-features = false }
