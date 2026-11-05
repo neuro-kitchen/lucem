@@ -100,7 +100,12 @@ impl StudioViewModel {
         }
 
         if let Some(ref dev_img) = self.base_device_image {
-            match PipelineExecutor::execute(client, dev_img, &self.state.modifiers, true) {
+            match PipelineExecutor::execute(
+                client,
+                dev_img,
+                &self.state.modifiers,
+                self.state.camera.show_contours,
+            ) {
                 Ok(res) => {
                     analytics_vm.ingest_pipeline_result(&res);
                     self.state.status_banner = format!(
@@ -178,7 +183,7 @@ impl StudioViewModel {
                 if tool == ActiveTool::VectorContour && !self.state.camera.show_contours {
                     self.state.camera.show_contours = true;
                     self.sync_contour_layer_flag();
-                    self.rebuild_display_image();
+                    self.recompute_pipeline(device_service, analytics_vm);
                 }
             }
             StudioEvent::ToggleAnalyticsDrawer => {
@@ -266,7 +271,11 @@ impl StudioViewModel {
             StudioEvent::ToggleContours => {
                 self.state.camera.show_contours = !self.state.camera.show_contours;
                 self.sync_contour_layer_flag();
-                self.rebuild_display_image();
+                if self.state.camera.show_contours {
+                    self.recompute_pipeline(device_service, analytics_vm);
+                } else {
+                    self.rebuild_display_image();
+                }
             }
             StudioEvent::SelectColormap(lut) => {
                 self.state.tonemap.colormap = lut;
@@ -304,7 +313,11 @@ impl StudioViewModel {
                     }
                 }
                 if toggled_contour {
-                    self.rebuild_display_image();
+                    if self.state.camera.show_contours {
+                        self.recompute_pipeline(device_service, analytics_vm);
+                    } else {
+                        self.rebuild_display_image();
+                    }
                 }
             }
             StudioEvent::AddModifier(kind) => {
@@ -333,6 +346,46 @@ impl StudioViewModel {
             StudioEvent::ClearModifiers => {
                 self.state.modifiers.clear();
                 self.recompute_pipeline(device_service, analytics_vm);
+            }
+            StudioEvent::SelectOmeZarrLevel(level) => {
+                if let Some(mut info) = self.state.source_image.ome_zarr.clone() {
+                    info.active_level = level;
+                    self.reload_ome_zarr_view(info, device_service, analytics_vm);
+                }
+            }
+            StudioEvent::SelectOmeZarrChannel(channel) => {
+                if let Some(mut info) = self.state.source_image.ome_zarr.clone() {
+                    info.active_channel = channel;
+                    info.active_label_group = None;
+                    self.reload_ome_zarr_view(info, device_service, analytics_vm);
+                }
+            }
+            StudioEvent::SelectOmeZarrLabelGroup(label_group) => {
+                if let Some(mut info) = self.state.source_image.ome_zarr.clone() {
+                    info.active_label_group = label_group;
+                    self.reload_ome_zarr_view(info, device_service, analytics_vm);
+                }
+            }
+        }
+    }
+
+    fn reload_ome_zarr_view(
+        &mut self,
+        info: lumen_io::OmeZarrContainerInfo,
+        device_service: &DeviceService,
+        analytics_vm: &mut AnalyticsViewModel,
+    ) {
+        let saved_mods = self.state.modifiers.clone();
+        let saved_contours = self.state.camera.show_contours;
+        match lumen_io::load_ome_zarr_with_options(&info) {
+            Ok(img) => {
+                self.state.modifiers = saved_mods;
+                self.state.camera.show_contours = saved_contours;
+                self.load_image(img, device_service, analytics_vm);
+                self.sync_contour_layer_flag();
+            }
+            Err(err) => {
+                self.state.status_banner = format!("OME-Zarr error: {err}");
             }
         }
     }

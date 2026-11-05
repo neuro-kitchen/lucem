@@ -13,6 +13,8 @@ pub enum StartupEvent {
     SelectRailTab(LeftRailTab),
     /// Open native OS file dialog to pick an image (`.png`, `.tif`, `.tiff`, `.jpg`, `.webp`, etc.).
     PromptOpenImageFile,
+    /// Open native OS folder dialog to pick an `.ome.zarr` container directory.
+    PromptOpenZarrFolder,
     /// Load a specific image file path (from recent files or drag-and-drop).
     OpenImagePath(PathBuf),
     /// Create a blank canvas using the current `BlankCanvasSpec` dimensions and background.

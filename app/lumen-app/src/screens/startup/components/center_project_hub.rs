@@ -18,6 +18,7 @@ pub fn render_center_project_hub(
     on_event: Rc<dyn Fn(StartupEvent, &mut Window, &mut App)>,
 ) -> impl IntoElement {
     let on_open_file = on_event.clone();
+    let on_open_zarr = on_event.clone();
     let on_dismiss = on_event.clone();
 
     div()
@@ -75,6 +76,28 @@ pub fn render_center_project_hub(
                         .flex()
                         .items_center()
                         .gap(px(8.0))
+                        .child(
+                            div()
+                                .id("hub-open-zarr-btn")
+                                .cursor_pointer()
+                                .px(px(12.0))
+                                .py(px(7.0))
+                                .rounded(px(6.0))
+                                .bg(palette::accent_cyan_muted())
+                                .border_1()
+                                .border_color(palette::accent_cyan())
+                                .hover(|s| s.opacity(0.92))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .text_size(px(12.0))
+                                .text_color(palette::accent_cyan())
+                                .on_click(move |_, window, cx| {
+                                    on_open_zarr(StartupEvent::PromptOpenZarrFolder, window, cx);
+                                })
+                                .child(Icon::new(IconName::Folder))
+                                .child("Open .ome.zarr..."),
+                        )
                         .child(
                             div()
                                 .id("hub-open-image-btn")

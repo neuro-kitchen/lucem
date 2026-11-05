@@ -85,4 +85,10 @@ pub enum StudioEvent {
     RemoveModifier(u64),
     /// Clear all modifiers from the stack and restore the base raster image.
     ClearModifiers,
+    /// Switch active pyramid level (`s0`, `s1`, `s2`, `s3`) inside an opened `.ome.zarr` container.
+    SelectOmeZarrLevel(String),
+    /// Switch active OME-Zarr channel (`None` = Composite, `Some(c)` = channel `c`).
+    SelectOmeZarrChannel(Option<usize>),
+    /// Switch between primary image pyramid (`None`) and segmentation label group (`Some("cells")`, `Some("nuclei")`).
+    SelectOmeZarrLabelGroup(Option<String>),
 }

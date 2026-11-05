@@ -25,6 +25,7 @@ pub fn render_left_option_rail(
     ];
 
     let on_open = on_event.clone();
+    let on_open_zarr = on_event.clone();
     let on_blank = on_event.clone();
     let backend_str: SharedString = compute_backend.to_string().into();
 
@@ -104,6 +105,31 @@ pub fn render_left_option_rail(
                         })
                         .child(Icon::new(IconName::FolderOpen))
                         .child("Open Image File..."),
+                )
+                // Open .ome.zarr Container Folder button
+                .child(
+                    div()
+                        .id("rail-open-zarr-btn")
+                        .cursor_pointer()
+                        .w_full()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .rounded(px(6.0))
+                        .bg(palette::accent_cyan_muted())
+                        .border_1()
+                        .border_color(palette::accent_cyan())
+                        .hover(|s| s.opacity(0.92))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(8.0))
+                        .text_size(px(12.0))
+                        .text_color(palette::accent_cyan())
+                        .on_click(move |_, window, cx| {
+                            on_open_zarr(StartupEvent::PromptOpenZarrFolder, window, cx);
+                        })
+                        .child(Icon::new(IconName::Folder))
+                        .child("Open .ome.zarr..."),
                 )
                 // Secondary action button: New Blank Canvas
                 .child(

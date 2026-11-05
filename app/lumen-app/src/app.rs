@@ -46,11 +46,17 @@ impl LumenApp {
         }
     }
 
-    /// Loads an image file from disk into the Studio workspace and transitions to `StudioWorkspace`.
+    /// Loads an image file or `.ome.zarr` container from disk into the Studio workspace and transitions
+    /// to `StudioWorkspace`.
     pub fn open_image_from_disk(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         match load_image_file(&path) {
             Ok(img) => {
-                self.container.project_repo.record_recent(path);
+                let recorded_path = img
+                    .ome_zarr
+                    .as_ref()
+                    .map(|z| z.root_path.clone())
+                    .unwrap_or_else(|| path.clone());
+                self.container.project_repo.record_recent(recorded_path);
                 self.startup_vm.refresh_recents(&self.container);
                 self.startup_vm.set_status(None);
                 self.studio_vm
@@ -66,13 +72,34 @@ impl LumenApp {
         cx.notify();
     }
 
-    /// Opens the native OS file picker dialog and loads the selected image into the Studio.
+    /// Opens the native OS file picker dialog and loads the selected image (or `.ome.zarr` file)
+    /// into the Studio.
     pub fn prompt_open_image(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Open Image in Lumen Studio".into()),
+            prompt: Some("Open Image File in Lumen Studio".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(first_path) = paths.into_iter().next() {
+                    let _ = this.update(cx, |app, cx| {
+                        app.open_image_from_disk(first_path, cx);
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Opens the native OS directory picker dialog to select an `.ome.zarr` container directory.
+    pub fn prompt_open_zarr_folder(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select .ome.zarr Container Folder".into()),
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
@@ -103,6 +130,9 @@ impl LumenApp {
             }
             StartupEvent::PromptOpenImageFile => {
                 self.prompt_open_image(cx);
+            }
+            StartupEvent::PromptOpenZarrFolder => {
+                self.prompt_open_zarr_folder(cx);
             }
             StartupEvent::OpenImagePath(path) => {
                 self.open_image_from_disk(path, cx);
