@@ -8,4 +8,16 @@ authors.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["wgpu", "cuda", "cpu"]
+wgpu = ["lumen-core/wgpu", "cubecl/wgpu"]
+cpu = ["lumen-core/cpu", "cubecl/cpu"]
+cuda = ["lumen-core/cuda", "cubecl/cuda"]
+hip = ["lumen-core/hip", "cubecl/hip"]
+
 [dependencies]
+cubecl.workspace = true
+lumen-core = { workspace = true, default-features = false, features = ["compute"] }
+num-traits.workspace = true
+serde.workspace = true
+thiserror.workspace = true
