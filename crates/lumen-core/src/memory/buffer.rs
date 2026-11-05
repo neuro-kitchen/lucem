@@ -1,0 +1,137 @@
+//! Typed device buffers: sizes come from the element type, never from a literal byte count.
+//!
+//! Ported from dsp-kitchen's `dspk-ops/src/core/buffer.rs`. Most code uses
+//! [`DeviceArray`](crate::memory::DeviceArray), which calls these; use them directly only for raw handles.
+
+use cubecl::bytes::Bytes;
+use cubecl::prelude::*;
+use cubecl::server::Handle;
+
+use super::kernels::fill_kernel;
+use crate::compute::{LaunchGeometry, MAX_DEVICE_ELEMENTS};
+use crate::element::ImageFloat;
+
+/// Bytes of `len` elements of `E`, at least one element (runtimes reject empty allocations).
+///
+/// # Panics
+/// If `len` exceeds [`MAX_DEVICE_ELEMENTS`] (kernels index with 32-bit integers): sizes chosen by
+/// users are checked earlier with [`crate::compute::device_elements`], so this is a backstop against
+/// a silent wrap.
+pub fn bytes<E: CubeElement>(len: usize) -> usize {
+    assert!(len <= MAX_DEVICE_ELEMENTS, "device buffer of {len} elements exceeds the 32-bit index limit ({MAX_DEVICE_ELEMENTS})");
+    len.max(1) * size_of::<E>()
+}
+
+/// Uninitialized device buffer of `len` elements of `E`.
+pub fn empty<E: CubeElement>(client: &Client, len: usize) -> Handle {
+    client.empty(bytes::<E>(len))
+}
+
+/// Device copy of `data`.
+pub fn upload<E: CubeElement>(client: &Client, data: &[E]) -> Handle {
+    upload_owned(client, data.to_vec())
+}
+
+/// Device copy of `data`, taking ownership: the bytes move into the transfer without a copy.
+/// `create` with owned bytes: `create_from_slice` copies through a slower general path (≈2–3×
+/// longer for a 92 MB buffer on wgpu and CUDA; dsp-kitchen `tests/bench_upload.rs`).
+pub fn upload_owned<E: CubeElement>(client: &Client, data: Vec<E>) -> Handle {
+    bytes::<E>(data.len());
+    client.create(Bytes::from_elems(data))
+}
+
+/// Writes `data` to the start of the existing device buffer `handle` (which holds at least
+/// `data.len()` elements of `E`): no allocation, enqueued after the work already queued on the
+/// client's stream, so a buffer reused every call is not overwritten before earlier kernels read it.
+pub fn write<E: CubeElement>(client: &Client, handle: &Handle, data: &[E]) {
+    write_owned(client, handle, data.to_vec());
+}
+
+/// [`fn@write`] taking ownership of `data` (useful when it was filled on another thread, e.g. a
+/// read-ahead loader).
+pub fn write_owned<E: CubeElement>(client: &Client, handle: &Handle, data: Vec<E>) {
+    bytes::<E>(data.len());
+    write_bytes(client, handle, Bytes::from_elems(data));
+}
+
+/// Writes `data` to the start of `handle`, narrowed to `data`'s length: a reused buffer is often
+/// larger than the data written into it, and the CPU runtime copies the whole bound range (a write
+/// shorter than its handle panics there; wgpu and CUDA accept it).
+///
+/// # Panics
+/// If `data` is longer than the bytes `handle` addresses.
+pub fn write_bytes(client: &Client, handle: &Handle, data: Bytes) {
+    let (len, used) = (data.len() as u64, handle.size_in_used());
+    assert!(len <= used, "writing {len} bytes into a device buffer of {used}");
+    client.write(&handle.clone().offset_end(used - len), data);
+}
+
+/// Device buffer of `len` zeros, filled on the device (cubecl-std's zero kernel): nothing is
+/// uploaded.
+pub fn zeros<E: CubeElement + Scalar>(client: &Client, len: usize) -> Handle {
+    bytes::<E>(len);
+    cubecl::std::tensor::TensorHandle::zeros(client, [len.max(1)], E::elem_type_native()).handle
+}
+
+/// Device buffer of `len` copies of `value`, filled on the device: nothing is uploaded.
+pub fn filled<F: ImageFloat>(client: &Client, len: usize, value: F) -> Handle {
+    let out = empty::<F>(client, len);
+    if len > 0 {
+        let geom = LaunchGeometry::elementwise(client, len);
+        // SAFETY: `out` holds `len` elements of `F`
+        unsafe {
+            fill_kernel::launch::<F>(client, geom.cube_count, geom.cube_dim, BufferArg::from_raw_parts(out.clone(), len), value, len as u32);
+        }
+    }
+    out
+}
+
+/// Host copy of a device buffer of `E` (waits for the queued work that writes it).
+pub fn download<E: CubeElement>(client: &Client, handle: Handle) -> Vec<E> {
+    E::from_bytes(&client.read_one_unchecked(handle)).to_vec()
+}
+
+/// Host copy of the first `len` elements of `E` of a device buffer: only those bytes are read, so a
+/// buffer sized for the largest call costs only the current call's transfer.
+pub fn download_prefix<E: CubeElement>(client: &Client, handle: Handle, len: usize) -> Vec<E> {
+    download_range(client, handle, 0, len)
+}
+
+/// Host copy of elements `start .. start + len` of `E` of a device buffer: only those bytes are read.
+pub fn download_range<E: CubeElement>(client: &Client, handle: Handle, start: usize, len: usize) -> Vec<E> {
+    let used = handle.size_in_used();
+    let (from, want) = ((start * size_of::<E>()) as u64, (len * size_of::<E>()) as u64);
+    assert!(from + want <= used, "elements {start}..{} exceed the buffer's {used} bytes", start + len);
+    let mut out = download::<E>(client, handle.offset_start(from).offset_end(used - from - want));
+    out.truncate(len);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime_test;
+
+    fn fills_every_element(client: &Client) {
+        // Not a multiple of any cube size, so the last cube is partial
+        let len = 1_000_003;
+        let v: Vec<f32> = download(client, filled::<f32>(client, len, f32::MAX));
+        assert_eq!(v.len(), len);
+        assert!(v.iter().all(|&x| x == f32::MAX), "{}", client.name());
+    }
+    runtime_test!(test_filled, fills_every_element);
+
+    /// A chunk shorter than the reused buffer it is written into: only its own elements change, on
+    /// every runtime (the CPU runtime once panicked on the length mismatch).
+    fn short_write_into_larger_buffer(client: &Client) {
+        let handle = upload::<f32>(client, &[7.0; 100]);
+        write(client, &handle, &[1.0f32; 10]);
+        write_owned(client, &handle, vec![2.0f32; 3]);
+        let v: Vec<f32> = download(client, handle.clone());
+        assert_eq!(&v[..3], &[2.0; 3], "{}", client.name());
+        assert_eq!(&v[3..10], &[1.0; 7], "{}", client.name());
+        assert!(v[10..].iter().all(|&x| x == 7.0), "{}", client.name());
+        assert_eq!(download_range::<f32>(client, handle, 8, 4), vec![1.0, 1.0, 7.0, 7.0], "{}", client.name());
+    }
+    runtime_test!(test_short_write, short_write_into_larger_buffer);
+}

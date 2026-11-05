@@ -46,3 +46,41 @@ pyo3 = { version = "0.30.1" }
 numpy = "0.30.0"
 # UI: GPUI through gpui-kit (re-exports gpui, gpui-base, gpui-component)
 gpui-kit = "0.9.0"
+# Common
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+num-traits = "0.2.19"
+
+# The one development build (as in dsp-kitchen): tests, benchmarks, the CLI and the Python extension
+# use `--profile validate`. Our crates lightly optimized, incremental, with debug assertions and
+# overflow checks; dependencies (CubeCL, wgpu, …) fully optimized and cached. Kernels are compiled by
+# CubeCL at run time, so device timings do not depend on this profile.
+[profile.validate]
+inherits = "release"
+opt-level = 1
+codegen-units = 256
+incremental = true
+debug-assertions = true
+overflow-checks = true
+debug = "line-tables-only"
+
+[profile.validate.package."*"]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+# Line tables only (panics and backtraces still name file and line): full debug info filled
+# dsp-kitchen's target/ with 363 GB. For a debugger session: CARGO_PROFILE_DEV_DEBUG=full.
+[profile.dev]
+debug = "line-tables-only"
+
+# wgpu-core's lock tracing (debug assertions only) aborts when a CubeCL device runner shuts down at
+# exit (lumen-core `shutdown_devices`).
+[profile.dev.package.wgpu-core]
+debug-assertions = false
+
+# wgpu-types picks the instance flags: with debug assertions, `InstanceFlags::default()` turns on
+# the Vulkan validation layer, whose device teardown raced NVIDIA's shader-compiler threads at exit.
+# Validation stays opt-in (cubecl-wgpu `vulkan-validate`).
+[profile.dev.package.wgpu-types]
+debug-assertions = false

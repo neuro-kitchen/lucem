@@ -7,6 +7,7 @@
 .refactoring
 .notepad
 .docs-old/
+.code-guide/
 
 # Data and outputs (never in git)
 data/
