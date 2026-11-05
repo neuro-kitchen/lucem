@@ -13,12 +13,24 @@ pub enum StudioEvent {
     OpenProjectHub,
     /// Open the native OS file picker to load a new image into the Studio.
     PromptOpenImage,
+    /// Open the native OS folder picker to load an `.ome.zarr` container into the Studio.
+    PromptOpenZarrFolder,
     /// Load a dropped or selected file path directly into the Studio.
     LoadImageFile(PathBuf),
-    /// Switch the Blender-style top workspace mode tab (`CraftStudio`, `NodePipeline`, `AnalyticsLab`).
+    /// Toggle the top-bar `Operations ▾` dropdown menu open or closed.
+    ToggleOperationsMenu,
+    /// Close the top-bar `Operations ▾` dropdown menu.
+    CloseOperationsMenu,
+    /// Switch the Blender-style top workspace mode tab (`Compositing`, `Vector & Paint`, `RegionProps`).
     SwitchWorkspaceMode(WorkspaceMode),
-    /// Switch the active left-shelf viewport tool (`ExplorePan`, `ZoomLens`, `PixelProbe`, `VectorContour`).
+    /// Switch the active right-shelf viewport tool.
     SelectTool(ActiveTool),
+    /// Adjust the active brush radius in pixels.
+    AdjustBrushRadius(f32),
+    /// Adjust the active brush strength / opacity (`0.05..=1.0`).
+    AdjustBrushStrength(f32),
+    /// Adjust the active vector stroke width in pixels.
+    AdjustStrokeWidth(f32),
     /// Toggle the bottom Polars/Arrow Analytics Drawer open or closed.
     ToggleAnalyticsDrawer,
     /// Zoom in by a discrete step around the viewport center.
@@ -35,21 +47,21 @@ pub enum StudioEvent {
         rel_x: f32,
         rel_y: f32,
     },
-    /// Begin click-and-drag panning at viewport coordinates `(x, y)`.
+    /// Begin click-and-drag panning or painting at viewport coordinates `(x, y)`.
     BeginPan {
         x: f32,
         y: f32,
     },
-    /// Continue click-and-drag panning at viewport coordinates `(x, y)` and update pixel probe.
+    /// Continue click-and-drag panning or painting at viewport coordinates `(x, y)` and update pixel probe.
     PointerMove {
         x: f32,
         y: f32,
         view_w: f32,
         view_h: f32,
     },
-    /// End click-and-drag panning.
+    /// End click-and-drag panning or painting.
     EndPan,
-    /// Click on the viewport canvas at `(x, y)` (used when `ZoomLens` or `VectorContour` tool is active).
+    /// Click on the viewport canvas at `(x, y)`.
     CanvasClick {
         x: f32,
         y: f32,
@@ -70,21 +82,23 @@ pub enum StudioEvent {
     ToggleInvert,
     /// Reset display tonemap settings (`exposure = 1.0`, `gamma = 1.0`, `invert = false`).
     ResetTonemap,
-    /// Toggle visibility of a layer in the ArtCraft layer stack.
+    /// Toggle visibility of a layer in the layer stack.
     ToggleLayerVisibility(u64),
-    /// Append a new non-destructive GPU modifier to the Blender-style modifier stack.
+    /// Append a new non-destructive GPU modifier to the Operations Tree.
     AddModifier(ModifierKind),
-    /// Enable or disable a modifier node in the stack.
+    /// Enable or disable a modifier node in the Operations Tree.
     ToggleModifier(u64),
     /// Adjust a modifier's primary parameter by `delta`.
     AdjustModifierPrimary {
         id: u64,
         delta: f64,
     },
-    /// Remove a modifier node from the stack.
+    /// Remove a modifier node from the Operations Tree.
     RemoveModifier(u64),
-    /// Clear all modifiers from the stack and restore the base raster image.
+    /// Clear all modifiers from the Operations Tree and restore the base raster image.
     ClearModifiers,
+    /// Toggle automatic zoom-based pyramid level switching (`Auto-LOD`) on an `.ome.zarr` container.
+    ToggleOmeZarrAutoPyramid,
     /// Switch active pyramid level (`s0`, `s1`, `s2`, `s3`) inside an opened `.ome.zarr` container.
     SelectOmeZarrLevel(String),
     /// Switch active OME-Zarr channel (`None` = Composite, `Some(c)` = channel `c`).
