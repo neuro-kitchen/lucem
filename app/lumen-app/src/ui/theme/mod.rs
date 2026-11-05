@@ -1,132 +1,141 @@
-//! Dark pro-studio color palette (ArtCraft × VectorCraft × Blender obsidian theme).
+//! Blender 4.x neutral dark charcoal theme (`palette`).
+//!
+//! Uses strictly neutral dark 1px recessed borders (`#111111` / `#1a1a1a`) and matte charcoal
+//! surfaces (`#141414`, `#1d1d1d`, `#242424`, `#2b2b2b`, `#333333`) with Blender's `#4772b3`
+//! selection fill — never colored/neon card edges.
 
 use gpui_kit::{rgb, rgba, Hsla};
 
 pub mod palette {
     use super::*;
 
-    /// Deepest canvas void background (`#0b0d12`).
+    /// Deepest viewport void background (`#141414`).
     pub fn canvas_bg() -> Hsla {
-        rgb(0x0b0d12).into()
+        rgb(0x141414).into()
     }
 
-    /// Subtle checkerboard/grid line on the blank canvas (`#151922`).
+    /// Subtle dark viewport grid (`#181818`).
     pub fn canvas_grid() -> Hsla {
-        rgb(0x151922).into()
+        rgb(0x181818).into()
     }
 
-    /// Primary panel/dock surface (`#12151e`).
+    /// Primary editor/outliner panel surface (`#242424`).
     pub fn panel_bg() -> Hsla {
-        rgb(0x12151e).into()
+        rgb(0x242424).into()
     }
 
-    /// Elevated card or floating modal surface (`#181c28`).
+    /// Subpanel / collapsible region surface (`#2b2b2b`).
     pub fn surface_card() -> Hsla {
-        rgb(0x181c28).into()
+        rgb(0x2b2b2b).into()
     }
 
-    /// Hovered or active card surface (`#202636`).
+    /// Standard Blender button / widget fill (`#333333`).
+    pub fn widget_bg() -> Hsla {
+        rgb(0x333333).into()
+    }
+
+    /// Hovered button or subpanel surface (`#3d3d3d`).
     pub fn surface_hover() -> Hsla {
-        rgb(0x202636).into()
+        rgb(0x3d3d3d).into()
     }
 
-    /// Semi-transparent glass backdrop (`rgba(14, 17, 25, 0.86)`).
+    /// Semi-transparent backdrop (`rgba(20, 20, 20, 0.90)`).
     pub fn glass_overlay() -> Hsla {
-        rgba(0x0e1119dc).into()
+        rgba(0x141414e6).into()
     }
 
-    /// Hairline border color (`#262c3d`).
+    /// Blender 1px recessed dark border (`#111111`).
     pub fn border_subtle() -> Hsla {
-        rgb(0x262c3d).into()
+        rgb(0x111111).into()
     }
 
-    /// Highlighted border color (`#3b82f6`).
+    /// Neutral subpanel divider (`#1a1a1a` — never colored).
     pub fn border_accent() -> Hsla {
-        rgb(0x3b82f6).into()
+        rgb(0x1a1a1a).into()
     }
 
-    /// Primary electric blue accent (`#3b82f6`).
+    /// Blender 4.x active selection blue (`#4772b3`).
     pub fn accent_blue() -> Hsla {
-        rgb(0x3b82f6).into()
+        rgb(0x4772b3).into()
     }
 
-    /// Soft accent fill (`rgba(59, 130, 246, 0.18)`).
+    /// Neutral widget fill (`#333333`).
     pub fn accent_blue_soft() -> Hsla {
-        rgba(0x3b82f62e).into()
+        rgb(0x333333).into()
     }
 
-    /// Emerald/cyan scientific accent (`#10b981`).
+    /// Neutral indicator text (`#cccccc`).
     pub fn accent_emerald() -> Hsla {
-        rgb(0x10b981).into()
+        rgb(0xcccccc).into()
     }
 
-    /// Amber Blender modifier accent (`#f59e0b`).
+    /// Neutral parameter badge text (`#c2c2c2`).
     pub fn accent_amber() -> Hsla {
-        rgb(0xf59e0b).into()
+        rgb(0xc2c2c2).into()
     }
 
-    /// Primary crisp text (`#f1f5f9`).
+    /// Primary crisp text (`#e5e5e5`).
     pub fn text_primary() -> Hsla {
-        rgb(0xf1f5f9).into()
+        rgb(0xe5e5e5).into()
     }
 
-    /// Secondary muted text (`#94a3b8`).
+    /// Secondary muted text (`#999999`).
     pub fn text_secondary() -> Hsla {
-        rgb(0x94a3b8).into()
+        rgb(0x999999).into()
     }
 
-    /// Dimmed metadata / ruler text (`#64748b`).
+    /// Dimmed metadata / label text (`#6e6e6e`).
     pub fn text_dim() -> Hsla {
-        rgb(0x64748b).into()
+        rgb(0x6e6e6e).into()
     }
 
-    /// Deepest canvas void background (`#0b0d12`).
+    /// Deepest canvas void background (`#141414`).
     pub fn canvas_void() -> Hsla {
         canvas_bg()
     }
 
-    /// Alternate dark checkerboard cell (`#111520`).
+    /// Alternate dark viewport surface (`#181818`).
     pub fn canvas_checker_a() -> Hsla {
-        rgb(0x111520).into()
+        rgb(0x181818).into()
     }
 
-    /// Top/bottom header bar background (`#0e1118`).
+    /// Top/bottom Blender header bar background (`#1d1d1d`).
     pub fn header_bg() -> Hsla {
-        rgb(0x0e1118).into()
+        rgb(0x1d1d1d).into()
     }
 
-    /// Card background alias (`#181c28`).
+    /// Subpanel background alias (`#2b2b2b`).
     pub fn card_bg() -> Hsla {
         surface_card()
     }
 
-    /// Hovered card background alias (`#202636`).
+    /// Hovered widget background alias (`#3d3d3d`).
     pub fn card_hover_bg() -> Hsla {
         surface_hover()
     }
 
-    /// Stronger border color (`#334155`).
+    /// Neutral dark divider (`#1a1a1a` — never colored).
     pub fn border_strong() -> Hsla {
-        rgb(0x334155).into()
+        rgb(0x1a1a1a).into()
     }
 
-    /// Semi-transparent modal scrim (`rgba(11, 13, 18, 0.84)`).
+    /// Semi-transparent modal scrim (`rgba(14, 14, 14, 0.85)`).
     pub fn modal_scrim() -> Hsla {
-        rgba(0x0b0d12d6).into()
+        rgba(0x0e0e0ed9).into()
     }
 
-    /// Bright cyan scientific accent (`#22d3ee`).
+    /// Neutral bright label text (`#d8d8d8`).
     pub fn accent_cyan() -> Hsla {
-        rgb(0x22d3ee).into()
+        rgb(0xd8d8d8).into()
     }
 
-    /// Muted cyan fill (`rgba(34, 211, 238, 0.16)`).
+    /// Neutral dark button fill (`#303030`).
     pub fn accent_cyan_muted() -> Hsla {
-        rgba(0x22d3ee29).into()
+        rgb(0x303030).into()
     }
 
-    /// Coral destructive/reset accent (`#f43f5e`).
+    /// Muted close/remove button red (`#b33a3a`).
     pub fn accent_coral() -> Hsla {
-        rgb(0xf43f5e).into()
+        rgb(0xb33a3a).into()
     }
 }
