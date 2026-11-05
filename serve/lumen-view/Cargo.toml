@@ -9,3 +9,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+gpui-kit.workspace = true
+image.workspace = true
+lumen-core = { workspace = true, default-features = false, features = ["compute"] }
+serde.workspace = true
+smallvec.workspace = true
