@@ -2,7 +2,7 @@
 
 use cubecl::prelude::*;
 use lumen_core::compute::LaunchGeometry;
-use lumen_core::element::{cast, ImageFloat, ImageInt};
+use lumen_core::element::{cast as scalar_cast, ImageFloat, ImageInt};
 use lumen_core::memory::DeviceArray;
 
 use super::check;
@@ -66,8 +66,8 @@ pub fn scale_offset_into<F: ImageFloat>(
             geom.cube_dim,
             input.binding(),
             output.binding(),
-            cast::<F>(scale),
-            cast::<F>(offset),
+            scalar_cast::<F>(scale),
+            scalar_cast::<F>(offset),
             input.len() as u32,
         );
     }
@@ -95,8 +95,8 @@ pub fn clip_into<F: ImageFloat>(
             geom.cube_dim,
             input.binding(),
             output.binding(),
-            cast::<F>(lo),
-            cast::<F>(hi),
+            scalar_cast::<F>(lo),
+            scalar_cast::<F>(hi),
             input.len() as u32,
         );
     }
@@ -131,12 +131,12 @@ pub fn rescale_clip_into<F: ImageFloat>(
             geom.cube_dim,
             input.binding(),
             output.binding(),
-            cast::<F>(in_range.0),
-            cast::<F>(in_range.1),
-            cast::<F>(scale),
-            cast::<F>(offset),
-            cast::<F>(out_range.0.min(out_range.1)),
-            cast::<F>(out_range.0.max(out_range.1)),
+            scalar_cast::<F>(in_range.0),
+            scalar_cast::<F>(in_range.1),
+            scalar_cast::<F>(scale),
+            scalar_cast::<F>(offset),
+            scalar_cast::<F>(out_range.0.min(out_range.1)),
+            scalar_cast::<F>(out_range.0.max(out_range.1)),
             input.len() as u32,
         );
     }
@@ -220,7 +220,7 @@ pub fn uint_to_unit_float_into<Src: ImageInt, F: ImageFloat>(
             geom.cube_dim,
             input.binding(),
             output.binding(),
-            cast::<F>(1.0 / max_val),
+            scalar_cast::<F>(1.0 / max_val),
             input.len() as u32,
         );
     }
@@ -248,7 +248,7 @@ pub fn unit_float_to_uint_into<F: ImageFloat, Dst: ImageInt>(
             geom.cube_dim,
             input.binding(),
             output.binding(),
-            cast::<F>(max_val),
+            scalar_cast::<F>(max_val),
             input.len() as u32,
         );
     }
@@ -333,7 +333,7 @@ pub fn compare_threshold_scalar_into<F: ImageFloat, Out: Numeric + CubeElement>(
             geom.cube_count,
             geom.cube_dim,
             input.binding(),
-            cast::<F>(threshold),
+            scalar_cast::<F>(threshold),
             output.binding(),
             input.len() as u32,
             inclusive,
@@ -368,9 +368,9 @@ pub fn linear_combination_into<F: ImageFloat>(
             a.binding(),
             b.binding(),
             output.binding(),
-            cast::<F>(alpha),
-            cast::<F>(beta),
-            cast::<F>(bias),
+            scalar_cast::<F>(alpha),
+            scalar_cast::<F>(beta),
+            scalar_cast::<F>(bias),
             a.len() as u32,
         );
     }

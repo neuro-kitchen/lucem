@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Computes `out[i] = (a[i] - b[i])^2`.
 #[cube(launch)]
-pub fn sq_diff_kernel<F: Float>(a: &[F], b: &[F], out: &mut [F], len: u32) {
+pub fn sq_diff_kernel<F: lumen_core::element::ImageFloat>(a: &[F], b: &[F], out: &mut [F], len: u32) {
     let i = element_position();
     if (i as u32) < len {
         let d = a[i] - b[i];
@@ -15,7 +15,7 @@ pub fn sq_diff_kernel<F: Float>(a: &[F], b: &[F], out: &mut [F], len: u32) {
 
 /// Computes `out[i] = a[i] * b[i]`.
 #[cube(launch)]
-pub fn mul_kernel<F: Float>(a: &[F], b: &[F], out: &mut [F], len: u32) {
+pub fn mul_kernel<F: lumen_core::element::ImageFloat>(a: &[F], b: &[F], out: &mut [F], len: u32) {
     let i = element_position();
     if (i as u32) < len {
         out[i] = a[i] * b[i];
@@ -26,7 +26,7 @@ pub fn mul_kernel<F: Float>(a: &[F], b: &[F], out: &mut [F], len: u32) {
 /// `(ux, uy, uxx, uyy, uxy)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn ssim_map_kernel<F: Float>(
+pub fn ssim_map_kernel<F: lumen_core::element::ImageFloat>(
     ux: &[F],
     uy: &[F],
     uxx: &[F],

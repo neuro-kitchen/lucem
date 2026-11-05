@@ -6,7 +6,7 @@ use lumen_core::compute::element_position;
 
 /// Pointwise stabilized ratio `out[i] = obs[i] / max(est_conv[i], eps)` for Richardson-Lucy.
 #[cube(launch)]
-pub fn rl_div_clamp_kernel<F: Float>(
+pub fn rl_div_clamp_kernel<F: lumen_core::element::ImageFloat>(
     obs: &[F],
     est_conv: &[F],
     out: &mut [F],
@@ -24,7 +24,7 @@ pub fn rl_div_clamp_kernel<F: Float>(
 /// Pointwise multiplicative update `est_out[i] = est_in[i] * corr[i]`, optionally clamping to
 /// `[-1.0, 1.0]` when `clip` is enabled.
 #[cube(launch)]
-pub fn rl_mul_clamp_kernel<F: Float>(
+pub fn rl_mul_clamp_kernel<F: lumen_core::element::ImageFloat>(
     est_in: &[F],
     corr: &[F],
     est_out: &mut [F],
@@ -46,7 +46,7 @@ pub fn rl_mul_clamp_kernel<F: Float>(
 /// `X(f) = (conj(H(f)) * Y(f)) / (|H(f)|^2 + balance * |L(f)|^2)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn wiener_freq_filter_kernel<F: Float>(
+pub fn wiener_freq_filter_kernel<F: lumen_core::element::ImageFloat>(
     y_re: &[F],
     y_im: &[F],
     h_re: &[F],
@@ -76,7 +76,7 @@ pub fn wiener_freq_filter_kernel<F: Float>(
 /// PSF center `(k_h / 2, k_w / 2)` wrapped to `(0, 0)` for circular FFT convolution.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn fft_shift_2d_kernel<F: Float>(
+pub fn fft_shift_2d_kernel<F: lumen_core::element::ImageFloat>(
     psf: &[F],
     padded: &mut [F],
     height: u32,

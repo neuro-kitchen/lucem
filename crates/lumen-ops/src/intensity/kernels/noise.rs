@@ -19,7 +19,7 @@ fn normal_f32(seed: u32, idx: u32) -> f32 {
 
 /// Add additive Gaussian noise `x + mean + std * N(0, 1)`.
 #[cube(launch)]
-pub(crate) fn add_gaussian_noise_kernel<F: Float>(
+pub(crate) fn add_gaussian_noise_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     seed: u32,
@@ -41,7 +41,7 @@ pub(crate) fn add_gaussian_noise_kernel<F: Float>(
 
 /// Add multiplicative speckle noise `x + x * (mean + std * N(0, 1))`.
 #[cube(launch)]
-pub(crate) fn add_speckle_noise_kernel<F: Float>(
+pub(crate) fn add_speckle_noise_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     seed: u32,
@@ -64,7 +64,7 @@ pub(crate) fn add_speckle_noise_kernel<F: Float>(
 
 /// Add impulse (salt, pepper, or salt-and-pepper) noise.
 #[cube(launch)]
-pub(crate) fn add_impulse_noise_kernel<F: Float>(
+pub(crate) fn add_impulse_noise_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     seed: u32,
@@ -92,7 +92,7 @@ pub(crate) fn add_impulse_noise_kernel<F: Float>(
 
 /// Add Poisson shot noise parameterized by `scale` (photons at intensity 1.0).
 #[cube(launch)]
-pub(crate) fn add_poisson_noise_kernel<F: Float>(
+pub(crate) fn add_poisson_noise_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     seed: u32,

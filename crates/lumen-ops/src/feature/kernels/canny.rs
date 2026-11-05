@@ -9,7 +9,7 @@ use lumen_core::compute::element_position;
 /// - `2`: vertical (`|gy| > |gx|` with `|gx| <= tan(22.5°) |gy|`)
 /// - `3`: anti-diagonal (`gx` and `gy` have opposite signs, `135°`)
 #[cube(launch)]
-pub fn canny_grad_dir_kernel<F: Float>(
+pub fn canny_grad_dir_kernel<F: lumen_core::element::ImageFloat>(
     gy: &[F],
     gx: &[F],
     mag: &mut [F],
@@ -41,7 +41,7 @@ pub fn canny_grad_dir_kernel<F: Float>(
 
 /// Non-maximum suppression along the quantized gradient direction in `[height, width]`.
 #[cube(launch)]
-pub fn canny_nms_kernel<F: Float>(
+pub fn canny_nms_kernel<F: lumen_core::element::ImageFloat>(
     mag: &[F],
     sector: &[u32],
     nms: &mut [F],

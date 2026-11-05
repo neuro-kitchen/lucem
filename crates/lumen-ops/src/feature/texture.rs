@@ -170,7 +170,11 @@ pub fn glcm<I: ImageInt>(
         });
     }
     let (h, w) = (image.dims()[0], image.dims()[1]);
-    let host: Vec<usize> = image.to_host(client).into_iter().map(|v| to_f64(v) as usize).collect();
+    let host: Vec<usize> = image
+        .to_host(client)
+        .into_iter()
+        .map(|v| num_traits::ToPrimitive::to_usize(&v).unwrap_or(0))
+        .collect();
     if let Some(&bad) = host.iter().find(|&&v| v >= levels) {
         return Err(OpsError::InvalidParameter {
             name: "levels",

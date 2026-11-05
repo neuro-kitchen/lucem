@@ -9,7 +9,7 @@ use lumen_core::compute::{
 /// Reduces each row of a `[rows, cols]` matrix to `(sum, min, max)` using one cube per row and
 /// pairwise tree reduction in shared memory. Accumulates sums in `f32` for precision.
 #[cube(launch)]
-pub fn row_sum_min_max_kernel<F: Float>(
+pub fn row_sum_min_max_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     out_sum: &mut [F],
     out_min: &mut [F],
@@ -67,7 +67,7 @@ pub fn row_sum_min_max_kernel<F: Float>(
 /// Reduces each row of `[rows, cols]` to `(mean, variance)` using Welford's online algorithm per unit
 /// and Chan's parallel pairwise variance merge across the cube in `f32`.
 #[cube(launch)]
-pub fn row_mean_var_kernel<F: Float>(
+pub fn row_mean_var_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     out_mean: &mut [F],
     out_var: &mut [F],
@@ -133,7 +133,7 @@ pub fn row_mean_var_kernel<F: Float>(
 
 /// Reduces each row of `[rows, cols]` to `(argmin, argmax)` with first-index tie breaking.
 #[cube(launch)]
-pub fn row_argmin_argmax_kernel<F: Float>(
+pub fn row_argmin_argmax_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     out_argmin: &mut [u32],
     out_argmax: &mut [u32],
@@ -152,9 +152,9 @@ pub fn row_argmin_argmax_kernel<F: Float>(
         let share = row_share(cols, units);
         let base = row * cols;
         let mut mn_val = positive_infinity::<F>();
-        let mut mn_idx = u32::MAX;
+        let mut mn_idx = 0xFFFF_FFFFu32;
         let mut mx_val = negative_infinity::<F>();
-        let mut mx_idx = u32::MAX;
+        let mut mx_idx = 0xFFFF_FFFFu32;
         let mut c = share.start;
         while c < share.end {
             let v = input[(base + c) as usize];
@@ -205,7 +205,7 @@ pub fn row_argmin_argmax_kernel<F: Float>(
 
 /// Reduces along an arbitrary axis seen as `[outer, len, inner]` (`mode`: 0 = sum, 1 = mean, 2 = min, 3 = max).
 #[cube(launch)]
-pub fn reduce_axis_kernel<F: Float>(
+pub fn reduce_axis_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     len: u32,

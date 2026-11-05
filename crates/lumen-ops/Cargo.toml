@@ -16,8 +16,10 @@ cuda = ["lumen-core/cuda", "cubecl/cuda"]
 hip = ["lumen-core/hip", "cubecl/hip"]
 
 [dependencies]
+arrow.workspace = true
 cubecl.workspace = true
 lumen-core = { workspace = true, default-features = false, features = ["compute"] }
 num-traits.workspace = true
+polars.workspace = true
 serde.workspace = true
 thiserror.workspace = true

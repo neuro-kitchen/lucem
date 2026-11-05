@@ -8,7 +8,7 @@ use lumen_core::compute::element_position;
 /// Works for arbitrary axis lengths `len` (including prime and non-power-of-two sizes).
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn dft_axis_kernel<F: Float>(
+pub fn dft_axis_kernel<F: lumen_core::element::ImageFloat>(
     re_in: &[F],
     im_in: &[F],
     re_out: &mut [F],
@@ -25,7 +25,7 @@ pub fn dft_axis_kernel<F: Float>(
         let freq = (e / inner) % len;
         let base = e - freq * inner;
 
-        let sign = if comptime!(inverse) { 1.0f32 } else { -1.0f32 };
+        let sign = if comptime!(inverse) { f32::new(1.0) } else { f32::new(-1.0) };
         let two_pi_over_n = sign * 6.283_185_5f32 / (len as f32);
         let mut sum_re = 0.0f32;
         let mut sum_im = 0.0f32;
@@ -41,7 +41,7 @@ pub fn dft_axis_kernel<F: Float>(
             sum_im += xr * s + xi * c;
             n += 1u32;
         }
-        let scale = if comptime!(inverse) { 1.0f32 / (len as f32) } else { 1.0f32 };
+        let scale = if comptime!(inverse) { f32::new(1.0) / (len as f32) } else { f32::new(1.0) };
         re_out[idx] = F::cast_from(sum_re * scale);
         im_out[idx] = F::cast_from(sum_im * scale);
     }
@@ -50,7 +50,7 @@ pub fn dft_axis_kernel<F: Float>(
 /// Complex pointwise multiplication: `(ar + i ai) * (br + i bi)` (or conjugate of `b` when `conj_b`).
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn complex_mul_kernel<F: Float>(
+pub fn complex_mul_kernel<F: lumen_core::element::ImageFloat>(
     a_re: &[F],
     a_im: &[F],
     b_re: &[F],

@@ -8,7 +8,7 @@ use lumen_core::compute::element_position;
 /// accumulated via elementwise `max` into `output`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn frangi_2d_scale_kernel<F: Float>(
+pub fn frangi_2d_scale_kernel<F: lumen_core::element::ImageFloat>(
     eig1: &[F],
     eig2: &[F],
     output: &mut [F],
@@ -46,7 +46,7 @@ pub fn frangi_2d_scale_kernel<F: Float>(
 /// 2-D Sato tubeness response from Hessian eigenvalues $(\lambda_1, \lambda_2)$ scaled by $\sigma^2$,
 /// accumulated via elementwise `max` into `output`.
 #[cube(launch)]
-pub fn sato_2d_scale_kernel<F: Float>(
+pub fn sato_2d_scale_kernel<F: lumen_core::element::ImageFloat>(
     eig1: &[F],
     eig2: &[F],
     output: &mut [F],
@@ -73,7 +73,7 @@ pub fn sato_2d_scale_kernel<F: Float>(
 /// 2-D Meijering neuriteness response from Hessian eigenvalues $(\lambda_1, \lambda_2)$ via modified
 /// eigenvalues $\tilde{\lambda}_1 = \lambda_1 - \frac{1}{3}\lambda_2$, $\tilde{\lambda}_2 = \lambda_2 - \frac{1}{3}\lambda_1$.
 #[cube(launch)]
-pub fn meijering_2d_scale_kernel<F: Float>(
+pub fn meijering_2d_scale_kernel<F: lumen_core::element::ImageFloat>(
     eig1: &[F],
     eig2: &[F],
     output: &mut [F],

@@ -6,7 +6,7 @@ use lumen_core::compute::element_position;
 /// Bins float values in `[min_val, max_val]` into `nbins` equal-width buckets (clamping the upper
 /// endpoint `max_val` into `nbins - 1`, matching NumPy / scikit-image `histogram` edge rules).
 #[cube(launch)]
-pub fn histogram_float_kernel<F: Float>(
+pub fn histogram_float_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     bins: &mut [Atomic<u32>],
     min_val: F,
@@ -30,7 +30,7 @@ pub fn histogram_float_kernel<F: Float>(
 
 /// Direct integer histogram for unsigned integer values in `0..nbins`.
 #[cube(launch)]
-pub fn histogram_uint_kernel<I: Int>(
+pub fn histogram_uint_kernel<I: lumen_core::element::ImageInt>(
     input: &[I],
     bins: &mut [Atomic<u32>],
     nbins: u32,

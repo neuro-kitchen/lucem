@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Render integer labels `[H, W]` into RGB `[H, W, 3]` blended over a grayscale background `[H, W]`.
 #[cube(launch)]
-pub(crate) fn colorize_labels_gray_kernel<F: Float>(
+pub(crate) fn colorize_labels_gray_kernel<F: lumen_core::element::ImageFloat>(
     labels: &[u32],
     bg_gray: &[F],
     palette: &[F],

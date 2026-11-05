@@ -6,7 +6,7 @@ use lumen_core::compute::element_position;
 /// Initializes per-pixel steepest-descent neighbor pointers for a 2-D relief map (`[h, w]`) when a
 /// pixel has no initial marker (`markers[i] == 0`).
 #[cube(launch)]
-pub fn watershed_steepest_init_2d_kernel<F: Float>(
+pub fn watershed_steepest_init_2d_kernel<F: lumen_core::element::ImageFloat>(
     relief: &[F],
     markers: &[u32],
     next_idx: &mut [u32],

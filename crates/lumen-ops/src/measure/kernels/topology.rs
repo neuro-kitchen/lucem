@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Computes per-pixel 2-D contour configuration codes (`0..16`) for 2x2 cells.
 #[cube(launch)]
-pub fn perimeter_2d_contribs_kernel<E: Numeric, F: Float>(
+pub fn perimeter_2d_contribs_kernel<E: Numeric, F: lumen_core::element::ImageFloat>(
     input: &[E],
     output: &mut [F],
     h: u32,
@@ -63,7 +63,7 @@ pub fn perimeter_2d_contribs_kernel<E: Numeric, F: Float>(
 /// `op`: `0 = Sum`, `1 = Mean`, `2 = Min`, `3 = Max`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn block_reduce_2d_kernel<F: Float>(
+pub fn block_reduce_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     in_h: u32,
@@ -125,7 +125,7 @@ pub fn block_reduce_2d_kernel<F: Float>(
 
 /// Discrete 2-D Laplacian response (`4*center - up - down - left - right`) with nearest clamping.
 #[cube(launch)]
-pub fn laplacian_energy_2d_kernel<F: Float>(
+pub fn laplacian_energy_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     h: u32,

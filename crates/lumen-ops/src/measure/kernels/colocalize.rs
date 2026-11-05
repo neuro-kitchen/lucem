@@ -7,7 +7,7 @@ use lumen_core::compute::element_position;
 /// `a2[i] = (a[i] - ma)^2`, and `b2[i] = (b[i] - mb)^2`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn colocalize_terms_kernel<F: Float>(
+pub fn colocalize_terms_kernel<F: lumen_core::element::ImageFloat>(
     a: &[F],
     b: &[F],
     ab: &mut [F],
@@ -32,7 +32,7 @@ pub fn colocalize_terms_kernel<F: Float>(
 /// `b_gated[i] = b[i]` if `a[i] > thresh_a` else `0`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn manders_gated_terms_kernel<F: Float>(
+pub fn manders_gated_terms_kernel<F: lumen_core::element::ImageFloat>(
     a: &[F],
     b: &[F],
     a_gated: &mut [F],

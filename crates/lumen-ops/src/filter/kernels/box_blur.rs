@@ -9,7 +9,7 @@ use crate::core::kernels::read_padded;
 /// `output[o, i, k] = (1 / size) * sum_{t=0..size} input[o, i + t - left, k]`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn box_blur_1d_kernel<F: Float>(
+pub fn box_blur_1d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     len: u32,

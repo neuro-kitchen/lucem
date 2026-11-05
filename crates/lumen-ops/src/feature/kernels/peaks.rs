@@ -6,7 +6,7 @@ use lumen_core::compute::element_position;
 /// Flags 2-D local maximum candidates where `image[idx] >= max_filtered[idx]`, `image[idx] > threshold`,
 /// and the coordinate lies outside `border` pixels of the image boundary.
 #[cube(launch)]
-pub fn peak_candidates_2d_kernel<F: Float>(
+pub fn peak_candidates_2d_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     max_filtered: &[F],
     flags: &mut [u32],

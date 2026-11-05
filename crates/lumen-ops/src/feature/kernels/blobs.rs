@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Scale-normalized Determinant of Hessian response $\sigma^4 (H_{yy} H_{xx} - H_{xy}^2)$ in 2-D.
 #[cube(launch)]
-pub fn doh_scale_kernel<F: Float>(
+pub fn doh_scale_kernel<F: lumen_core::element::ImageFloat>(
     hyy: &[F],
     hxy: &[F],
     hxx: &[F],

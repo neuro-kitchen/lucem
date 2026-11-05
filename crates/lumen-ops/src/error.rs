@@ -52,4 +52,8 @@ pub enum OpsError {
     /// Operation is not supported on an empty array (e.g. global min/max or threshold without elements).
     #[error("{0} cannot be computed on an empty array")]
     EmptyInput(&'static str),
+
+    /// Error building an Apache Arrow `RecordBatch` or Polars `DataFrame` in analytics.
+    #[error("analytics table error: {0}")]
+    Analytics(String),
 }

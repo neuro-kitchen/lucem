@@ -6,7 +6,7 @@ use lumen_core::compute::element_position;
 /// Computes the two real eigenvalues $(\lambda_1, \lambda_2)$ with $\lambda_1 \ge \lambda_2$ of each
 /// symmetric $2 \times 2$ matrix $\begin{pmatrix} a_{xx} & a_{xy} \\ a_{xy} & a_{yy} \end{pmatrix}$.
 #[cube(launch)]
-pub fn sym_eigvals_2x2_kernel<F: Float>(
+pub fn sym_eigvals_2x2_kernel<F: lumen_core::element::ImageFloat>(
     axx: &[F],
     axy: &[F],
     ayy: &[F],
@@ -32,7 +32,7 @@ pub fn sym_eigvals_2x2_kernel<F: Float>(
 /// $3 \times 3$ matrix using Cardano's trigonometric formula.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn sym_eigvals_3x3_kernel<F: Float>(
+pub fn sym_eigvals_3x3_kernel<F: lumen_core::element::ImageFloat>(
     a00: &[F],
     a01: &[F],
     a02: &[F],

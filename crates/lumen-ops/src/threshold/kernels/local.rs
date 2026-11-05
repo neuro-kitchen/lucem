@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Squares each element: `output[i] = input[i] * input[i]`.
 #[cube(launch)]
-pub fn square_kernel<F: Float>(input: &[F], output: &mut [F], len: u32) {
+pub fn square_kernel<F: lumen_core::element::ImageFloat>(input: &[F], output: &mut [F], len: u32) {
     let i = element_position();
     if (i as u32) < len {
         let v = input[i];
@@ -15,7 +15,7 @@ pub fn square_kernel<F: Float>(input: &[F], output: &mut [F], len: u32) {
 
 /// Computes local Niblack threshold surface `T[i] = mean[i] - k * sqrt(max(mean_sq[i] - mean[i]^2, 0))`.
 #[cube(launch)]
-pub fn niblack_threshold_kernel<F: Float>(
+pub fn niblack_threshold_kernel<F: lumen_core::element::ImageFloat>(
     mean: &[F],
     mean_sq: &[F],
     output: &mut [F],
@@ -33,7 +33,7 @@ pub fn niblack_threshold_kernel<F: Float>(
 
 /// Computes local Sauvola threshold surface `T[i] = mean[i] * (1 + k * (std[i] / r - 1))`.
 #[cube(launch)]
-pub fn sauvola_threshold_kernel<F: Float>(
+pub fn sauvola_threshold_kernel<F: lumen_core::element::ImageFloat>(
     mean: &[F],
     mean_sq: &[F],
     output: &mut [F],

@@ -38,14 +38,14 @@ pub fn zhang_suen_subpass_kernel(
                 let p9 = if src[(e - width - 1u32) as usize] != 0u32 { 1u32 } else { 0u32 };
 
                 let b = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
-                let a = u32::from(p2 == 0u32 && p3 == 1u32)
-                    + u32::from(p3 == 0u32 && p4 == 1u32)
-                    + u32::from(p4 == 0u32 && p5 == 1u32)
-                    + u32::from(p5 == 0u32 && p6 == 1u32)
-                    + u32::from(p6 == 0u32 && p7 == 1u32)
-                    + u32::from(p7 == 0u32 && p8 == 1u32)
-                    + u32::from(p8 == 0u32 && p9 == 1u32)
-                    + u32::from(p9 == 0u32 && p2 == 1u32);
+                let a = u32::cast_from(p2 == 0u32 && p3 == 1u32)
+                    + u32::cast_from(p3 == 0u32 && p4 == 1u32)
+                    + u32::cast_from(p4 == 0u32 && p5 == 1u32)
+                    + u32::cast_from(p5 == 0u32 && p6 == 1u32)
+                    + u32::cast_from(p6 == 0u32 && p7 == 1u32)
+                    + u32::cast_from(p7 == 0u32 && p8 == 1u32)
+                    + u32::cast_from(p8 == 0u32 && p9 == 1u32)
+                    + u32::cast_from(p9 == 0u32 && p2 == 1u32);
 
                 let cond_c = if comptime!(second_subpass) {
                     (p2 * p4 * p8 == 0u32) && (p2 * p6 * p8 == 0u32)

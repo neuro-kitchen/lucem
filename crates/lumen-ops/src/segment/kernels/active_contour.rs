@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Initializes a 2-D checkerboard binary/signed level-set on the device (`1.0` or `0.0`).
 #[cube(launch)]
-pub fn checkerboard_level_set_2d_kernel<F: Float>(
+pub fn checkerboard_level_set_2d_kernel<F: lumen_core::element::ImageFloat>(
     output: &mut [F],
     w: u32,
     square_size: u32,
@@ -27,7 +27,7 @@ pub fn checkerboard_level_set_2d_kernel<F: Float>(
 
 /// Initializes a 2-D disk binary level-set (`1.0` inside `radius` around `(cy, cx)`, else `0.0`).
 #[cube(launch)]
-pub fn disk_level_set_2d_kernel<F: Float>(
+pub fn disk_level_set_2d_kernel<F: lumen_core::element::ImageFloat>(
     output: &mut [F],
     w: u32,
     cy: F,
@@ -52,7 +52,7 @@ pub fn disk_level_set_2d_kernel<F: Float>(
 /// $\phi^{n+1} = \phi^n + \Delta t \, \delta_\varepsilon(\phi^n) \left[\mu \kappa(\phi^n) - \nu - \lambda_1 (I - c_1)^2 + \lambda_2 (I - c_2)^2\right]$.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn chan_vese_step_2d_kernel<F: Float>(
+pub fn chan_vese_step_2d_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     phi: &[F],
     phi_out: &mut [F],
@@ -99,7 +99,7 @@ pub fn chan_vese_step_2d_kernel<F: Float>(
 /// Applies the region/balloon force update for morphological snakes (`morph_chan_vese` / `morph_geodesic_contour`).
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn morph_contour_force_2d_kernel<F: Float>(
+pub fn morph_contour_force_2d_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     u_in: &[F],
     u_out: &mut [F],
@@ -146,7 +146,7 @@ pub fn morph_contour_force_2d_kernel<F: Float>(
 /// Applies one morphological curvature-smoothing pass ($SI \circ IS$ or $IS \circ SI$) over the 4
 /// line structural elements of length 3 in 2-D.
 #[cube(launch)]
-pub fn morph_smooth_curv_2d_kernel<F: Float>(
+pub fn morph_smooth_curv_2d_kernel<F: lumen_core::element::ImageFloat>(
     u_in: &[F],
     u_out: &mut [F],
     h: u32,

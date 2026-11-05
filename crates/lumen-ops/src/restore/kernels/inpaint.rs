@@ -12,7 +12,7 @@ use crate::core::pad::PAD_REFLECT;
 /// (`mask[idx] != 0`). Unmasked pixels retain their original values.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn biharmonic_2d_step_kernel<F: Float>(
+pub fn biharmonic_2d_step_kernel<F: lumen_core::element::ImageFloat>(
     u_in: &[F],
     mask: &[u32],
     u_out: &mut [F],
@@ -81,7 +81,7 @@ fn wrap_to_pi<F: Float>(delta: F, pi: F, two_pi: F) -> F {
 /// Computes the discrete divergence of wrapped forward phase differences for 2-D least-squares
 /// phase unwrapping.
 #[cube(launch)]
-pub fn unwrap_phase_2d_poisson_rhs_kernel<F: Float>(
+pub fn unwrap_phase_2d_poisson_rhs_kernel<F: lumen_core::element::ImageFloat>(
     phase: &[F],
     rhs: &mut [F],
     pi: F,

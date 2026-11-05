@@ -13,7 +13,7 @@ pub fn pcg_hash(input: u32) -> u32 {
 
 /// Generates uniform `F` values in `[0.0, 1.0)` from a deterministic counter hash of `(i, seed)`.
 #[cube(launch)]
-pub fn random_uniform_kernel<F: Float>(output: &mut [F], seed: u32, len: u32) {
+pub fn random_uniform_kernel<F: lumen_core::element::ImageFloat>(output: &mut [F], seed: u32, len: u32) {
     let i = element_position();
     if (i as u32) < len {
         let h = pcg_hash((i as u32) ^ seed);
@@ -24,7 +24,7 @@ pub fn random_uniform_kernel<F: Float>(output: &mut [F], seed: u32, len: u32) {
 
 /// Generates standard normal $\mathcal{N}(\mu, \sigma^2)$ values using counter-based Box-Muller.
 #[cube(launch)]
-pub fn random_normal_kernel<F: Float>(output: &mut [F], mean: F, std_dev: F, seed: u32, len: u32) {
+pub fn random_normal_kernel<F: lumen_core::element::ImageFloat>(output: &mut [F], mean: F, std_dev: F, seed: u32, len: u32) {
     let i = element_position();
     if (i as u32) < len {
         let idx = i as u32;

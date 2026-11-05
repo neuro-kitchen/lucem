@@ -24,7 +24,10 @@ pub fn binary_1d_kernel(
         let i = (e / inner) % len;
         let base = e - i * inner;
         let start = (i as i32) - left;
-        let mut acc = if comptime!(is_dilation) { 0u32 } else { 1u32 };
+        let mut acc = 0u32;
+        if comptime!(!is_dilation) {
+            acc = 1u32;
+        }
         let mut t = 0u32;
         while t < size {
             let p = start + (t as i32);
@@ -62,7 +65,10 @@ pub fn binary_2d_footprint_kernel(
         let w_u = width as u32;
         let y = (e / w_u) as i32;
         let x = (e % w_u) as i32;
-        let mut acc = if comptime!(is_dilation) { 0u32 } else { 1u32 };
+        let mut acc = 0u32;
+        if comptime!(!is_dilation) {
+            acc = 1u32;
+        }
         let mut k = 0u32;
         while k < n_active {
             let dy = offsets[(k * 2u32) as usize];

@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// 2-D determinant $\det(H) = H_{rr} H_{cc} - H_{rc}^2$.
 #[cube(launch)]
-pub fn hessian_det_2d_kernel<F: Float>(
+pub fn hessian_det_2d_kernel<F: lumen_core::element::ImageFloat>(
     hrr: &[F],
     hrc: &[F],
     hcc: &[F],
@@ -20,7 +20,7 @@ pub fn hessian_det_2d_kernel<F: Float>(
 
 /// Computes pointwise outer product `(gy * gy, gy * gx, gx * gx)` of 2-D gradients.
 #[cube(launch)]
-pub fn outer_product_2d_kernel<F: Float>(
+pub fn outer_product_2d_kernel<F: lumen_core::element::ImageFloat>(
     gy: &[F],
     gx: &[F],
     iyy: &mut [F],
@@ -41,7 +41,7 @@ pub fn outer_product_2d_kernel<F: Float>(
 /// Koenderink & van Doorn shape index $s = \frac{2}{\pi} \arctan\!\left(\frac{\kappa_2 + \kappa_1}{\kappa_2 - \kappa_1}\right)$
 /// from ordered Hessian eigenvalues `eig1 >= eig2`.
 #[cube(launch)]
-pub fn shape_index_2d_kernel<F: Float>(
+pub fn shape_index_2d_kernel<F: lumen_core::element::ImageFloat>(
     eig1: &[F],
     eig2: &[F],
     out: &mut [F],

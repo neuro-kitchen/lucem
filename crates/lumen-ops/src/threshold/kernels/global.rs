@@ -7,7 +7,7 @@ use lumen_core::compute::element_position;
 /// Computes the exact Otsu threshold on the device from `counts[0..nbins]` over `[min_val, max_val]`
 /// and writes the scalar threshold into `out_thresh[0]`.
 #[cube(launch)]
-pub fn otsu_from_hist_kernel<F: Float>(
+pub fn otsu_from_hist_kernel<F: lumen_core::element::ImageFloat>(
     counts: &[u32],
     out_thresh: &mut [F],
     min_val: F,
@@ -31,7 +31,7 @@ pub fn otsu_from_hist_kernel<F: Float>(
 
         let mut w0 = 0.0f32;
         let mut mu0_sum = 0.0f32;
-        let mut best_var = -1.0f32;
+        let mut best_var = f32::new(-1.0);
         let mut best_bin = 0u32;
         let mut t = 0u32;
         while t + 1u32 < nbins {

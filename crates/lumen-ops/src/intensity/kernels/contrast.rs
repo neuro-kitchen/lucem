@@ -6,7 +6,7 @@ use crate::core::kernels::read_padded;
 
 /// Rescale intensity using device-resident min/max values read from 1-element buffers.
 #[cube(launch)]
-pub(crate) fn rescale_range_device_kernel<F: Float>(
+pub(crate) fn rescale_range_device_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     in_min_buf: &[F],
     in_max_buf: &[F],
@@ -33,7 +33,7 @@ pub(crate) fn rescale_range_device_kernel<F: Float>(
 
 /// Gamma correction: `gain * (x ^ gamma)`.
 #[cube(launch)]
-pub(crate) fn adjust_gamma_kernel<F: Float>(
+pub(crate) fn adjust_gamma_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     gamma: F,
@@ -49,7 +49,7 @@ pub(crate) fn adjust_gamma_kernel<F: Float>(
 
 /// Logarithmic adjustment: `gain * log2(1 + x)` or `gain * (2^x - 1)` when `inv != 0`.
 #[cube(launch)]
-pub(crate) fn adjust_log_kernel<F: Float>(
+pub(crate) fn adjust_log_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     gain: F,
@@ -62,14 +62,14 @@ pub(crate) fn adjust_log_kernel<F: Float>(
         output[idx] = if inv != 0u32 {
             gain * (F::powf(F::new(2.0), x) - F::new(1.0))
         } else {
-            gain * F::log2(F::new(1.0) + x)
+            gain * (F::ln(F::new(1.0) + x) / F::ln(F::new(2.0)))
         };
     }
 }
 
 /// Sigmoid contrast adjustment: `1 / (1 + exp(gain * (cutoff - x)))` (or `1 - ...` if `inv != 0`).
 #[cube(launch)]
-pub(crate) fn adjust_sigmoid_kernel<F: Float>(
+pub(crate) fn adjust_sigmoid_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     cutoff: F,
@@ -116,7 +116,7 @@ pub(crate) fn crop_3d_kernel<E: Numeric>(
 
 /// Pad along one axis `[outer, in_len, inner]` -> `[outer, out_len, inner]` using `PadMode`.
 #[cube(launch)]
-pub(crate) fn pad_axis_kernel<F: Float>(
+pub(crate) fn pad_axis_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     in_len: u32,
@@ -134,6 +134,6 @@ pub(crate) fn pad_axis_kernel<F: Float>(
         let outer_idx = idx / (inner * out_len);
         let base = outer_idx * in_len * inner + rem;
         let src_coord = (out_coord as i32) - pad_before;
-        output[idx as usize] = read_padded::<F>(input, base, inner, src_coord, in_len, mode, cval);
+        output[idx as usize] = read_padded::<F>(input, base, inner, src_coord, in_len as i32, cval, mode);
     }
 }

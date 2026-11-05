@@ -7,7 +7,7 @@ use lumen_core::compute::element_position;
 /// - `method == 0`: $\det(A) - k\,\operatorname{tr}(A)^2$
 /// - `method == 1`: Noble $\frac{2\det(A)}{\operatorname{tr}(A) + \varepsilon}$
 #[cube(launch)]
-pub fn harris_2d_kernel<F: Float>(
+pub fn harris_2d_kernel<F: lumen_core::element::ImageFloat>(
     ayy: &[F],
     ayx: &[F],
     axx: &[F],
@@ -34,7 +34,7 @@ pub fn harris_2d_kernel<F: Float>(
 
 /// Shi-Tomasi (Kanade-Tomasi) minimum eigenvalue $\lambda_{\min} = \frac{1}{2}\left((a+c) - \sqrt{(a-c)^2 + 4b^2}\right)$.
 #[cube(launch)]
-pub fn shi_tomasi_2d_kernel<F: Float>(
+pub fn shi_tomasi_2d_kernel<F: lumen_core::element::ImageFloat>(
     ayy: &[F],
     ayx: &[F],
     axx: &[F],
@@ -58,7 +58,7 @@ pub fn shi_tomasi_2d_kernel<F: Float>(
 /// $\frac{I_{xx} I_y^2 + I_{yy} I_x^2 - 2 I_{xy} I_x I_y}{I_x^2 + I_y^2 + \varepsilon}$.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn kitchen_rosenfeld_2d_kernel<F: Float>(
+pub fn kitchen_rosenfeld_2d_kernel<F: lumen_core::element::ImageFloat>(
     iy: &[F],
     ix: &[F],
     iyy: &[F],
@@ -85,7 +85,7 @@ pub fn kitchen_rosenfeld_2d_kernel<F: Float>(
 /// Förstner interest operator producing error ellipse size $w = \frac{\det(A)}{\operatorname{tr}(A)}$
 /// and roundness $q = \frac{4\det(A)}{\operatorname{tr}(A)^2}$.
 #[cube(launch)]
-pub fn foerstner_2d_kernel<F: Float>(
+pub fn foerstner_2d_kernel<F: lumen_core::element::ImageFloat>(
     ayy: &[F],
     ayx: &[F],
     axx: &[F],
@@ -114,7 +114,7 @@ pub fn foerstner_2d_kernel<F: Float>(
 /// Moravec corner response: minimum directional SSD over 4 shifts `(1,0), (0,1), (1,1), (1,-1)` in a
 /// `(2*window_radius + 1)^2` patch.
 #[cube(launch)]
-pub fn moravec_2d_kernel<F: Float>(
+pub fn moravec_2d_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     out: &mut [F],
     height: i32,
@@ -166,7 +166,7 @@ pub fn moravec_2d_kernel<F: Float>(
 /// at least `min_contiguous` contiguous brighter (`p_k > p_0 + threshold`) or darker
 /// (`p_k < p_0 - threshold`) ring pixels.
 #[cube(launch)]
-pub fn fast9_score_kernel<F: Float>(
+pub fn fast9_score_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     out: &mut [F],
     height: i32,

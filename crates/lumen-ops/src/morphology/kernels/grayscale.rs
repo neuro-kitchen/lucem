@@ -9,7 +9,7 @@ use crate::core::kernels::pad_index;
 /// additive `weights` over active footprint `offsets` (`[n_active, 2]`).
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn grey_weighted_2d_kernel<F: Float>(
+pub fn grey_weighted_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     offsets: &[i32],

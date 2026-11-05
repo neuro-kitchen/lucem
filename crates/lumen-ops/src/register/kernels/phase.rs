@@ -7,7 +7,7 @@ use lumen_core::compute::element_position;
 /// `normalize_phase = true`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn cross_power_spectrum_kernel<F: Float>(
+pub fn cross_power_spectrum_kernel<F: lumen_core::element::ImageFloat>(
     a_re: &[F],
     a_im: &[F],
     b_re: &[F],
@@ -41,7 +41,7 @@ pub fn cross_power_spectrum_kernel<F: Float>(
 
 /// Computes `out[i] = re[i]^2 + im[i]^2`.
 #[cube(launch)]
-pub fn complex_mag_sq_kernel<F: Float>(re: &[F], im: &[F], out: &mut [F], len: u32) {
+pub fn complex_mag_sq_kernel<F: lumen_core::element::ImageFloat>(re: &[F], im: &[F], out: &mut [F], len: u32) {
     let i = element_position();
     if (i as u32) < len {
         let r = re[i];

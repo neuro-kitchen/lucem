@@ -7,7 +7,7 @@ use lumen_core::compute::element_position;
 /// constrained by `mask`, setting `changed[0] = 1` when any pixel changes.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn geodesic_step_2d_kernel<F: Float>(
+pub fn geodesic_step_2d_kernel<F: lumen_core::element::ImageFloat>(
     src_marker: &[F],
     mask: &[F],
     dst_marker: &mut [F],

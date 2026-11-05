@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Beer-Lambert optical density stain unmixing: `stains = -log10(max(rgb, 1e-6)) * inv_stain_mat`.
 #[cube(launch)]
-pub(crate) fn unmix_stains_kernel<F: Float>(
+pub(crate) fn unmix_stains_kernel<F: lumen_core::element::ImageFloat>(
     rgb: &[F],
     inv_mat: &[F],
     stains: &mut [F],
@@ -30,7 +30,7 @@ pub(crate) fn unmix_stains_kernel<F: Float>(
 
 /// Beer-Lambert optical density stain remixing: `rgb = clamp(10^(-stains * stain_mat), 0, 1)`.
 #[cube(launch)]
-pub(crate) fn mix_stains_kernel<F: Float>(
+pub(crate) fn mix_stains_kernel<F: lumen_core::element::ImageFloat>(
     stains: &[F],
     fwd_mat: &[F],
     rgb: &mut [F],

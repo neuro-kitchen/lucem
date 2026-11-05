@@ -433,7 +433,6 @@ pub fn iradon<F: ImageFloat>(
     let output = DeviceArray::<F>::empty(client, Shape::new([out_size, out_size]))?;
     let half_diag = ((n_bins - 1) as f64) * 0.5;
     let scale = std::f64::consts::PI / (2.0 * (n_angles as f64));
-    let _ = reduce::sum_min_max;
     let geom = LaunchGeometry::elementwise(client, output.len());
     unsafe {
         iradon_backproject_kernel::launch::<F>(

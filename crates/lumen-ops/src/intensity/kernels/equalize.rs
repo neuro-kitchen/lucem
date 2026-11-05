@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Normalize a cumulative histogram (`f32`/`F`) into `[0, 1]` CDF.
 #[cube(launch)]
-pub(crate) fn normalize_cdf_kernel<F: Float>(
+pub(crate) fn normalize_cdf_kernel<F: lumen_core::element::ImageFloat>(
     cum_hist: &[F],
     cdf_out: &mut [F],
     num_bins: u32,
@@ -23,7 +23,7 @@ pub(crate) fn normalize_cdf_kernel<F: Float>(
 
 /// Apply a 1-D lookup table (`cdf` of length `num_bins`) to an image mapped over `[v_min, v_max]`.
 #[cube(launch)]
-pub(crate) fn apply_cdf_lut_kernel<F: Float>(
+pub(crate) fn apply_cdf_lut_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     cdf: &[F],
     v_min_buf: &[F],
@@ -55,7 +55,7 @@ pub(crate) fn apply_cdf_lut_kernel<F: Float>(
 
 /// Build per-tile clipped and redistributed CDFs for 2-D CLAHE.
 #[cube(launch)]
-pub(crate) fn clahe_tile_cdfs_kernel<F: Float>(
+pub(crate) fn clahe_tile_cdfs_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     v_min_buf: &[F],
     v_max_buf: &[F],
@@ -127,7 +127,7 @@ pub(crate) fn clahe_tile_cdfs_kernel<F: Float>(
 
 /// Bilinearly interpolate across neighboring tile CDFs for 2-D CLAHE.
 #[cube(launch)]
-pub(crate) fn clahe_interpolate_kernel<F: Float>(
+pub(crate) fn clahe_interpolate_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     v_min_buf: &[F],
     v_max_buf: &[F],
@@ -189,7 +189,7 @@ pub(crate) fn clahe_interpolate_kernel<F: Float>(
 
 /// Build an inverse mapping LUT from source CDF to reference quantile values.
 #[cube(launch)]
-pub(crate) fn build_match_lut_kernel<F: Float>(
+pub(crate) fn build_match_lut_kernel<F: lumen_core::element::ImageFloat>(
     src_cdf: &[F],
     ref_cdf: &[F],
     ref_min_buf: &[F],

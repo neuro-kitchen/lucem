@@ -10,7 +10,7 @@ use lumen_core::compute::element_position;
 /// using bilinear interpolation.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn radon_2d_kernel<F: Float>(
+pub fn radon_2d_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     cos_table: &[F],
     sin_table: &[F],
@@ -64,7 +64,7 @@ pub fn radon_2d_kernel<F: Float>(
 /// image grid using linear detector interpolation.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn iradon_backproject_kernel<F: Float>(
+pub fn iradon_backproject_kernel<F: lumen_core::element::ImageFloat>(
     filtered_sino: &[F],
     cos_table: &[F],
     sin_table: &[F],

@@ -9,7 +9,7 @@ use crate::core::kernels::pad_index;
 /// averaging each `(fy, fx)` tile with boundary padding `mode`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn downsample_mean_2d_kernel<F: Float>(
+pub fn downsample_mean_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     in_h: i32,
@@ -51,7 +51,7 @@ pub fn downsample_mean_2d_kernel<F: Float>(
 /// Resizes `[in_h, in_w]` to `[out_h, out_w]` by exact fractional box-overlap area integration.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn resize_mean_2d_kernel<F: Float>(
+pub fn resize_mean_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     in_h: i32,
@@ -109,7 +109,7 @@ pub fn resize_mean_2d_kernel<F: Float>(
 /// integral image `sat` of shape `[height, width]`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn integrate_box_2d_kernel<F: Float>(
+pub fn integrate_box_2d_kernel<F: lumen_core::element::ImageFloat>(
     sat: &[F],
     r0: &[u32],
     c0: &[u32],

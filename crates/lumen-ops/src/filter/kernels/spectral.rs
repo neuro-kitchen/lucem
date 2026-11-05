@@ -7,7 +7,7 @@ use lumen_core::compute::element_position;
 /// Multiplies a 1-D or N-D Fourier spectrum along an axis `[outer, len, inner]` by a precomputed
 /// real transfer profile `transfer[freq]`.
 #[cube(launch)]
-pub fn spectral_scale_axis_kernel<F: Float>(
+pub fn spectral_scale_axis_kernel<F: lumen_core::element::ImageFloat>(
     re: &mut [F],
     im: &mut [F],
     transfer: &[F],
@@ -28,7 +28,7 @@ pub fn spectral_scale_axis_kernel<F: Float>(
 /// Multiplies a Fourier spectrum along an axis `[outer, len, inner]` by the complex phase-shift
 /// factor `(cos_phase[freq] + i * sin_phase[freq])`.
 #[cube(launch)]
-pub fn spectral_phase_axis_kernel<F: Float>(
+pub fn spectral_phase_axis_kernel<F: lumen_core::element::ImageFloat>(
     re: &mut [F],
     im: &mut [F],
     cos_phase: &[F],

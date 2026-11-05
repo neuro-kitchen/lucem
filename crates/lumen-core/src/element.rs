@@ -6,7 +6,7 @@
 //! `client.properties().supports_type(..)` says so.
 
 use cubecl::prelude::*;
-use num_traits::{NumCast, ToPrimitive};
+use num_traits::NumCast;
 
 /// A CubeCL float that also crosses to and from the host and can be a scalar kernel argument
 /// (`LaunchArg<RuntimeArg = Self>`; `Float` alone is not enough for a scalar argument).
@@ -39,6 +39,6 @@ pub fn to_f64<F: ImageFloat>(value: F) -> f64 {
 }
 
 /// Whether the runtime behind `client` supports `E` (e.g. `f64` is missing on most wgpu adapters).
-pub fn supports<E: CubeElement>(client: &Client) -> bool {
+pub fn supports<E: CubeElement + Scalar>(client: &Client) -> bool {
     client.properties().supports_type(E::elem_type_native())
 }

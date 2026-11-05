@@ -11,7 +11,7 @@ use crate::core::kernels::{pad_index, read_padded};
 /// axis seen as `[outer, len, inner]`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn extrema_1d_kernel<F: Float>(
+pub fn extrema_1d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     len: u32,
@@ -52,7 +52,7 @@ pub fn extrema_1d_kernel<F: Float>(
 /// 2-D minimum or maximum filter over an arbitrary footprint given by `offsets` (`[n_active, 2]` flattened).
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn extrema_2d_footprint_kernel<F: Float>(
+pub fn extrema_2d_footprint_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     offsets: &[i32],
@@ -139,7 +139,7 @@ pub fn med9<F: Float>(
 /// Specialized branch-free $3 \times 3$ median filter using the 19-step `med9` network and an
 /// interior fast path.
 #[cube(launch)]
-pub fn median_3x3_kernel<F: Float>(
+pub fn median_3x3_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     height: i32,
@@ -198,7 +198,7 @@ pub fn median_3x3_kernel<F: Float>(
 /// `target_rank`-th smallest element (`0 <= target_rank < n_active`) via exact rank counting.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn rank_2d_footprint_kernel<F: Float>(
+pub fn rank_2d_footprint_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     offsets: &[i32],

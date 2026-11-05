@@ -8,7 +8,7 @@ use lumen_core::compute::element_position;
 /// `centers` has shape `[num_clusters, 3]` stored as `[cy, cx, cval]`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn slic_assign_2d_kernel<F: Float>(
+pub fn slic_assign_2d_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     centers: &[F],
     labels: &mut [u32],

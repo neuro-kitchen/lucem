@@ -6,7 +6,7 @@ use lumen_core::compute::element_position;
 /// Assigns each background (`labels[i] == 0`) pixel the label at `nearest_idx[i]` if its EDT
 /// distance `edt[i] <= max_distance`.
 #[cube(launch)]
-pub fn expand_labels_gather_kernel<F: Float>(
+pub fn expand_labels_gather_kernel<F: lumen_core::element::ImageFloat>(
     labels: &[u32],
     nearest_idx: &[u32],
     edt: &[F],
@@ -95,7 +95,7 @@ pub fn find_boundaries_2d_kernel(
 
 /// Overlays a single-channel `[h, w]` image with `color` where `boundaries[i] != 0`.
 #[cube(launch)]
-pub fn mark_boundaries_gray_kernel<F: Float>(
+pub fn mark_boundaries_gray_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     boundaries: &[u32],
     output: &mut [F],
@@ -122,7 +122,7 @@ pub fn mark_boundaries_gray_kernel<F: Float>(
 
 /// Overlays an RGB `[h, w, 3]` image with `(color_r, color_g, color_b)` where `boundaries[i] != 0`.
 #[cube(launch)]
-pub fn mark_boundaries_rgb_kernel<F: Float>(
+pub fn mark_boundaries_rgb_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     boundaries: &[u32],
     output: &mut [F],

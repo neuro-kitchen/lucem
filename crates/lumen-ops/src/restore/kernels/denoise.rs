@@ -11,7 +11,7 @@ use crate::core::kernels::pad_index;
 /// on `p` (`py[height-1, x] = 0`, `px[y, width-1] = 0`).
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn tv_chambolle_2d_div_kernel<F: Float>(
+pub fn tv_chambolle_2d_div_kernel<F: lumen_core::element::ImageFloat>(
     f_img: &[F],
     py: &[F],
     px: &[F],
@@ -44,7 +44,7 @@ pub fn tv_chambolle_2d_div_kernel<F: Float>(
 /// `p_new = (p + (tau / weight) * g) / (1 + (tau / weight) * |g|)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn tv_chambolle_2d_dual_kernel<F: Float>(
+pub fn tv_chambolle_2d_dual_kernel<F: lumen_core::element::ImageFloat>(
     u_img: &[F],
     py_in: &[F],
     px_in: &[F],
@@ -87,7 +87,7 @@ pub fn tv_chambolle_2d_dual_kernel<F: Float>(
 /// `u_new[y, x] = (mu * f[y, x] + lambda * (sum_neighbors(u) + div(b - d))) / (mu + 4 * lambda)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn tv_bregman_2d_gauss_seidel_kernel<F: Float>(
+pub fn tv_bregman_2d_gauss_seidel_kernel<F: lumen_core::element::ImageFloat>(
     f_img: &[F],
     u_in: &[F],
     dy: &[F],
@@ -135,7 +135,7 @@ pub fn tv_bregman_2d_gauss_seidel_kernel<F: Float>(
 /// Split-Bregman 2-D shrinkage and Bregman variable update (`d` and `b`).
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn tv_bregman_2d_dual_kernel<F: Float>(
+pub fn tv_bregman_2d_dual_kernel<F: lumen_core::element::ImageFloat>(
     u_img: &[F],
     by_in: &[F],
     bx_in: &[F],
@@ -198,7 +198,7 @@ pub fn tv_bregman_2d_dual_kernel<F: Float>(
 /// and range Gaussian factor `inv_two_sigma_color_sq = -0.5 / sigma_color^2`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn bilateral_2d_kernel<F: Float>(
+pub fn bilateral_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     spatial_weights: &[F],
     output: &mut [F],
@@ -251,7 +251,7 @@ pub fn bilateral_2d_kernel<F: Float>(
 /// Compares `(2 * patch_radius + 1)^2` neighborhoods across a `(2 * search_radius + 1)^2` window.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn nlm_2d_kernel<F: Float>(
+pub fn nlm_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     inv_h2: F,
@@ -318,7 +318,7 @@ pub fn nlm_2d_kernel<F: Float>(
 /// Immerkær (1996) 3x3 zero-mean Laplacian stencil `[1, -2, 1; -2, 4, -2; 1, -2, 1]` on interior
 /// pixels `(height - 2) * (width - 2)`, outputting `|L * I|` for fast Gaussian noise estimation.
 #[cube(launch)]
-pub fn immerkaer_laplacian_2d_kernel<F: Float>(
+pub fn immerkaer_laplacian_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     out_abs: &mut [F],
     inner_h: u32,

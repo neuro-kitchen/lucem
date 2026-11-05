@@ -6,7 +6,7 @@ use lumen_core::compute::line_position;
 /// Computes an inclusive or exclusive prefix sum along an axis seen as `[outer, len, inner]`.
 /// One unit walks one line `(o, :, k)` of `len` elements; lines run in parallel across `(o, k)`.
 #[cube(launch)]
-pub fn scan_axis_kernel<F: Float>(
+pub fn scan_axis_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     len: u32,

@@ -8,7 +8,7 @@ use crate::core::kernels::pad_index;
 /// Causal + anti-causal recursive IIR B-spline pole pass along one axis `[outer, len, inner]`:
 /// scales the line by `gain = (1 - z) * (1 - 1/z)` and applies pole `z` forward and backward.
 #[cube(launch)]
-pub fn spline_pole_1d_kernel<F: Float>(
+pub fn spline_pole_1d_kernel<F: lumen_core::element::ImageFloat>(
     data: &mut [F],
     len: u32,
     inner: u32,
@@ -87,7 +87,7 @@ pub fn cubic_bspline_weight<F: Float>(dist: F) -> F {
 /// spline coefficients).
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn sample_2d_kernel<F: Float>(
+pub fn sample_2d_kernel<F: lumen_core::element::ImageFloat>(
     coeffs: &[F],
     coords_y: &[F],
     coords_x: &[F],

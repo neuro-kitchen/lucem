@@ -6,7 +6,7 @@ use lumen_core::compute::element_position;
 /// Zero-mean Normalized Cross-Correlation (ZNCC) template matching at valid or padded positions.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn ncc_template_2d_kernel<F: Float>(
+pub fn ncc_template_2d_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     template_zm: &[F],
     out: &mut [F],
@@ -79,7 +79,7 @@ pub fn ncc_template_2d_kernel<F: Float>(
 /// - `method == 2`: uniform (`uniform`) count of positive bits when bitwise transitions $\le 2$, else $P + 1$
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn lbp_2d_kernel<F: Float>(
+pub fn lbp_2d_kernel<F: lumen_core::element::ImageFloat>(
     image: &[F],
     offsets_y: &[F],
     offsets_x: &[F],

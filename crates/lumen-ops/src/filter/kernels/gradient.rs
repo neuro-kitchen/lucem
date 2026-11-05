@@ -9,7 +9,7 @@ use crate::core::kernels::read_padded;
 /// Adds the second finite difference `input[o, i - 1, k] - 2 * input[o, i, k] + input[o, i + 1, k]`
 /// along an axis `[outer, len, inner]` into `accum[o, i, k]`.
 #[cube(launch)]
-pub fn laplace_axis_add_kernel<F: Float>(
+pub fn laplace_axis_add_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     accum: &mut [F],
     len: u32,
@@ -33,7 +33,7 @@ pub fn laplace_axis_add_kernel<F: Float>(
 
 /// Adds `grad[i] * grad[i]` into `accum_sq[i]` for multi-axis gradient magnitude accumulation.
 #[cube(launch)]
-pub fn add_sq_kernel<F: Float>(grad: &[F], accum_sq: &mut [F], len: u32) {
+pub fn add_sq_kernel<F: lumen_core::element::ImageFloat>(grad: &[F], accum_sq: &mut [F], len: u32) {
     let i = element_position();
     if (i as u32) < len {
         let g = grad[i];
@@ -44,7 +44,7 @@ pub fn add_sq_kernel<F: Float>(grad: &[F], accum_sq: &mut [F], len: u32) {
 /// Scales the square root of `accum_sq[i]` by `scale` (`1 / sqrt(ndim)` for isotropic Sobel/Prewitt/Scharr
 /// gradient magnitude, or `1.0` for Euclidean norm).
 #[cube(launch)]
-pub fn sqrt_scale_kernel<F: Float>(accum_sq: &[F], output: &mut [F], scale: F, len: u32) {
+pub fn sqrt_scale_kernel<F: lumen_core::element::ImageFloat>(accum_sq: &[F], output: &mut [F], scale: F, len: u32) {
     let i = element_position();
     if (i as u32) < len {
         output[i] = F::sqrt(F::max(accum_sq[i], F::new(0.0f32))) * scale;

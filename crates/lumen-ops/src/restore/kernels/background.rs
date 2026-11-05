@@ -9,7 +9,7 @@ use crate::core::kernels::pad_index;
 /// `eroded[y, x] = min_{ky, kx} (input[y + ky - ry, x + kx - rx] + kernel[ky, kx])`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn rolling_ball_2d_erode_kernel<F: Float>(
+pub fn rolling_ball_2d_erode_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     kernel: &[F],
     eroded: &mut [F],
@@ -56,7 +56,7 @@ pub fn rolling_ball_2d_erode_kernel<F: Float>(
 /// `background[y, x] = max_{ky, kx} (eroded[y - (ky - ry), x - (kx - rx)] - kernel[ky, kx])`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn rolling_ball_2d_dilate_kernel<F: Float>(
+pub fn rolling_ball_2d_dilate_kernel<F: lumen_core::element::ImageFloat>(
     eroded: &[F],
     kernel: &[F],
     background: &mut [F],

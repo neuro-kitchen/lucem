@@ -13,7 +13,7 @@ use crate::core::kernels::{pad_index, read_padded};
 /// `0..len`, avoiding boundary arithmetic on interior pixels.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn correlate_1d_kernel<F: Float>(
+pub fn correlate_1d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     weights: &[F],
@@ -61,7 +61,7 @@ pub fn correlate_1d_kernel<F: Float>(
 /// 2-D correlation with arbitrary dense weights `[k_h, k_w]` centered at `(left_y, left_x)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn correlate_2d_kernel<F: Float>(
+pub fn correlate_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     weights: &[F],

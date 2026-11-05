@@ -6,7 +6,7 @@ use lumen_core::compute::element_position;
 /// Computes `output[i] = input[i] * (y - cy)^p * (x - cx)^q` for every pixel `(y, x)` of a `[h, w]` image.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn moment_monomial_2d_kernel<F: Float>(
+pub fn moment_monomial_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     output: &mut [F],
     w: u32,

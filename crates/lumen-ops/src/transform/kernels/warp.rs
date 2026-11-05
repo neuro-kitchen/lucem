@@ -7,7 +7,7 @@ use lumen_core::compute::element_position;
 /// `[out_h, out_w]` under a $3 \times 3$ homogeneous inverse matrix `m[0..9]` (row-major `[y, x, 1]`).
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn affine_coords_2d_kernel<F: Float>(
+pub fn affine_coords_2d_kernel<F: lumen_core::element::ImageFloat>(
     m: &[F],
     coords_y: &mut [F],
     coords_x: &mut [F],
@@ -36,7 +36,7 @@ pub fn affine_coords_2d_kernel<F: Float>(
 /// (`log_polar = true`) image of shape `[n_angles, n_radii]` centered at `(cy, cx)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn polar_coords_2d_kernel<F: Float>(
+pub fn polar_coords_2d_kernel<F: lumen_core::element::ImageFloat>(
     coords_y: &mut [F],
     coords_x: &mut [F],
     cy: F,
@@ -72,7 +72,7 @@ pub fn polar_coords_2d_kernel<F: Float>(
 /// $\theta'(r) = \theta + \text{rotation} + \text{strength} \cdot \exp(-r / \text{radius_decay})$.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn swirl_coords_2d_kernel<F: Float>(
+pub fn swirl_coords_2d_kernel<F: lumen_core::element::ImageFloat>(
     coords_y: &mut [F],
     coords_x: &mut [F],
     cy: F,

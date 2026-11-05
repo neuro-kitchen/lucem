@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Euclidean CIE76 color difference in L*a*b* space.
 #[cube(launch)]
-pub(crate) fn cie76_kernel<F: Float>(
+pub(crate) fn cie76_kernel<F: lumen_core::element::ImageFloat>(
     lab1: &[F],
     lab2: &[F],
     out: &mut [F],
@@ -23,7 +23,7 @@ pub(crate) fn cie76_kernel<F: Float>(
 
 /// CIE94 perceptual color difference in L*a*b* space.
 #[cube(launch)]
-pub(crate) fn ciede94_kernel<F: Float>(
+pub(crate) fn ciede94_kernel<F: lumen_core::element::ImageFloat>(
     lab1: &[F],
     lab2: &[F],
     out: &mut [F],
@@ -65,7 +65,7 @@ pub(crate) fn ciede94_kernel<F: Float>(
 
 /// CIEDE2000 perceptual color difference in L*a*b* space.
 #[cube(launch)]
-pub(crate) fn ciede2000_kernel<F: Float>(
+pub(crate) fn ciede2000_kernel<F: lumen_core::element::ImageFloat>(
     lab1: &[F],
     lab2: &[F],
     out: &mut [F],
@@ -159,7 +159,7 @@ pub(crate) fn ciede2000_kernel<F: Float>(
 
 /// CMC(l:c) color difference in L*a*b* space.
 #[cube(launch)]
-pub(crate) fn cmc_kernel<F: Float>(
+pub(crate) fn cmc_kernel<F: lumen_core::element::ImageFloat>(
     lab1: &[F],
     lab2: &[F],
     out: &mut [F],

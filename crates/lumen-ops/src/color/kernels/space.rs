@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Convert sRGB `[H, W, 3]` to luminance `[H, W]` using ITU-R BT.709 weights (`0.2125 R + 0.7154 G + 0.0721 B`).
 #[cube(launch)]
-pub(crate) fn rgb_to_gray_kernel<F: Float>(
+pub(crate) fn rgb_to_gray_kernel<F: lumen_core::element::ImageFloat>(
     rgb: &[F],
     gray: &mut [F],
     num_pixels: u32,
@@ -22,7 +22,7 @@ pub(crate) fn rgb_to_gray_kernel<F: Float>(
 
 /// Replicate a grayscale image `[H, W]` into 3-channel RGB `[H, W, 3]`.
 #[cube(launch)]
-pub(crate) fn gray_to_rgb_kernel<F: Float>(
+pub(crate) fn gray_to_rgb_kernel<F: lumen_core::element::ImageFloat>(
     gray: &[F],
     rgb: &mut [F],
     num_pixels: u32,
@@ -39,7 +39,7 @@ pub(crate) fn gray_to_rgb_kernel<F: Float>(
 
 /// Composite RGBA `[H, W, 4]` over a uniform `[bg_r, bg_g, bg_b]` background into RGB `[H, W, 3]`.
 #[cube(launch)]
-pub(crate) fn rgba_to_rgb_kernel<F: Float>(
+pub(crate) fn rgba_to_rgb_kernel<F: lumen_core::element::ImageFloat>(
     rgba: &[F],
     rgb: &mut [F],
     bg_r: F,
@@ -64,7 +64,7 @@ pub(crate) fn rgba_to_rgb_kernel<F: Float>(
 
 /// Apply a cached `3x3` color matrix (`mat` of length 9) per pixel.
 #[cube(launch)]
-pub(crate) fn apply_color_matrix_kernel<F: Float>(
+pub(crate) fn apply_color_matrix_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     mat: &[F],
     output: &mut [F],
@@ -84,7 +84,7 @@ pub(crate) fn apply_color_matrix_kernel<F: Float>(
 
 /// Convert RGB `[0, 1]` to HSV (`H, S, V` in `[0, 1]`).
 #[cube(launch)]
-pub(crate) fn rgb_to_hsv_kernel<F: Float>(
+pub(crate) fn rgb_to_hsv_kernel<F: lumen_core::element::ImageFloat>(
     rgb: &[F],
     hsv: &mut [F],
     num_pixels: u32,
@@ -127,7 +127,7 @@ pub(crate) fn rgb_to_hsv_kernel<F: Float>(
 
 /// Convert HSV (`H, S, V` in `[0, 1]`) to RGB `[0, 1]`.
 #[cube(launch)]
-pub(crate) fn hsv_to_rgb_kernel<F: Float>(
+pub(crate) fn hsv_to_rgb_kernel<F: lumen_core::element::ImageFloat>(
     hsv: &[F],
     rgb: &mut [F],
     num_pixels: u32,
@@ -197,7 +197,7 @@ fn linear_to_srgb<F: Float>(c: F) -> F {
 
 /// Convert sRGB `[0, 1]` to CIE 1931 XYZ (D65 illuminant, 2° observer).
 #[cube(launch)]
-pub(crate) fn rgb_to_xyz_kernel<F: Float>(
+pub(crate) fn rgb_to_xyz_kernel<F: lumen_core::element::ImageFloat>(
     rgb: &[F],
     mat: &[F],
     xyz: &mut [F],
@@ -206,9 +206,9 @@ pub(crate) fn rgb_to_xyz_kernel<F: Float>(
     let idx = element_position() as u32;
     if idx < num_pixels {
         let base = (idx * 3u32) as usize;
-        let r = srgb_to_linear(rgb[base]);
-        let g = srgb_to_linear(rgb[base + 1usize]);
-        let b = srgb_to_linear(rgb[base + 2usize]);
+        let r = srgb_to_linear::<F>(rgb[base]);
+        let g = srgb_to_linear::<F>(rgb[base + 1usize]);
+        let b = srgb_to_linear::<F>(rgb[base + 2usize]);
         xyz[base] = mat[0usize] * r + mat[1usize] * g + mat[2usize] * b;
         xyz[base + 1usize] = mat[3usize] * r + mat[4usize] * g + mat[5usize] * b;
         xyz[base + 2usize] = mat[6usize] * r + mat[7usize] * g + mat[8usize] * b;
@@ -217,7 +217,7 @@ pub(crate) fn rgb_to_xyz_kernel<F: Float>(
 
 /// Convert CIE 1931 XYZ (D65) to sRGB `[0, 1]`.
 #[cube(launch)]
-pub(crate) fn xyz_to_rgb_kernel<F: Float>(
+pub(crate) fn xyz_to_rgb_kernel<F: lumen_core::element::ImageFloat>(
     xyz: &[F],
     mat: &[F],
     rgb: &mut [F],
@@ -232,9 +232,9 @@ pub(crate) fn xyz_to_rgb_kernel<F: Float>(
         let r_lin = mat[0usize] * x + mat[1usize] * y + mat[2usize] * z;
         let g_lin = mat[3usize] * x + mat[4usize] * y + mat[5usize] * z;
         let b_lin = mat[6usize] * x + mat[7usize] * y + mat[8usize] * z;
-        rgb[base] = F::min(F::max(linear_to_srgb(r_lin), F::new(0.0)), F::new(1.0));
-        rgb[base + 1usize] = F::min(F::max(linear_to_srgb(g_lin), F::new(0.0)), F::new(1.0));
-        rgb[base + 2usize] = F::min(F::max(linear_to_srgb(b_lin), F::new(0.0)), F::new(1.0));
+        rgb[base] = F::min(F::max(linear_to_srgb::<F>(r_lin), F::new(0.0)), F::new(1.0));
+        rgb[base + 1usize] = F::min(F::max(linear_to_srgb::<F>(g_lin), F::new(0.0)), F::new(1.0));
+        rgb[base + 2usize] = F::min(F::max(linear_to_srgb::<F>(b_lin), F::new(0.0)), F::new(1.0));
     }
 }
 
@@ -258,7 +258,7 @@ fn lab_f_inv<F: Float>(t: F) -> F {
 
 /// Convert CIE XYZ (D65: `Xn=0.95047, Yn=1.0, Zn=1.08883`) to CIE L*a*b*.
 #[cube(launch)]
-pub(crate) fn xyz_to_lab_kernel<F: Float>(
+pub(crate) fn xyz_to_lab_kernel<F: lumen_core::element::ImageFloat>(
     xyz: &[F],
     lab: &mut [F],
     num_pixels: u32,
@@ -266,9 +266,9 @@ pub(crate) fn xyz_to_lab_kernel<F: Float>(
     let idx = element_position() as u32;
     if idx < num_pixels {
         let base = (idx * 3u32) as usize;
-        let fx = lab_f(xyz[base] / F::new(0.95047));
-        let fy = lab_f(xyz[base + 1usize]);
-        let fz = lab_f(xyz[base + 2usize] / F::new(1.08883));
+        let fx = lab_f::<F>(xyz[base] / F::new(0.95047));
+        let fy = lab_f::<F>(xyz[base + 1usize]);
+        let fz = lab_f::<F>(xyz[base + 2usize] / F::new(1.08883));
         lab[base] = F::new(116.0) * fy - F::new(16.0);
         lab[base + 1usize] = F::new(500.0) * (fx - fy);
         lab[base + 2usize] = F::new(200.0) * (fy - fz);
@@ -277,7 +277,7 @@ pub(crate) fn xyz_to_lab_kernel<F: Float>(
 
 /// Convert CIE L*a*b* to CIE XYZ (D65).
 #[cube(launch)]
-pub(crate) fn lab_to_xyz_kernel<F: Float>(
+pub(crate) fn lab_to_xyz_kernel<F: lumen_core::element::ImageFloat>(
     lab: &[F],
     xyz: &mut [F],
     num_pixels: u32,
@@ -291,15 +291,15 @@ pub(crate) fn lab_to_xyz_kernel<F: Float>(
         let fy = (l + F::new(16.0)) / F::new(116.0);
         let fx = a / F::new(500.0) + fy;
         let fz = fy - b / F::new(200.0);
-        xyz[base] = F::new(0.95047) * lab_f_inv(fx);
-        xyz[base + 1usize] = lab_f_inv(fy);
-        xyz[base + 2usize] = F::new(1.08883) * lab_f_inv(fz);
+        xyz[base] = F::new(0.95047) * lab_f_inv::<F>(fx);
+        xyz[base + 1usize] = lab_f_inv::<F>(fy);
+        xyz[base + 2usize] = F::new(1.08883) * lab_f_inv::<F>(fz);
     }
 }
 
 /// Convert CIE XYZ (D65) to CIE L*u*v*.
 #[cube(launch)]
-pub(crate) fn xyz_to_luv_kernel<F: Float>(
+pub(crate) fn xyz_to_luv_kernel<F: lumen_core::element::ImageFloat>(
     xyz: &[F],
     luv: &mut [F],
     num_pixels: u32,
@@ -339,7 +339,7 @@ pub(crate) fn xyz_to_luv_kernel<F: Float>(
 
 /// Convert CIE L*u*v* to CIE XYZ (D65).
 #[cube(launch)]
-pub(crate) fn luv_to_xyz_kernel<F: Float>(
+pub(crate) fn luv_to_xyz_kernel<F: lumen_core::element::ImageFloat>(
     luv: &[F],
     xyz: &mut [F],
     num_pixels: u32,
@@ -377,7 +377,7 @@ pub(crate) fn luv_to_xyz_kernel<F: Float>(
 
 /// Convert CIE L*a*b* to cylindrical CIE L*C*h° (`h` in radians `[0, 2π)`).
 #[cube(launch)]
-pub(crate) fn lab_to_lch_kernel<F: Float>(
+pub(crate) fn lab_to_lch_kernel<F: lumen_core::element::ImageFloat>(
     lab: &[F],
     lch: &mut [F],
     num_pixels: u32,
@@ -403,7 +403,7 @@ pub(crate) fn lab_to_lch_kernel<F: Float>(
 
 /// Convert cylindrical CIE L*C*h° (`h` in radians) to CIE L*a*b*.
 #[cube(launch)]
-pub(crate) fn lch_to_lab_kernel<F: Float>(
+pub(crate) fn lch_to_lab_kernel<F: lumen_core::element::ImageFloat>(
     lch: &[F],
     lab: &mut [F],
     num_pixels: u32,
@@ -422,7 +422,7 @@ pub(crate) fn lch_to_lab_kernel<F: Float>(
 
 /// Convert sRGB `[0, 1]` to ITU-R BT.601 YCbCr (`Y in [16, 235]`, `Cb, Cr in [16, 240]`).
 #[cube(launch)]
-pub(crate) fn rgb_to_ycbcr_kernel<F: Float>(
+pub(crate) fn rgb_to_ycbcr_kernel<F: lumen_core::element::ImageFloat>(
     rgb: &[F],
     ycbcr: &mut [F],
     num_pixels: u32,
@@ -443,7 +443,7 @@ pub(crate) fn rgb_to_ycbcr_kernel<F: Float>(
 
 /// Convert ITU-R BT.601 YCbCr back to sRGB `[0, 1]`.
 #[cube(launch)]
-pub(crate) fn ycbcr_to_rgb_kernel<F: Float>(
+pub(crate) fn ycbcr_to_rgb_kernel<F: lumen_core::element::ImageFloat>(
     ycbcr: &[F],
     rgb: &mut [F],
     num_pixels: u32,

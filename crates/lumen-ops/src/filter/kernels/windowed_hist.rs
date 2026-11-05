@@ -17,7 +17,7 @@ use crate::core::kernels::pad_index;
 /// - `7`: local Otsu threshold value
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn windowed_stat_2d_kernel<F: Float>(
+pub fn windowed_stat_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[u32],
     output: &mut [F],
     offsets: &[i32],
@@ -82,7 +82,7 @@ pub fn windowed_stat_2d_kernel<F: Float>(
 
 /// Computes local Shannon entropy (in bits, $-\sum p_v \log_2 p_v$) over the footprint at each pixel.
 #[cube(launch)]
-pub fn windowed_entropy_2d_kernel<F: Float>(
+pub fn windowed_entropy_2d_kernel<F: lumen_core::element::ImageFloat>(
     input: &[u32],
     output: &mut [F],
     offsets: &[i32],

@@ -39,7 +39,7 @@ fn sample_bilinear_nearest<F: Float>(img: &[F], y: F, x: F, height: i32, width: 
 /// `it = img1(y + vy, x + vx) - img0(y, x)` and blended central spatial derivatives `(iy, ix)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn warp_bilinear_grad_2d_kernel<F: Float>(
+pub fn warp_bilinear_grad_2d_kernel<F: lumen_core::element::ImageFloat>(
     img0: &[F],
     img1: &[F],
     vy: &[F],
@@ -98,7 +98,7 @@ pub fn warp_bilinear_grad_2d_kernel<F: Float>(
 /// products `(by, bx) = (-iy * it, -ix * it)` prior to spatial window smoothing in ILK.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn ilk_tensor_rhs_2d_kernel<F: Float>(
+pub fn ilk_tensor_rhs_2d_kernel<F: lumen_core::element::ImageFloat>(
     iy: &[F],
     ix: &[F],
     it: &[F],
@@ -126,7 +126,7 @@ pub fn ilk_tensor_rhs_2d_kernel<F: Float>(
 /// by `(dvy, dvx)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn ilk_solve_2x2_kernel<F: Float>(
+pub fn ilk_solve_2x2_kernel<F: lumen_core::element::ImageFloat>(
     jyy: &[F],
     jyx: &[F],
     jxx: &[F],
@@ -161,7 +161,7 @@ pub fn ilk_solve_2x2_kernel<F: Float>(
 /// 3. Soft-thresholds `v` toward `u` by `lambda * theta * grad(I)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn tvl1_primal_threshold_2d_kernel<F: Float>(
+pub fn tvl1_primal_threshold_2d_kernel<F: lumen_core::element::ImageFloat>(
     u0y: &[F],
     u0x: &[F],
     iy: &[F],
@@ -243,7 +243,7 @@ pub fn tvl1_primal_threshold_2d_kernel<F: Float>(
 /// `(uy, ux)`.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn tvl1_dual_update_2d_kernel<F: Float>(
+pub fn tvl1_dual_update_2d_kernel<F: lumen_core::element::ImageFloat>(
     uy: &[F],
     ux: &[F],
     py_y_in: &[F],

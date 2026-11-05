@@ -16,7 +16,7 @@ pub fn invert_binary_mask_kernel<E: Numeric>(input: &[E], out: &mut [u32], len: 
 
 /// Evaluates `edt[i]` at foreground pixels (`mask[i] != 0`) and writes `0.0` at background pixels.
 #[cube(launch)]
-pub fn mask_at_edt_kernel<M: Numeric, F: Float>(
+pub fn mask_at_edt_kernel<M: Numeric, F: lumen_core::element::ImageFloat>(
     mask: &[M],
     edt: &[F],
     out: &mut [F],

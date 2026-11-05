@@ -5,7 +5,7 @@ use lumen_core::compute::element_position;
 
 /// Computes the 4-bit marching-squares cell mask (`0..16`) for each `(r, c)` cell in a `[h - 1, w - 1]` grid.
 #[cube(launch)]
-pub fn marching_squares_cell_mask_kernel<F: Float>(
+pub fn marching_squares_cell_mask_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     cell_mask: &mut [u32],
     w: u32,
@@ -43,7 +43,7 @@ pub fn marching_squares_cell_mask_kernel<F: Float>(
 /// `[d - 1, h - 1, w - 1]` grid.
 #[cube(launch)]
 #[allow(clippy::too_many_arguments)]
-pub fn marching_cubes_cell_mask_kernel<F: Float>(
+pub fn marching_cubes_cell_mask_kernel<F: lumen_core::element::ImageFloat>(
     input: &[F],
     cell_mask: &mut [u32],
     h: u32,
