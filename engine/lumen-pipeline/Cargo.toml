@@ -9,3 +9,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+arrow.workspace = true
+lumen-core = { workspace = true, default-features = false, features = ["compute"] }
+lumen-ops = { workspace = true, default-features = false }
+polars.workspace = true
+serde.workspace = true
+thiserror.workspace = true
