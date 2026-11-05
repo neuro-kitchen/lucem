@@ -19,6 +19,7 @@ lumen = { path = "bindings/python", editable = true }
 
 [tool.ruff]
 src = ["bindings/python/python"]
+line-length = 120
 
 [dependency-groups]
 dev = ["maturin>=1.16", "pytest>=9.2", "ruff>=0.17"]

@@ -1,0 +1,90 @@
+{
+  // lumen workspace settings. Line width 120 everywhere: rulers here, `max_width` in rustfmt.toml,
+  // `line-length` in pyproject.toml.
+
+  // ---- Editor ----
+  "editor.rulers": [120],
+  "editor.formatOnSave": true,
+  "files.insertFinalNewline": true,
+  "files.trimFinalNewlines": true,
+  "files.trimTrailingWhitespace": true,
+  "files.eol": "\n",
+
+  // ---- Files: hide and stop watching build output ----
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.ruff_cache": true
+  },
+  "files.watcherExclude": {
+    "**/target/**": true,
+    "**/.venv/**": true,
+    "**/__pycache__/**": true
+  },
+  "search.exclude": {
+    "**/target": true,
+    "**/.venv": true,
+    "**/*.so": true,
+    "Cargo.lock": true,
+    "uv.lock": true
+  },
+
+  // ---- Rust (rust-analyzer) ----
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+  },
+  // Clippy on save, over every target (tests, benches, examples) of the workspace
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.allTargets": true,
+  // Own target dir (target/rust-analyzer): checks don't block `cargo build` / `cargo test`, and
+  // they don't invalidate each other's caches
+  "rust-analyzer.cargo.targetDir": true,
+  // CubeCL's #[cube] and PyO3's #[pymodule] are proc macros: expand them for completions and types
+  "rust-analyzer.procMacro.enable": true,
+  "rust-analyzer.cargo.buildScripts.enable": true,
+  "rust-analyzer.imports.granularity.group": "module",
+  "rust-analyzer.imports.prefix": "crate",
+  "rust-analyzer.inlayHints.chainingHints.enable": true,
+  "rust-analyzer.inlayHints.parameterHints.enable": false,
+  "rust-analyzer.lens.enable": true,
+  "rust-analyzer.files.exclude": [".venv"],
+
+  // ---- Python (uv environment at .venv, ruff, pytest) ----
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.extraPaths": ["bindings/python/python"],
+  "python.analysis.typeCheckingMode": "basic",
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": ["bindings/python/tests"],
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.codeActionsOnSave": {
+      "source.organizeImports.ruff": "explicit",
+      "source.fixAll.ruff": "explicit"
+    }
+  },
+  "ruff.nativeServer": "on",
+
+  // ---- TOML (Cargo.toml, pyproject.toml) ----
+  "[toml]": {
+    "editor.defaultFormatter": "tamasfe.even-better-toml",
+    "editor.formatOnSave": false
+  },
+  "evenBetterToml.formatter.alignComments": false,
+
+  // ---- Markdown (README, docs, .knowledge) ----
+  "[markdown]": {
+    "editor.defaultFormatter": "yzhang.markdown-all-in-one",
+    "editor.wordWrap": "wordWrapColumn",
+    "editor.wordWrapColumn": 120,
+    // Two trailing spaces are a line break in Markdown: keep them
+    "files.trimTrailingWhitespace": false,
+    "editor.quickSuggestions": { "comments": "off", "strings": "off", "other": "off" }
+  },
+
+  // ---- JSON ----
+  "[json][jsonc]": {
+    "editor.tabSize": 2
+  }
+}

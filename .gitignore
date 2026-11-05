@@ -144,7 +144,9 @@ docs/api/python/site/
 
 # Editors and OS
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 *.swp
 *.swo
 *~

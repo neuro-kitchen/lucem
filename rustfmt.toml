@@ -1,0 +1,4 @@
+# Stable rustfmt options only (no nightly). Width matches .vscode/settings.json and ruff.
+edition = "2024"
+max_width = 120
+use_small_heuristics = "Max"
