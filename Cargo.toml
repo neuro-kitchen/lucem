@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "lumen_py",
-]   # + crates/lumen-<part> (planned: core, io, gpu, ml, view, app, cli)
+    "bindings/python/lumen-py",
+]   # + crates/lumen-<part>
 
 [workspace.package]
 version = "0.1.0"

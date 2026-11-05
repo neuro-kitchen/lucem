@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.16,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "lumen"
+dynamic = ["version"]
+description = "GPU image processing for biology, written once in CubeCL"
+readme = "README.md"
+authors = [{ name = "jesusdpa1" }]
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.5"]
+
+[project.urls]
+Repository = "https://github.com/neuro-kitchen/lumen"
+
+[tool.maturin]
+manifest-path = "lumen-py/Cargo.toml"
+module-name = "lumen._native"
+python-source = "python"
+features = ["extension-module"]

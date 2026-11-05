@@ -1,26 +1,24 @@
-[build-system]
-requires = ["maturin>=1.16,<2.0"]
-build-backend = "maturin"
-
 [project]
-name = "lumen"
+name = "lumen-dev"
 version = "0.1.0"
-description = "Fluorescence brain-section analysis in Rust (CubeCL, Burn, GPUI), with a Python SDK"
+description = "Development environment of the lumen repository (playground scripts, tests); the Python package is bindings/python"
 readme = "README.md"
 authors = [{ name = "jesusdpa1" }]
 requires-python = ">=3.12"
 dependencies = [
+    "lumen",
     "numpy>=2.5",
 ]
 
-[tool.maturin]
-manifest-path = "lumen_py/Cargo.toml"
-module-name = "lumen_bindings.lumen_bindings"
-python-source = "lumen_py"
-features = ["extension-module"]
+[tool.uv]
+# Not a package itself: it installs lumen (bindings/python) editable, built by maturin
+package = false
+
+[tool.uv.sources]
+lumen = { path = "bindings/python", editable = true }
 
 [tool.ruff]
-src = ["lumen_py/lumen_bindings", "lumen_py/lumen"]
+src = ["bindings/python/python"]
 
 [dependency-groups]
 dev = ["maturin>=1.16", "pytest>=9.2", "ruff>=0.17"]
