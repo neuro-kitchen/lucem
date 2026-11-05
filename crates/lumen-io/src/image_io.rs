@@ -7,6 +7,7 @@ use lumen_core::memory::DeviceArray;
 use lumen_core::Shape;
 
 use crate::error::{IoError, IoResult};
+use crate::ome_zarr::OmeZarrContainerInfo;
 
 /// A decoded image ready for GPU upload or display.
 #[derive(Debug, Clone)]
@@ -24,6 +25,8 @@ pub struct LoadedImage {
     pub luminance_f32: Vec<f32>,
     /// Interleaved RGBA `[height, width, 4]` in `[0.0, 1.0]` for color-space and stain ops.
     pub rgba_f32: Vec<f32>,
+    /// Optional OME-Zarr container metadata when loaded from an `.ome.zarr` bundle.
+    pub ome_zarr: Option<OmeZarrContainerInfo>,
 }
 
 impl LoadedImage {
@@ -52,6 +55,7 @@ impl LoadedImage {
             dtype_label: "float32".to_string(),
             luminance_f32,
             rgba_f32,
+            ome_zarr: None,
         })
     }
 
@@ -147,6 +151,7 @@ pub fn load_image_file(path: impl AsRef<Path>) -> IoResult<LoadedImage> {
         dtype_label: dtype_label.to_string(),
         luminance_f32,
         rgba_f32,
+        ome_zarr: None,
     })
 }
 

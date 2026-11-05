@@ -244,5 +244,6 @@ pub fn generate_phantom(kind: PhantomKind, width: usize, height: usize) -> Loade
         dtype_label: "float32 (synthetic)".to_string(),
         luminance_f32,
         rgba_f32,
+        ome_zarr: None,
     }
 }

@@ -64,7 +64,7 @@ impl PipelineExecutor {
         client: &Client,
         input_dev: &DeviceArray<f32>,
         modifiers: &[ModifierNode],
-        extract_contours_and_regions: bool,
+        extract_contours: bool,
     ) -> OpsResult<PipelineExecutionResult> {
         let t0 = Instant::now();
         let dims = input_dev.dims();
@@ -176,23 +176,24 @@ impl PipelineExecutor {
         let entropy_bits = shannon_entropy(client, &current, 64, 2.0).unwrap_or(0.0);
         let sharpness_score = blur_score(client, &current).unwrap_or(0.0);
 
-        let (contours, regions, regions_df, regions_batch) = if extract_contours_and_regions {
-            let c_list = marching_squares(client, &current, otsu_level).unwrap_or_default();
-            let bin_mask = DeviceArray::<u32>::empty(client, current.shape().clone())?;
-            elementwise::threshold_scalar_into(client, &current, otsu_level, true, &bin_mask)?;
-            let cc = label_components(client, &bin_mask, None)?;
-            let mut feats = region_features(client, &cc.labels, Some(&current)).unwrap_or_default();
-            // Filter out single-pixel noise speckles so the RegionProps table shows meaningful objects
-            feats.retain(|r| r.area >= 4);
-            let df = regions_to_dataframe(&feats)?;
-            let batch = regions_to_record_batch(&feats)?;
-            (c_list, feats, df, batch)
+        let contours = if extract_contours {
+            marching_squares(client, &current, otsu_level).unwrap_or_default()
         } else {
-            let empty_feats = Vec::new();
-            let df = regions_to_dataframe(&empty_feats)?;
-            let batch = regions_to_record_batch(&empty_feats)?;
-            (Vec::new(), empty_feats, df, batch)
+            Vec::new()
         };
+
+        let bin_mask = DeviceArray::<u32>::empty(client, current.shape().clone())?;
+        elementwise::threshold_scalar_into(client, &current, otsu_level, true, &bin_mask)?;
+        let cc = label_components(client, &bin_mask, None)?;
+        let mut regions = if cc.num_labels <= 8192 {
+            region_features(client, &cc.labels, Some(&current)).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        // Filter out single-pixel noise speckles so the RegionProps table shows meaningful objects
+        regions.retain(|r| r.area >= 4);
+        let regions_df = regions_to_dataframe(&regions)?;
+        let regions_batch = regions_to_record_batch(&regions)?;
 
         let output_host = current.to_host(client);
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
