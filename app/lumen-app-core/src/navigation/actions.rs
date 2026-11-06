@@ -73,6 +73,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("V H Z", "Select · Hand · Zoom"),
             ("M O P L N", "Rectangle · Ellipse · Polygon · Lasso · Point"),
             ("B E · [ ]", "Brush · Eraser · brush size"),
+            ("W T", "Wand (snaps to similar pixels) · Threshold (rapid segmentation)"),
             ("R I", "Ruler · Pixel probe"),
             ("Enter · Esc · Backspace", "Close the polygon · cancel · remove its last point"),
             ("Delete", "Delete the selected annotations"),

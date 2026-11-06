@@ -1,7 +1,6 @@
 //! The root view: one title bar (menus, the three workspaces, the project), the workspace shown,
 //! one status bar. Without an image the body is the home view.
 
-use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex, Selectable as _, Sizable as _, TitleBar};
@@ -15,14 +14,20 @@ use crate::data::store::{AppEvent, Store};
 use crate::domain::command::Command;
 use crate::navigation::actions::*;
 use crate::navigation::route::Workspace;
+use crate::domain::tool::Tool;
+use crate::screens::analyze::AnalyzeView;
 use crate::screens::explore::ExploreView;
+use crate::screens::palette::{Command as PaletteCommand, Palette, PaletteEvent};
+use crate::screens::pipeline::PipelineView;
 use crate::screens::pipeline::catalog::{operations, Template};
 use crate::ui::theme::{self, color};
-use crate::ui::widgets::EmptyState;
 
 pub struct LumenApp {
     store: Entity<Store>,
     pub explore: Entity<ExploreView>,
+    pub pipeline: Entity<PipelineView>,
+    analyze: Entity<AnalyzeView>,
+    palette: Option<(Entity<Palette>, Subscription)>,
     show_help: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -32,10 +37,12 @@ impl LumenApp {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         theme::apply(window, cx);
         let explore = cx.new(|cx| ExploreView::new(store.clone(), window, cx));
+        let pipeline = cx.new(|cx| PipelineView::new(store.clone(), window, cx));
+        let analyze = cx.new(|cx| AnalyzeView::new(store.clone(), cx));
         let subs = vec![cx.subscribe(&store, |_, _, _: &AppEvent, cx| cx.notify())];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Self { store, explore, show_help: false, focus, _subs: subs }
+        Self { store, explore, pipeline, analyze, palette: None, show_help: false, focus, _subs: subs }
     }
 
     pub fn open_path(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
@@ -84,6 +91,64 @@ impl LumenApp {
                 s.set_status(format!("{title} added to the pipeline"), cx);
             }
         });
+    }
+
+    /// Every command the search offers.
+    fn commands(&self, _cx: &mut Context<Self>) -> Vec<PaletteCommand> {
+        use std::rc::Rc;
+        let mut out = Vec::new();
+        let store = self.store.clone();
+        let mut add = |group: &'static str, name: String, hint: String, run: Rc<dyn Fn(&mut Window, &mut App)>| out.push(PaletteCommand { group, name, hint, run });
+        for w in Workspace::ALL {
+            let st = store.clone();
+            add("Go to", format!("{} workspace", w.title()), String::new(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.set_workspace(w, cx))));
+        }
+        let st = store.clone();
+        add("File", "Open image or OME-Zarr…".into(), "Ctrl+O".into(), Rc::new(move |_, cx| Self::open_image(&st, cx)));
+        let st = store.clone();
+        add("File", "Open project…".into(), "Ctrl+Shift+O".into(), Rc::new(move |_, cx| Self::open_project(&st, cx)));
+        let st = store.clone();
+        add("File", "Save project in folder…".into(), "Ctrl+Shift+S".into(), Rc::new(move |_, cx| Self::save_project(&st, cx)));
+        let st = store.clone();
+        add("Edit", "Undo".into(), "Ctrl+Z".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.undo(false, cx))));
+        let st = store.clone();
+        add("Edit", "Redo".into(), "Ctrl+Shift+Z".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.undo(true, cx))));
+        for t in Tool::BAR.iter().flatten().copied() {
+            let st = store.clone();
+            add("Tool", t.name().to_string(), t.key().to_uppercase(), Rc::new(move |_, cx| st.update(cx, |s, cx| {
+                s.set_tool(t, cx);
+                s.set_workspace(Workspace::Explore, cx);
+            })));
+        }
+        let st = store.clone();
+        add("View", "Rulers on / off".into(), "Ctrl+R".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.update_tool(|t| t.rulers = !t.rulers, cx))));
+        let st = store.clone();
+        add("View", "Results over the image on / off".into(), String::new(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.update_tool(|t| t.show_results = !t.show_results, cx))));
+        for c in operations() {
+            for it in c.items {
+                let Template::Op(op) = it.template else { continue };
+                let st = store.clone();
+                add("Operation", format!("{} · {}", c.name, it.label), it.hint, Rc::new(move |_, cx| Self::apply_op(&st, op.clone(), cx)));
+            }
+        }
+        out
+    }
+
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        let commands = self.commands(cx);
+        let palette = cx.new(|cx| Palette::new(commands, window, cx));
+        let sub = cx.subscribe_in(&palette, window, |this, _, _: &PaletteEvent, window, cx| {
+            this.palette = None;
+            window.focus(&this.focus, cx);
+            cx.notify();
+        });
+        self.palette = Some((palette, sub));
+        cx.notify();
     }
 
     // ------------------------------------------------------------------------
@@ -213,14 +278,8 @@ impl LumenApp {
                 crate::screens::home::home(&self.store, move |_, cx| Self::open_image(&a, cx), move |_, cx| Self::open_project(&b, cx), cx).into_any_element()
             }
             Workspace::Explore => self.explore.clone().into_any_element(),
-            Workspace::Pipeline => {
-                let n = s.doc.graph.nodes.len();
-                div().size_full().child(EmptyState::new(IconName::Workflow, "Pipeline canvas: next step", format!("The graph has {n} node(s). Its node editor (from dsp-kitchen, with typed ports) is being built; apply operations from the Operations menu meanwhile, their results show in Explore."))).into_any_element()
-            }
-            Workspace::Analyze => {
-                let n = s.doc.annotations.len();
-                div().size_full().child(EmptyState::new(IconName::Table2, "Analyze: next step", format!("{n} annotation(s). Measurement tables (annotations and objects from Measure nodes) come with the next build."))).into_any_element()
-            }
+            Workspace::Pipeline => self.pipeline.clone().into_any_element(),
+            Workspace::Analyze => self.analyze.clone().into_any_element(),
         }
     }
 
@@ -294,7 +353,7 @@ impl Render for LumenApp {
             .on_action(cx.listener(|this, _: &NewProject, _, cx| this.store.update(cx, |s, cx| s.new_project(cx))))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.store.update(cx, |s, cx| s.undo(false, cx))))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.store.update(cx, |s, cx| s.undo(true, cx))))
-            .on_action(cx.listener(|this, _: &CommandPalette, _, cx| this.store.update(cx, |s, cx| s.set_status("Search (Ctrl+K) comes with the next build; use the Operations menu", cx))))
+            .on_action(cx.listener(|this, _: &CommandPalette, w, cx| this.toggle_palette(w, cx)))
             .on_action(cx.listener(|this, _: &ShowHelp, _, cx| {
                 this.show_help = !this.show_help;
                 cx.notify();
@@ -316,6 +375,7 @@ impl Render for LumenApp {
             .child(self.title_bar(cx))
             .child(div().flex_1().min_h_0().child(self.body(cx)))
             .child(self.status_bar(cx))
+            .children(self.palette.as_ref().map(|(p, _)| p.clone()))
             .when(self.show_help, |d| d.child(self.help(cx)))
     }
 }
