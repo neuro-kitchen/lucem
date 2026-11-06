@@ -178,6 +178,42 @@ impl TileService {
             .collect()
     }
 
+    /// A region of one channel at `level` (that level's pixels, clipped), from the raw cache;
+    /// tiles not cached yet are read and kept.
+    pub fn read_region(&self, level: usize, channel: usize, x0: usize, y0: usize, w: usize, h: usize) -> Result<Vec<f32>, String> {
+        let py = &self.shared.pyramid;
+        let l = py.levels.get(level).ok_or_else(|| format!("no level {level}"))?.clone();
+        let mut out = vec![0.0f32; w * h];
+        let (x1, y1) = ((x0 + w).min(l.width), (y0 + h).min(l.height));
+        if x0 >= x1 || y0 >= y1 {
+            return Ok(out);
+        }
+        for ty in y0 / l.tile_h..=(y1 - 1) / l.tile_h {
+            for tx in x0 / l.tile_w..=(x1 - 1) / l.tile_w {
+                let rk = RawKey { level, channel, tx, ty };
+                let hit = self.shared.raw.lock().map_err(|e| e.to_string())?.get(&rk);
+                let (data, tw, th) = match hit {
+                    Some(t) => t,
+                    None => {
+                        let t = py.read_tile(level, channel, tx, ty).map_err(|e| e.to_string())?;
+                        let d = Arc::new(t.data);
+                        self.shared.raw.lock().map_err(|e| e.to_string())?.put(rk, d.clone(), t.width, t.height);
+                        (d, t.width, t.height)
+                    }
+                };
+                let (ox, oy) = (tx * l.tile_w, ty * l.tile_h);
+                let (ax0, ax1) = (x0.max(ox), x1.min(ox + tw));
+                let (ay0, ay1) = (y0.max(oy), y1.min(oy + th));
+                for y in ay0..ay1 {
+                    let src = (y - oy) * tw + (ax0 - ox);
+                    let dst = (y - y0) * w + (ax0 - x0);
+                    out[dst..dst + (ax1 - ax0)].copy_from_slice(&data[src..src + (ax1 - ax0)]);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Bytes held by the raw tile cache.
     pub fn cached_bytes(&self) -> usize {
         self.shared.raw.lock().map(|r| r.bytes).unwrap_or(0)
@@ -264,7 +300,7 @@ pub fn composite_bgra(planes: &[(&[f32], ChannelDisplay)], n: usize) -> Vec<u8> 
         let table: Vec<f32> = (0..LUT).map(|i| (i as f32 / (LUT - 1) as f32).powf(inv_gamma)).collect();
         let scale = (LUT - 1) as f32 / span;
         for (a, &v) in acc.iter_mut().zip(data.iter()) {
-            let i = ((v - d.min) * scale).clamp(0.0, (LUT - 1) as f32) as usize;
+            let i = ((v - d.min) * scale).clamp(0.0, (LUT - 1) as f32).round() as usize;
             let t = table[i];
             a[0] += d.color[0] * t;
             a[1] += d.color[1] * t;
@@ -273,9 +309,9 @@ pub fn composite_bgra(planes: &[(&[f32], ChannelDisplay)], n: usize) -> Vec<u8> 
     }
     let mut out = vec![0u8; n * 4];
     for (px, a) in out.chunks_exact_mut(4).zip(acc.iter()) {
-        px[0] = (a[2].min(1.0) * 255.0) as u8;
-        px[1] = (a[1].min(1.0) * 255.0) as u8;
-        px[2] = (a[0].min(1.0) * 255.0) as u8;
+        px[0] = (a[2].min(1.0) * 255.0).round() as u8;
+        px[1] = (a[1].min(1.0) * 255.0).round() as u8;
+        px[2] = (a[0].min(1.0) * 255.0).round() as u8;
         px[3] = 255;
     }
     out
