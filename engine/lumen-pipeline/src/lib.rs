@@ -7,7 +7,7 @@ pub mod executor;
 pub mod modifier;
 pub mod ops;
 
-pub use eval::{evaluate, halo, Plan, PlanNode};
+pub use eval::{at_downsample, evaluate, evaluate_all, halo, Plan, PlanNode};
 pub use executor::{PipelineExecutionResult, PipelineExecutor};
 pub use modifier::{ModifierKind, ModifierNode};
 pub use ops::{catalog, Op, PortType, Value};

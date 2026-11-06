@@ -69,6 +69,25 @@ fn eval(client: &Client, plan: &Plan, id: &str, source: &mut dyn FnMut(&str) -> 
     Ok(value)
 }
 
+/// Every node of `targets` (and what they need), each computed once; a node that fails gives its
+/// error and the others go on.
+pub fn evaluate_all(client: &Client, plan: &Plan, targets: &[String], source: &mut dyn FnMut(&str) -> Result<Value, String>) -> BTreeMap<String, Result<Value, String>> {
+    let mut memo: HashMap<String, Value> = HashMap::new();
+    let mut out = BTreeMap::new();
+    for t in targets {
+        let r = eval(client, plan, t, source, &mut memo, 0);
+        out.insert(t.clone(), r);
+    }
+    out
+}
+
+/// The plan with every op set for a level of downsample `ds` (see [`Op::at_downsample`]).
+pub fn at_downsample(plan: &Plan, ds: f64) -> Plan {
+    plan.iter()
+        .map(|(id, n)| (id.clone(), PlanNode { op: n.op.as_ref().map(|o| o.at_downsample(ds)), enabled: n.enabled, inputs: n.inputs.clone() }))
+        .collect()
+}
+
 /// Pixels of context `target` needs around a region: the largest sum of halos on any path to a
 /// source.
 pub fn halo(plan: &Plan, target: &str) -> usize {

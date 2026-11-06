@@ -264,6 +264,39 @@ impl Op {
         }
     }
 
+    /// The op for a level whose pixels are `ds` level-0 pixels: sizes (sigmas, radii, areas) are
+    /// given in level-0 px, so a result looks the same at every pyramid level.
+    pub fn at_downsample(&self, ds: f64) -> Op {
+        let ds = ds.max(1e-9);
+        let s = |v: f64| (v / ds).max(0.3);
+        let r = |v: usize| ((v as f64 / ds).round() as usize).max(1);
+        match self.clone() {
+            Op::GaussianBlur { sigma } => Op::GaussianBlur { sigma: s(sigma) },
+            Op::Median { radius } => Op::Median { radius: r(radius) },
+            Op::UnsharpMask { sigma, amount } => Op::UnsharpMask { sigma: s(sigma), amount },
+            Op::DifferenceOfGaussians { low_sigma, high_sigma } => {
+                let (lo, hi) = (s(low_sigma), s(high_sigma));
+                Op::DifferenceOfGaussians { low_sigma: lo, high_sigma: hi.max(lo * 1.01) }
+            }
+            Op::RollingBall { radius } => Op::RollingBall { radius: (radius / ds).max(1.0) },
+            Op::WhiteTophat { radius } => Op::WhiteTophat { radius: r(radius) },
+            Op::MorphGradient { radius } => Op::MorphGradient { radius: r(radius) },
+            Op::Canny { sigma } => Op::Canny { sigma: s(sigma) },
+            Op::Open { radius } => Op::Open { radius: r(radius) },
+            Op::Close { radius } => Op::Close { radius: r(radius) },
+            Op::Erode { radius } => Op::Erode { radius: r(radius) },
+            Op::Dilate { radius } => Op::Dilate { radius: r(radius) },
+            Op::RemoveSmall { min_size } => Op::RemoveSmall { min_size: ((min_size as f64) / (ds * ds)).round() as usize },
+            other => other,
+        }
+    }
+
+    /// Whether its result depends on statistics of its whole input (so a region of the image
+    /// needs the value computed on the whole image).
+    pub fn is_global(&self) -> bool {
+        matches!(self, Op::OtsuThreshold { .. })
+    }
+
     /// Checks the parameters (positive sizes, finite numbers).
     pub fn validate(&self) -> Result<(), String> {
         let pos = |name: &str, v: f64| if v.is_finite() && v > 0.0 { Ok(()) } else { Err(format!("{name} must be a positive number")) };
