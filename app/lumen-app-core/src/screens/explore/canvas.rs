@@ -22,7 +22,7 @@ use std::time::Duration;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    canvas, div, fill, point, px, size, App, Bounds, Context, Corners, CursorStyle, Entity, FocusHandle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
+    canvas, div, fill, point, px, size, App, AppContext as _, Bounds, Context, Corners, CursorStyle, Entity, FocusHandle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Render, RenderImage, ScrollDelta, ScrollEvent, Styled as _, Subscription, Task, Window,
 };
 use lumen_io::Pyramid;
@@ -32,6 +32,7 @@ use crate::data::results::ResultRequest;
 use crate::data::store::{AppEvent, Store};
 use crate::domain::annotation::{Annotation, Shape};
 use crate::domain::command::Command;
+use crate::domain::geometry;
 use crate::domain::project::ChannelDoc;
 use crate::domain::tool::{step_brush, Tool};
 use crate::ui::theme::{self, color};
@@ -52,6 +53,115 @@ enum Gesture {
     Path { tool: Tool, points: Vec<[f64; 2]>, radius: f64 },
     /// Moving the selected annotations.
     Move { start: [f64; 2], now: [f64; 2], moved: bool },
+    /// The wand painting: a mask grown from each stamp over similar pixels.
+    Wand(Box<Wand>),
+}
+
+/// A wand stroke: the visible region of a level, its visible channels in display units (0–1),
+/// the painted mask and its bounds.
+#[derive(Debug, Clone)]
+struct Wand {
+    level: usize,
+    ds: f64,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    channels: Vec<Vec<f32>>,
+    mask: Vec<u8>,
+    /// `x0, y0, x1, y1` (exclusive) of what is painted, region px.
+    bbox: Option<(usize, usize, usize, usize)>,
+    /// Brush radius, level-0 px.
+    radius: f64,
+    last: [f64; 2],
+    tolerance: f32,
+    color: [u8; 3],
+    overlay: Option<([f64; 4], Arc<RenderImage>)>,
+}
+
+impl Wand {
+    /// Paints the pixels within the brush that are connected to its centre and look like it.
+    fn stamp(&mut self, p: [f64; 2]) {
+        let (cx, cy) = (p[0] / self.ds - self.x0 as f64, p[1] / self.ds - self.y0 as f64);
+        if cx < 0.0 || cy < 0.0 || cx >= self.w as f64 || cy >= self.h as f64 {
+            return;
+        }
+        let (sx, sy) = (cx as usize, cy as usize);
+        let r = (self.radius / self.ds).max(1.0);
+        let seed: Vec<f32> = self.channels.iter().map(|c| c[sy * self.w + sx]).collect();
+        let tol = self.tolerance;
+        let (w, h) = (self.w as isize, self.h as isize);
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![(sx as isize, sy as isize)];
+        seen.insert((sx as isize, sy as isize));
+        let (mut bx0, mut by0, mut bx1, mut by1) = self.bbox.map_or((usize::MAX, usize::MAX, 0, 0), |b| b);
+        while let Some((x, y)) = stack.pop() {
+            let i = (y * w + x) as usize;
+            self.mask[i] = 1;
+            (bx0, by0, bx1, by1) = (bx0.min(x as usize), by0.min(y as usize), bx1.max(x as usize + 1), by1.max(y as usize + 1));
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, ny) = (x + dx, y + dy);
+                if nx < 0 || ny < 0 || nx >= w || ny >= h || seen.contains(&(nx, ny)) {
+                    continue;
+                }
+                let (ddx, ddy) = (nx as f64 + 0.5 - cx, ny as f64 + 0.5 - cy);
+                if ddx * ddx + ddy * ddy > r * r {
+                    continue;
+                }
+                let j = (ny * w + nx) as usize;
+                if self.channels.iter().zip(&seed).all(|(c, s)| (c[j] - s).abs() <= tol) {
+                    seen.insert((nx, ny));
+                    stack.push((nx, ny));
+                }
+            }
+        }
+        if bx1 > bx0 {
+            self.bbox = Some((bx0, by0, bx1, by1));
+        }
+        self.last = p;
+    }
+
+    /// Stamps along the segment from the last stamp to `p`.
+    fn stroke_to(&mut self, p: [f64; 2]) {
+        let step = (self.radius * 0.5).max(self.ds);
+        let (a, d) = (self.last, (p[0] - self.last[0]).hypot(p[1] - self.last[1]));
+        if d < step {
+            return;
+        }
+        let n = (d / step).ceil() as usize;
+        for k in 1..=n {
+            let t = k as f64 / n as f64;
+            self.stamp([a[0] + t * (p[0] - a[0]), a[1] + t * (p[1] - a[1])]);
+        }
+        self.refresh_overlay();
+    }
+
+    /// The painted part as an image over the canvas.
+    fn refresh_overlay(&mut self) {
+        let Some((bx0, by0, bx1, by1)) = self.bbox else { return };
+        let (bw, bh) = (bx1 - bx0, by1 - by0);
+        let mut crop = Vec::with_capacity(bw * bh);
+        for y in by0..by1 {
+            crop.extend(self.mask[y * self.w + bx0..y * self.w + bx1].iter().map(|&v| v as f32));
+        }
+        let img = lumen_view::render_layer(&crop, bw, bh, lumen_view::LayerStyle::Mask { color: self.color, alpha: 0.5 });
+        let ds = self.ds;
+        self.overlay = Some(([(self.x0 + bx0) as f64 * ds, (self.y0 + by0) as f64 * ds, bw as f64 * ds, bh as f64 * ds], img));
+    }
+
+    /// The painted regions as level-0 polygons.
+    fn polygons(&self) -> Vec<Vec<[f64; 2]>> {
+        let Some((bx0, by0, bx1, by1)) = self.bbox else { return Vec::new() };
+        let (bw, bh) = (bx1 - bx0, by1 - by0);
+        let mut crop = Vec::with_capacity(bw * bh);
+        for y in by0..by1 {
+            crop.extend_from_slice(&self.mask[y * self.w + bx0..y * self.w + bx1]);
+        }
+        geometry::mask_to_polygons(&crop, bw, bh, 4)
+            .into_iter()
+            .map(|p| geometry::simplify(&p, 0.6).into_iter().map(|[x, y]| [(x + (self.x0 + bx0) as f64) * self.ds, (y + (self.y0 + by0) as f64) * self.ds]).collect())
+            .collect()
+    }
 }
 
 struct Viewer {
@@ -86,7 +196,12 @@ pub struct ImageCanvas {
     space: bool,
     /// Textures to free at the next paint.
     drops: Vec<Arc<RenderImage>>,
-    refresh_token: u64,
+    /// The pending result refresh (replaced by each camera move: one timer, not one per move).
+    refresh: Option<Task<()>>,
+    /// The Threshold tool's live mask over the view, and what it was made for.
+    threshold: Option<([f64; 4], Arc<RenderImage>)>,
+    threshold_for: String,
+    threshold_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -114,7 +229,10 @@ impl ImageCanvas {
             mouse: None,
             space: false,
             drops: Vec::new(),
-            refresh_token: 0,
+            refresh: None,
+            threshold: None,
+            threshold_for: String::new(),
+            threshold_task: None,
             _subs: subs,
         }
     }
@@ -186,17 +304,93 @@ impl ImageCanvas {
     /// The camera moved: results for the new view follow once it rests (200 ms).
     fn camera_changed(&mut self, cx: &mut Context<Self>) {
         cx.notify();
-        self.refresh_token += 1;
-        let token = self.refresh_token;
-        cx.spawn(async move |this, cx| {
+        self.refresh = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(200)).await;
+            let _ = this.update(cx, |c, cx| c.request_results(cx));
+        }));
+    }
+
+    /// The Threshold tool's mask over the visible region, recomputed (off the UI thread) when
+    /// the settings or the view change.
+    fn sync_threshold(&mut self, cx: &mut Context<Self>) {
+        let t = self.store.read(cx).tool.clone();
+        let Some(v) = &self.viewer else { return };
+        if t.tool != Tool::Threshold {
+            self.threshold = None;
+            self.threshold_for.clear();
+            return;
+        }
+        let py = v.pyramid.clone();
+        let rect = self.visible();
+        // The finest level whose visible region fits 1024 px a side
+        let level = (0..py.levels.len()).find(|&l| (rect[2] / py.levels[l].downsample).max(rect[3] / py.levels[l].downsample) <= 1024.0).unwrap_or(py.coarsest());
+        let key = format!("{level}/{:.0}/{:.0}/{:.0}/{:.0}/{}/{}/{}/{}", rect[0], rect[1], rect[2], rect[3], t.threshold_channel, t.threshold_value, t.threshold_above, t.threshold_sigma);
+        if key == self.threshold_for {
+            return;
+        }
+        self.threshold_for = key;
+        let color = self.store.read(cx).doc.class(&t.class).map_or([0, 220, 255], |c| c.color);
+        let task = cx.background_spawn(async move {
+            let l = py.levels[level].clone();
+            let ds = l.downsample;
+            let x0 = (rect[0] / ds).floor().max(0.0) as usize;
+            let y0 = (rect[1] / ds).floor().max(0.0) as usize;
+            let x1 = (((rect[0] + rect[2]) / ds).ceil().max(0.0) as usize).min(l.width);
+            let y1 = (((rect[1] + rect[3]) / ds).ceil().max(0.0) as usize).min(l.height);
+            if x1 <= x0 || y1 <= y0 {
+                return None;
+            }
+            let (w, h) = (x1 - x0, y1 - y0);
+            let mut v = py.read_region(level, t.threshold_channel, x0, y0, w, h).ok()?;
+            geometry::blur(&mut v, w, h, t.threshold_sigma / ds);
+            let mask: Vec<f32> = v.iter().map(|&x| if (x >= t.threshold_value) == t.threshold_above { 1.0 } else { 0.0 }).collect();
+            let img = lumen_view::render_layer(&mask, w, h, lumen_view::LayerStyle::Mask { color, alpha: 0.5 });
+            Some(([x0 as f64 * ds, y0 as f64 * ds, w as f64 * ds, h as f64 * ds], img))
+        });
+        self.threshold_task = Some(cx.spawn(async move |this, cx| {
+            let r = task.await;
             let _ = this.update(cx, |c, cx| {
-                if c.refresh_token == token {
-                    c.request_results(cx);
+                if let Some(old) = std::mem::replace(&mut c.threshold, r) {
+                    c.drops.push(old.1);
                 }
+                cx.notify();
             });
-        })
-        .detach();
+        }));
+    }
+
+    /// Starts a wand stroke at `p`: reads the visible region of the visible channels.
+    fn start_wand(&mut self, p: [f64; 2], cx: &mut Context<Self>) -> Option<Wand> {
+        let v = self.viewer.as_ref()?;
+        let py = v.pyramid.clone();
+        let level = py.level_for_zoom(self.zoom * self.scale as f64);
+        let l = py.levels[level].clone();
+        let ds = l.downsample;
+        let rect = self.visible();
+        let x0 = (rect[0] / ds).floor().max(0.0) as usize;
+        let y0 = (rect[1] / ds).floor().max(0.0) as usize;
+        let x1 = (((rect[0] + rect[2]) / ds).ceil().max(0.0) as usize).min(l.width);
+        let y1 = (((rect[1] + rect[3]) / ds).ceil().max(0.0) as usize).min(l.height);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let (w, h) = (x1 - x0, y1 - y0);
+        let mut channels = Vec::new();
+        for (c, d) in v.display_docs.iter().enumerate().filter(|(_, d)| d.visible) {
+            let mut raw = v.service.read_region(level, c, x0, y0, w, h).ok()?;
+            let span = (d.max - d.min).max(1e-12);
+            raw.iter_mut().for_each(|x| *x = ((*x - d.min) / span).clamp(0.0, 1.0));
+            channels.push(raw);
+        }
+        if channels.is_empty() {
+            return None;
+        }
+        let s = self.store.read(cx);
+        let color = s.doc.class(&s.tool.class).map_or([255, 255, 255], |c| c.color);
+        let mut wand = Wand { level, ds, x0, y0, w, h, channels, mask: vec![0; w * h], bbox: None, radius: self.brush_radius(cx), last: p, tolerance: s.tool.wand_tolerance, color, overlay: None };
+        let _ = wand.level;
+        wand.stamp(p);
+        wand.refresh_overlay();
+        Some(wand)
     }
 
     fn request_results(&mut self, cx: &mut Context<Self>) {
@@ -484,6 +678,12 @@ impl ImageCanvas {
                 let radius = self.brush_radius(cx);
                 self.gesture = Some(Gesture::Path { tool, points: vec![p], radius });
             }
+            Tool::Wand => {
+                if let Some(w) = self.start_wand(p, cx) {
+                    self.gesture = Some(Gesture::Wand(Box::new(w)));
+                }
+            }
+            Tool::Threshold => self.gesture = Some(Gesture::Pan { mouse: local, center: self.center }),
             Tool::Polygon => {
                 if e.click_count >= 2 {
                     self.close_polygon(cx);
@@ -524,9 +724,19 @@ impl ImageCanvas {
             Some(Gesture::Drag { b, .. }) => *b = p,
             Some(Gesture::Path { points, radius, tool }) => {
                 let last = *points.last().expect("starts with one point");
-                let step = if *tool == Tool::Lasso { 2.0 / zoom } else { (*radius * 0.25).max(1.0 / zoom) };
+                // Points every 2 screen px (fine enough on screen, few enough to draw fast)
+                let step = if *tool == Tool::Lasso { 2.0 / zoom } else { (2.0 / zoom).max(*radius * 0.1) };
                 if (p[0] - last[0]).hypot(p[1] - last[1]) >= step {
                     points.push(p);
+                }
+            }
+            Some(Gesture::Wand(w)) => {
+                let old = w.overlay.as_ref().map(|o| o.1.clone());
+                w.stroke_to(p);
+                if let (Some(o), Some(n)) = (old, w.overlay.as_ref()) {
+                    if !Arc::ptr_eq(&o, &n.1) {
+                        self.drops.push(o);
+                    }
                 }
             }
             Some(Gesture::Move { start, now, moved }) => {
@@ -561,6 +771,21 @@ impl ImageCanvas {
                 Tool::Brush | Tool::Eraser => self.add_annotation(Shape::Stroke { points, radius, erase: tool == Tool::Eraser }, cx),
                 _ => {}
             },
+            Gesture::Wand(w) => {
+                if let Some(o) = &w.overlay {
+                    self.drops.push(o.1.clone());
+                }
+                let shapes: Vec<Shape> = w.polygons().into_iter().filter(|p| p.len() >= 3).map(|points| Shape::Polygon { points }).collect();
+                if let Some(image) = self.viewer.as_ref().map(|v| v.image.clone()) {
+                    let class = self.store.read(cx).tool.class.clone();
+                    let annotations: Vec<Annotation> = shapes.into_iter().map(|shape| Annotation { id: String::new(), image: image.clone(), shape, class: class.clone(), note: String::new() }).collect();
+                    if !annotations.is_empty() {
+                        self.store.update(cx, |s, cx| {
+                            let _ = s.execute(Command::AddAnnotations { annotations }, cx);
+                        });
+                    }
+                }
+            }
             Gesture::Move { start, now, moved } => {
                 if moved {
                     let ids: Vec<String> = self.store.read(cx).selection.iter().cloned().collect();
@@ -818,7 +1043,8 @@ enum Fill {
 }
 
 fn stroke_of(shape: &Shape, color: Hsla, selected: bool, zoom: f32, to_screen: impl Fn([f64; 2]) -> (f32, f32)) -> Stroke {
-    let points: Vec<(f32, f32)> = shape.outline().into_iter().map(&to_screen).collect();
+    // At screen resolution: a long stroke seen zoomed out is a few points to draw
+    let points: Vec<(f32, f32)> = geometry::thin(&shape.outline().into_iter().map(&to_screen).collect::<Vec<_>>(), 1.5);
     match shape {
         Shape::Point { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: true },
         Shape::Line { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: false },
@@ -911,7 +1137,7 @@ impl Render for ImageCanvas {
             self.fit(cx);
         }
         let tiles = self.plan_tiles();
-        let drops = std::mem::take(&mut self.drops);
+        self.sync_threshold(cx);
         let s = self.store.read(cx);
         let tool = s.tool.clone();
         let image = self.viewer.as_ref().map(|v| v.image.clone());
@@ -928,6 +1154,14 @@ impl Render for ImageCanvas {
                 }
             }
         }
+        if let Some(t) = &self.threshold {
+            overlays.push((t.0, t.1.clone()));
+        }
+        if let Some(Gesture::Wand(w)) = &self.gesture {
+            if let Some(o) = &w.overlay {
+                overlays.push((o.0, o.1.clone()));
+            }
+        }
         let strokes = self.annotation_paths(cx);
         let labels = self.labels(cx);
         let (zoom, center) = (self.zoom, self.center);
@@ -938,6 +1172,7 @@ impl Render for ImageCanvas {
             _ => None,
         };
         let cursor = self.cursor(cx);
+        let drops = std::mem::take(&mut self.drops);
         let bounds_cell = self.bounds.clone();
         let plane = canvas(
             move |bounds, _, _| bounds_cell.set(bounds),
