@@ -9,8 +9,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+async-channel.workspace = true
 gpui-kit.workspace = true
 image.workspace = true
 lumen-core = { workspace = true, default-features = false, features = ["compute"] }
+lumen-io.workspace = true
 serde.workspace = true
 smallvec.workspace = true
