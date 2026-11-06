@@ -78,6 +78,8 @@ pub enum Command {
     },
     /// Adds an annotation (an empty id gets one).
     AddAnnotation { annotation: Annotation },
+    /// Adds many annotations in one step (ids given where empty).
+    AddAnnotations { annotations: Vec<Annotation> },
     /// Replaces the annotation with its id.
     SetAnnotation { annotation: Annotation },
     RemoveAnnotations { ids: Vec<String> },
@@ -322,6 +324,16 @@ fn apply_inner(doc: &mut ProjectDoc, cmd: Command) -> Result<Changed, CommandErr
                 return Err(invalid(format!("annotation id {:?} is taken", annotation.id)));
             }
             doc.annotations.push(annotation);
+            Ok(Changed::Annotations)
+        }
+        C::AddAnnotations { annotations } => {
+            for mut a in annotations {
+                check_annotation(doc, &a)?;
+                if a.id.is_empty() || doc.annotations.iter().any(|x| x.id == a.id) {
+                    a.id = doc.new_annotation_id();
+                }
+                doc.annotations.push(a);
+            }
             Ok(Changed::Annotations)
         }
         C::SetAnnotation { annotation } => {

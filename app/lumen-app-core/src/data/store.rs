@@ -14,13 +14,15 @@ use lumen_io::{generate_phantom, PhantomKind, Pyramid};
 
 use crate::domain::command::{apply, Changed, Command, CommandError};
 use crate::domain::graph::NodeKind;
+use crate::domain::annotation::{Annotation, Shape};
+use crate::domain::geometry;
 use crate::domain::project::{ChannelDoc, ProjectDoc, PROJECT_FILE};
 use crate::domain::tool::{Tool, ToolState};
 use crate::navigation::route::Workspace;
 
 use super::device::Device;
 use super::prefs::Prefs;
-use super::results::{compute, ResultRequest, Results};
+use super::results::{analysis_key, analyze, compute, Analysis, ResultRequest, Results};
 
 /// Undo steps kept.
 const UNDO_DEPTH: usize = 200;
@@ -57,6 +59,13 @@ pub struct Store {
     /// Selected annotations (ids).
     pub selection: BTreeSet<String>,
     pub results: Results,
+    /// The whole-image pass of the shown image (previews, Otsu thresholds, tables).
+    pub analysis: Option<Arc<Analysis>>,
+    /// Per image, per channel: the histogram of the coarsest level.
+    pub histograms: HashMap<String, Vec<ChannelHistogram>>,
+    /// The document before a live edit (a drag on a histogram or colour wheel), to undo it in
+    /// one step.
+    live_base: Option<ProjectDoc>,
     /// Results are being computed.
     pub computing: bool,
     last_request: Option<ResultRequest>,
@@ -87,6 +96,9 @@ impl Store {
             tool,
             selection: BTreeSet::new(),
             results: Results::new(),
+            analysis: None,
+            histograms: HashMap::new(),
+            live_base: None,
             computing: false,
             last_request: None,
             results_gen: Arc::new(AtomicU64::new(0)),
@@ -320,7 +332,9 @@ impl Store {
                         let cmd = Command::AddImage { path: stored, name: py.name.clone(), channels };
                         if s.execute(cmd, cx).is_ok() {
                             let id = s.doc.images.last().map(|i| i.id.clone()).unwrap_or_default();
-                            s.pyramids.insert(id.clone(), Arc::new(py));
+                            let py = Arc::new(py);
+                            s.pyramids.insert(id.clone(), py.clone());
+                            s.compute_histograms(&id, py, cx);
                             s.set_workspace(Workspace::Explore, cx);
                             s.set_status(format!("Opened {summary}"), cx);
                             cx.emit(AppEvent::ImageReady(id));
@@ -364,7 +378,9 @@ impl Store {
                                     img.channels = channels;
                                 }
                             }
-                            s.pyramids.insert(id.clone(), Arc::new(py));
+                            let py = Arc::new(py);
+                            s.pyramids.insert(id.clone(), py.clone());
+                            s.compute_histograms(&id, py, cx);
                             cx.emit(AppEvent::ImageReady(id));
                         }
                         Err(e) => s.set_status(format!("Could not open {}: {e}", path.display()), cx),
@@ -374,6 +390,32 @@ impl Store {
             })
             .detach();
         }
+    }
+
+    /// Histograms of every channel of `id` (coarsest level), in the background.
+    fn compute_histograms(&mut self, id: &str, py: Arc<Pyramid>, cx: &mut Context<Self>) {
+        let id = id.to_string();
+        let task = cx.background_spawn(async move {
+            let level = py.coarsest();
+            let l = py.levels[level].clone();
+            (0..py.channels.len())
+                .map(|c| {
+                    let v = py.read_region(level, c, 0, 0, l.width, l.height).unwrap_or_default();
+                    let lo = v.iter().copied().filter(|x| x.is_finite()).fold(f32::MAX, f32::min);
+                    let hi = v.iter().copied().filter(|x| x.is_finite()).fold(f32::MIN, f32::max);
+                    let (lo, hi) = if hi > lo { (lo, hi) } else { (0.0, 1.0) };
+                    ChannelHistogram { bins: geometry::histogram(&v, lo, hi, HIST_BINS), lo, hi }
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let h = task.await;
+            let _ = this.update(cx, |s, cx| {
+                s.histograms.insert(id, h);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn active_pyramid(&self) -> Option<&Arc<Pyramid>> {
@@ -396,13 +438,11 @@ impl Store {
     /// Computes the results again for the last place on screen.
     pub fn recompute(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.last_request.clone() else { return };
-        if !self.tool.show_results {
-            return;
-        }
-        let has_views = self.doc.graph.views().any(|v| self.doc.graph.images_of(&v.id).contains(&req.image));
-        if !has_views {
-            if !self.results.is_empty() {
+        let has_nodes = self.doc.graph.nodes.iter().any(|n| self.doc.graph.images_of(&n.id).contains(&req.image));
+        if !has_nodes {
+            if !self.results.is_empty() || self.analysis.is_some() {
                 self.results.clear();
+                self.analysis = None;
                 cx.emit(AppEvent::Results);
             }
             return;
@@ -415,36 +455,57 @@ impl Store {
         let generation = self.results_gen.fetch_add(1, Ordering::AcqRel) + 1;
         let latest = self.results_gen.clone();
         let doc = self.doc.clone();
+        let key = analysis_key(&doc, &req.image);
+        // The whole-image pass again only when what it depends on changed
+        let cached = self.analysis.clone().filter(|a| a.key == key);
+        let show = self.tool.show_results;
+        let image = req.image.clone();
         self.computing = true;
         cx.emit(AppEvent::Results);
         let task = cx.background_spawn(async move {
-            // A newer request already waits: skip this one
             if latest.load(Ordering::Acquire) != generation {
                 return None;
             }
-            Some(compute(&device.client, &doc, &pyramid, &req))
+            let analysis = match cached {
+                Some(a) => a,
+                None => Arc::new(analyze(&device.client, &doc, &pyramid, &req.image)),
+            };
+            if latest.load(Ordering::Acquire) != generation {
+                return Some((analysis, None));
+            }
+            let layers = show.then(|| compute(&device.client, &doc, &pyramid, &req, &analysis));
+            Some((analysis, layers))
         });
         cx.spawn(async move |this, cx| {
             let out = task.await;
             let _ = this.update(cx, |s, cx| {
+                if let Some((analysis, _)) = &out {
+                    // A finished analysis is worth keeping even when a newer request waits
+                    if s.analysis.as_ref().is_none_or(|a| a.key != analysis.key) {
+                        s.analysis = Some(analysis.clone());
+                    }
+                }
                 if s.results_gen.load(Ordering::Acquire) != generation {
                     return;
                 }
                 s.computing = false;
-                if let Some(list) = out {
-                    let errors: Vec<String> = list.iter().filter_map(|r| r.error.clone().map(|e| format!("{}: {e}", r.view))).collect();
+                if let Some((analysis, Some(list))) = out {
+                    s.results.retain(|v, r| r.image != image && s.doc.graph.contains(v));
+                    let errors: Vec<String> = list.iter().filter_map(|r| r.error.clone().map(|e| format!("{}: {e}", r.view))).chain(analysis.errors.iter().map(|(n, e)| format!("{n}: {e}"))).collect();
                     let ms: f64 = list.iter().map(|r| r.ms).sum();
-                    s.results.retain(|v, r| r.image != list.first().map_or(String::new(), |f| f.image.clone()) && s.doc.graph.contains(v));
                     for r in list {
                         s.results.insert(r.view.clone(), r);
                     }
-                    if let Some(e) = errors.first() {
-                        s.status = e.clone();
-                        cx.emit(AppEvent::Status);
-                    } else if ms > 0.0 {
-                        s.status = format!("Results computed in {ms:.0} ms on {}", s.device.as_ref().map_or("—", |d| d.label.as_str()));
-                        cx.emit(AppEvent::Status);
-                    }
+                    s.status = match errors.first() {
+                        Some(e) => e.clone(),
+                        None => format!(
+                            "Results in {ms:.0} ms (whole image at level {}: {:.0} ms) on {}",
+                            analysis.level,
+                            analysis.ms,
+                            s.device.as_ref().map_or("—", |d| d.label.as_str())
+                        ),
+                    };
+                    cx.emit(AppEvent::Status);
                 }
                 cx.emit(AppEvent::Results);
                 cx.notify();
@@ -453,6 +514,105 @@ impl Store {
         .detach();
     }
 
+    // ------------------------------------------------------------------------
+    // Live edits (one undo step for a whole drag)
+    // ------------------------------------------------------------------------
+
+    /// Shows channel `channel` of `image` as `display` while a drag goes on (not saved, not in the
+    /// undo history yet).
+    pub fn set_channel_live(&mut self, image: &str, channel: usize, display: ChannelDoc, cx: &mut Context<Self>) {
+        if self.live_base.is_none() {
+            self.live_base = Some(self.doc.clone());
+        }
+        if let Some(slot) = self.doc.image_mut(image).and_then(|i| i.channels.get_mut(channel)) {
+            *slot = display;
+            cx.emit(AppEvent::Document(Changed::Display(image.to_string())));
+            cx.notify();
+        }
+    }
+
+    /// The drag ended: the change becomes one command (undoable, saved).
+    pub fn commit_live(&mut self, cx: &mut Context<Self>) {
+        let Some(base) = self.live_base.take() else { return };
+        let edited = std::mem::replace(&mut self.doc, base);
+        for img in &edited.images {
+            let before = self.doc.image(&img.id).map(|i| i.channels.clone()).unwrap_or_default();
+            for (c, ch) in img.channels.iter().enumerate() {
+                if before.get(c) != Some(ch) {
+                    let _ = self.execute(Command::SetChannel { image: img.id.clone(), channel: c, display: ch.clone() }, cx);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Threshold tool
+    // ------------------------------------------------------------------------
+
+    /// Annotations from the threshold on the whole image (at a level of ≤ 4096 px a side): one
+    /// region per object above (or below) the threshold, of the drawing class.
+    pub fn threshold_to_annotations(&mut self, cx: &mut Context<Self>) {
+        let Some(img) = self.doc.active_image.clone() else { return };
+        let Some(py) = self.pyramids.get(&img).cloned() else { return };
+        let t = self.tool.clone();
+        let class = t.class.clone();
+        self.set_status("Thresholding the whole image…", cx);
+        let task = cx.background_spawn(async move {
+            let level = (0..py.levels.len()).find(|&l| py.levels[l].width.max(py.levels[l].height) <= 4096).unwrap_or(py.coarsest());
+            let l = py.levels[level].clone();
+            let ds = l.downsample;
+            let mut v = py.read_region(level, t.threshold_channel, 0, 0, l.width, l.height).map_err(|e| e.to_string())?;
+            geometry::blur(&mut v, l.width, l.height, t.threshold_sigma / ds);
+            let mask: Vec<u8> = v.iter().map(|&x| u8::from((x >= t.threshold_value) == t.threshold_above)).collect();
+            let min_px = (t.threshold_min_area / (ds * ds)).ceil().max(1.0) as usize;
+            let polys = geometry::mask_to_polygons(&mask, l.width, l.height, min_px);
+            let shapes: Vec<Shape> = polys
+                .into_iter()
+                .map(|p| geometry::simplify(&p, 0.75))
+                .filter(|p| p.len() >= 3)
+                .map(|p| Shape::Polygon { points: p.into_iter().map(|[x, y]| [x * ds, y * ds]).collect() })
+                .collect();
+            Ok::<_, String>((shapes, level))
+        });
+        cx.spawn(async move |this, cx| {
+            let r = task.await;
+            let _ = this.update(cx, |s, cx| match r {
+                Ok((shapes, level)) => {
+                    let n = shapes.len();
+                    let annotations = shapes.into_iter().map(|shape| Annotation { id: String::new(), image: img.clone(), shape, class: class.clone(), note: String::new() }).collect();
+                    if s.execute(Command::AddAnnotations { annotations }, cx).is_ok() {
+                        s.set_status(format!("{n} region(s) of class {class} from the threshold (level {level})"), cx);
+                    }
+                }
+                Err(e) => s.set_status(format!("Threshold failed: {e}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// The threshold as a pipeline chain: channel → blur → threshold → remove small → view.
+    pub fn threshold_to_pipeline(&mut self, cx: &mut Context<Self>) {
+        let Some(img) = self.doc.active().cloned() else { return };
+        let t = self.tool.clone();
+        let top = self.pyramids.get(&img.id).and_then(|p| p.channels.get(t.threshold_channel).map(|c| c.range.1)).unwrap_or(1.0).max(1.0);
+        let value = (t.threshold_value / top) as f64;
+        let ops = [
+            lumen_pipeline::Op::GaussianBlur { sigma: t.threshold_sigma.max(0.5) },
+            lumen_pipeline::Op::Threshold { value },
+            lumen_pipeline::Op::RemoveSmall { min_size: t.threshold_min_area.round() as usize },
+        ];
+        let mut view: Option<String> = None;
+        for op in ops {
+            let before: Vec<String> = self.doc.graph.views().map(|v| v.id.clone()).collect();
+            if self.execute(Command::ApplyOp { op, view: view.clone(), image: img.id.clone(), channel: t.threshold_channel }, cx).is_err() {
+                return;
+            }
+            if view.is_none() {
+                view = self.doc.graph.views().map(|v| v.id.clone()).find(|v| !before.contains(v));
+            }
+        }
+        self.set_status("Threshold added to the pipeline (sizes in level-0 px)", cx);
+    }
     /// Starts the compute device in the background; results follow once it is up.
     pub fn ensure_device(&mut self, cx: &mut Context<Self>) {
         if self.device.is_some() || self.device_pending {
@@ -486,6 +646,13 @@ impl Store {
     pub fn set_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
         if self.tool.tool != tool {
             self.tool.tool = tool;
+            // The Threshold tool starts at the channel's Otsu threshold
+            if tool == Tool::Threshold && self.tool.threshold_value == 0.0 {
+                let c = self.tool.threshold_channel;
+                if let Some(h) = self.doc.active_image.as_ref().and_then(|id| self.histograms.get(id)).and_then(|h| h.get(c)) {
+                    self.tool.threshold_value = h.otsu();
+                }
+            }
             cx.emit(AppEvent::Tool);
             cx.notify();
         }
@@ -506,6 +673,14 @@ impl Store {
             }
         }
         cx.emit(AppEvent::Tool);
+        cx.notify();
+    }
+
+    /// Explore's side tabs (`None`: that side closed).
+    pub fn set_side_tabs(&mut self, left: Option<String>, right: Option<String>, cx: &mut Context<Self>) {
+        self.prefs.left_tab = left;
+        self.prefs.right_tab = right;
+        self.save_prefs();
         cx.notify();
     }
 
@@ -531,6 +706,24 @@ impl Store {
             self.selection.clear();
             self.set_status(format!("Deleted {n} annotation(s)"), cx);
         }
+    }
+}
+
+/// Bins of a channel histogram.
+pub const HIST_BINS: usize = 256;
+
+/// A channel's histogram over `[lo, hi]` (raw values of the coarsest level).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelHistogram {
+    pub bins: Vec<u32>,
+    pub lo: f32,
+    pub hi: f32,
+}
+
+impl ChannelHistogram {
+    /// The Otsu threshold of the channel (raw value).
+    pub fn otsu(&self) -> f32 {
+        geometry::otsu(&self.bins, self.lo, self.hi)
     }
 }
 

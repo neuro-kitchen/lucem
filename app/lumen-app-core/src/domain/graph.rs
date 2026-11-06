@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// Spacing of nodes laid out by the app (canvas units).
 pub const COLUMN: f32 = 260.;
-pub const ROW: f32 = 130.;
+pub const ROW: f32 = 230.;
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

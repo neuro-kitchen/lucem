@@ -13,6 +13,15 @@ pub struct Prefs {
     pub sidebar_open: bool,
     #[serde(default = "yes")]
     pub rulers: bool,
+    /// Explore's side panels: the tab shown on each side (`None`: the side is closed).
+    #[serde(default = "left_tab")]
+    pub left_tab: Option<String>,
+    #[serde(default)]
+    pub right_tab: Option<String>,
+}
+
+fn left_tab() -> Option<String> {
+    Some("display".into())
 }
 
 fn yes() -> bool {
@@ -21,7 +30,7 @@ fn yes() -> bool {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { recent: Vec::new(), sidebar_open: true, rulers: true }
+        Self { recent: Vec::new(), sidebar_open: true, rulers: true, left_tab: left_tab(), right_tab: None }
     }
 }
 

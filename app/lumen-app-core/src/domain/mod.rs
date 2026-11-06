@@ -3,6 +3,7 @@
 
 pub mod annotation;
 pub mod command;
+pub mod geometry;
 pub mod graph;
 pub mod project;
 pub mod tool;
