@@ -133,7 +133,7 @@ struct LabelsZAttrs {
 }
 
 /// Decompresses a raw LZ4 block (`src`) of known `uncompressed_len`.
-fn lz4_decompress_block(src: &[u8], uncompressed_len: usize) -> IoResult<Vec<u8>> {
+pub(crate) fn lz4_decompress_block(src: &[u8], uncompressed_len: usize) -> IoResult<Vec<u8>> {
     let mut out = vec![0u8; uncompressed_len];
     let mut ip = 0usize;
     let mut op = 0usize;
@@ -208,7 +208,7 @@ fn lz4_decompress_block(src: &[u8], uncompressed_len: usize) -> IoResult<Vec<u8>
 }
 
 /// Decompresses a Blosc v1 frame (`bytes`) using LZ4 and byte-unshuffle when flagged.
-fn blosc_decompress(bytes: &[u8]) -> IoResult<Vec<u8>> {
+pub(crate) fn blosc_decompress(bytes: &[u8]) -> IoResult<Vec<u8>> {
     if bytes.len() < 16 {
         return Err(IoError::OmeZarr("Blosc header shorter than 16 bytes".to_string()));
     }
