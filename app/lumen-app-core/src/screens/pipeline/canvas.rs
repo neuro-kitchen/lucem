@@ -7,7 +7,8 @@
 //! labels, table) and their output on the right. Dragging from an output onto an input connects
 //! them when the types fit (onto a node body: its first free input that fits); dragging an input
 //! off its edge disconnects it. Delete removes a node and reconnects around it where the types
-//! allow (Shift+Delete removes it alone). Selecting one node highlights its path.
+//! allow (Shift+Delete removes it alone). Selecting one node highlights its path. Each card shows
+//! its result on the whole image (Blender's node previews), from the whole-image analysis.
 
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
@@ -17,7 +18,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    canvas, div, fill, point, px, size, App, Bounds, Context, Entity, EventEmitter, FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
+    canvas, div, fill, img, point, px, size, App, ObjectFit, StyledImage as _, Bounds, Context, Entity, EventEmitter, FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Render, ScrollEvent, SharedString, Styled as _, Subscription, Window,
 };
 
@@ -32,7 +33,9 @@ use super::catalog::{describe, kind_color, port_color, Template};
 
 /// A node's size in canvas units.
 pub const NODE_W: f32 = 216.;
-pub const NODE_H: f32 = 64.;
+pub const NODE_H: f32 = 184.;
+/// The title area of a card (the preview fills the rest); handles sit in it.
+const HEADER_H: f32 = 56.;
 const HANDLE_R: f32 = 5.;
 const HANDLE_GRAB: f32 = 11.;
 const GRID: f32 = 24.;
@@ -137,10 +140,13 @@ impl GraphCanvas {
         (x * self.zoom + self.pan.0, y * self.zoom + self.pan.1)
     }
 
-    /// The y (canvas units, from the node's top) of input `port` of `n` ports.
+    /// The y (canvas units, from the node's top) of input `port` of `n` ports: in the title area.
     fn port_y(port: usize, n: usize) -> f32 {
-        NODE_H * (port as f32 + 1.0) / (n as f32 + 1.0)
+        if n <= 1 { HEADER_H / 2.0 } else { 14.0 + port as f32 * ((HEADER_H - 20.0) / (n - 1) as f32).min(22.0) }
     }
+
+    /// The y of the output handle.
+    const OUT_Y: f32 = HEADER_H / 2.0;
 
     fn node_at(&self, p: (f32, f32), cx: &App) -> Option<String> {
         self.graph(cx).nodes.iter().rev().find_map(|n| {
@@ -154,7 +160,7 @@ impl GraphCanvas {
         self.graph(cx).nodes.iter().rev().find_map(|n| {
             let (x, y) = self.pos(&n.id, n.x, n.y);
             let near = |hx: f32, hy: f32| (p.0 - hx).hypot(p.1 - hy) <= grab;
-            if n.kind.has_output() && near(x + NODE_W, y + NODE_H / 2.0) {
+            if n.kind.has_output() && near(x + NODE_W, y + Self::OUT_Y) {
                 return Some((n.id.clone(), None));
             }
             let ins = n.kind.inputs().len();
@@ -533,7 +539,9 @@ impl GraphCanvas {
         let n_in = inputs.len();
         let g = &doc.graph;
         let in_handles: Vec<_> = inputs.iter().enumerate().map(|(i, (t, _))| handle(Self::port_y(i, n_in), true, port_color(*t), g.input(id, i).is_some())).collect();
-        let out = kind.output().map(|t| handle(NODE_H / 2.0, false, port_color(Some(t)), !g.outputs(id).is_empty()));
+        let out = kind.output().map(|t| handle(Self::OUT_Y, false, port_color(Some(t)), !g.outputs(id).is_empty()));
+        let preview = self.store.read(cx).analysis.as_ref().and_then(|a| a.previews.get(id).cloned());
+        let table_rows = self.store.read(cx).analysis.as_ref().and_then(|a| a.tables.get(id).map(|t| t.rows.len()));
         div()
             .id(SharedString::from(format!("node-{id}")))
             .absolute()
@@ -550,16 +558,18 @@ impl GraphCanvas {
             .when(faded, |d| d.opacity(0.35))
             .when(!enabled && !faded, |d| d.opacity(0.55))
             .child(
-                h_flex()
+                v_flex()
                     .size_full()
                     .overflow_hidden()
                     .rounded(px(10.0 * z))
-                    .child(div().w(px(4.0 * z.max(0.5))).h_full().bg(accent))
+                    .child(div().w_full().h(px(3.0 * z.max(0.5))).bg(accent))
                     .child(
                         v_flex()
-                            .flex_1()
+                            .flex_none()
+                            .h(px((HEADER_H - 3.0) * z))
+                            .w_full()
                             .min_w_0()
-                            .px(px(10.0 * z))
+                            .px(px(12.0 * z))
                             .gap(px(3.0 * z))
                             .justify_center()
                             .child(
@@ -572,6 +582,24 @@ impl GraphCanvas {
                                     .children(status.map(|(t, bad)| div().flex_none().text_size(px(10.0 * z)).text_color(if bad { color::danger() } else { color::text_muted() }).child(t))),
                             )
                             .when(z >= 0.45, |d| d.child(div().truncate().text_size(px(11.0 * z)).font_family("monospace").text_color(color::text_muted()).child(sub))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .mx(px(8.0 * z))
+                            .mb(px(8.0 * z))
+                            .rounded(px(6.0 * z))
+                            .overflow_hidden()
+                            .bg(color::canvas())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .map(|d| match (&preview, table_rows) {
+                                (_, Some(n)) => d.child(div().text_size(px(12.0 * z)).text_color(color::text_muted()).child(format!("{n} objects"))),
+                                (Some(p), _) => d.child(img(p.clone()).size_full().object_fit(ObjectFit::Contain)),
+                                (None, _) => d.child(div().text_size(px(11.0 * z)).text_color(color::text_disabled()).child("no preview")),
+                            }),
                     ),
             )
             .children(in_handles)
@@ -734,6 +762,7 @@ impl Render for GraphCanvas {
         let s = self.store.read(cx);
         let g = s.doc.graph.clone();
         let results = s.results.clone();
+        let analysis = s.analysis.clone();
         let z = self.zoom;
         let highlight = self.highlight(&g);
         let faded = |id: &str| highlight.as_ref().is_some_and(|h| !h.contains(id));
@@ -745,7 +774,7 @@ impl Render for GraphCanvas {
             let pa = self.pos(&a.id, a.x, a.y);
             let pb = self.pos(&b.id, b.x, b.y);
             let n_in = b.kind.inputs().len().max(1);
-            let from = self.screen((pa.0 + NODE_W, pa.1 + NODE_H / 2.0));
+            let from = self.screen((pa.0 + NODE_W, pa.1 + Self::OUT_Y));
             let to = self.screen((pb.0, pb.1 + Self::port_y(e.port, n_in)));
             let lit = highlight.as_ref().is_some_and(|h| h.contains(&e.from) && h.contains(&e.to));
             let dim = highlight.is_some() && !lit;
@@ -754,7 +783,7 @@ impl Render for GraphCanvas {
         let pending = match &self.drag {
             Some(Drag::Connect { from, to }) => g.node(from).map(|n| {
                 let p = self.pos(&n.id, n.x, n.y);
-                (self.screen((p.0 + NODE_W, p.1 + NODE_H / 2.0)), *to, port_color(n.kind.output()))
+                (self.screen((p.0 + NODE_W, p.1 + Self::OUT_Y)), *to, port_color(n.kind.output()))
             }),
             _ => None,
         };
@@ -816,11 +845,12 @@ impl Render for GraphCanvas {
             .iter()
             .map(|n| {
                 let sp = self.screen(self.pos(&n.id, n.x, n.y));
-                let status = results.get(&n.id).map(|r| match (&r.error, &r.table) {
-                    (Some(_), _) => ("error".to_string(), true),
-                    (None, Some(t)) => (format!("{} rows", t.len()), false),
-                    _ => (format!("{:.0} ms", r.ms), false),
-                });
+                let status = match (analysis.as_ref().and_then(|a| a.errors.get(&n.id)), results.get(&n.id)) {
+                    (Some(_), _) => Some(("error".to_string(), true)),
+                    (None, Some(r)) if r.error.is_some() => Some(("error".to_string(), true)),
+                    (None, Some(r)) => Some((format!("{:.0} ms", r.ms), false)),
+                    _ => None,
+                };
                 self.node_card(&n.id, &n.kind, sp, self.selected.contains(&n.id), faded(&n.id), status, cx).into_any_element()
             })
             .collect();
