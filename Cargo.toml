@@ -86,6 +86,13 @@ overflow-checks = false
 # dsp-kitchen's target/ with 363 GB. For a debugger session: CARGO_PROFILE_DEV_DEBUG=full.
 [profile.dev]
 debug = "line-tables-only"
+# Our crates lightly optimized: tile decoding, compositing and canvas paths run every frame, and at
+# opt-level 0 the image viewer lags. Incremental builds stay fast.
+opt-level = 1
+
+# Dependencies fully optimized (compiled once, cached): GPUI, wgpu, CubeCL, polars, image.
+[profile.dev.package."*"]
+opt-level = 3
 
 # wgpu-core's lock tracing (debug assertions only) aborts when a CubeCL device runner shuts down at
 # exit (lumen-core `shutdown_devices`).
