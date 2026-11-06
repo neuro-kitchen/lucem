@@ -1,6 +1,6 @@
 [package]
 name = "lumen-app"
-description = "Desktop application of lumen (GPUI)"
+description = "Lumen desktop application (GPUI): the app core as a binary"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,12 +13,5 @@ name = "lumen-app"
 path = "src/main.rs"
 
 [dependencies]
-arrow.workspace = true
 gpui-kit.workspace = true
-lumen-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
-lumen-io.workspace = true
-lumen-ops.workspace = true
-lumen-pipeline.workspace = true
-lumen-view.workspace = true
-polars.workspace = true
-serde.workspace = true
+lumen-app-core.workspace = true

@@ -5308,7 +5308,16 @@ dependencies = [
 name = "lumen-app"
 version = "0.1.0"
 dependencies = [
+ "gpui-kit",
+ "lumen-app-core",
+]
+
+[[package]]
+name = "lumen-app-core"
+version = "0.1.0"
+dependencies = [
  "arrow",
+ "async-channel",
  "gpui-kit",
  "lumen-core",
  "lumen-io",
@@ -5316,7 +5325,10 @@ dependencies = [
  "lumen-pipeline",
  "lumen-view",
  "polars",
+ "schemars",
  "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5370,7 +5382,9 @@ dependencies = [
  "lumen-core",
  "lumen-ops",
  "polars",
+ "schemars",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -5386,9 +5400,11 @@ dependencies = [
 name = "lumen-view"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "gpui-kit",
  "image",
  "lumen-core",
+ "lumen-io",
  "serde",
  "smallvec",
 ]

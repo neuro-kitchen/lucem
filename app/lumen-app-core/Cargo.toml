@@ -1,0 +1,25 @@
+[package]
+name = "lumen-app-core"
+description = "Lumen app core: the workstation shell, project document and commands, image canvas and tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Measurement tables (Analyze): region features → Arrow / Polars
+arrow.workspace = true
+async-channel.workspace = true
+gpui-kit.workspace = true
+lumen-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
+lumen-io.workspace = true
+lumen-ops.workspace = true
+lumen-pipeline.workspace = true
+lumen-view.workspace = true
+polars.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

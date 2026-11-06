@@ -13,6 +13,7 @@ members = [
     "serve/lumen-view",
     # Front ends
     "app/lumen-cli",
+    "app/lumen-app-core",
     "app/lumen-app",
     # Bindings
     "bindings/python/lumen-py",
@@ -33,6 +34,7 @@ lumen-ops = { path = "crates/lumen-ops", version = "0.1.0" }
 lumen-ml = { path = "crates/lumen-ml", version = "0.1.0" }
 lumen-pipeline = { path = "engine/lumen-pipeline", version = "0.1.0" }
 lumen-view = { path = "serve/lumen-view", version = "0.1.0" }
+lumen-app-core = { path = "app/lumen-app-core", version = "0.1.0" }
 
 # Latest stable versions on crates.io 2026-11-05 (cubecl 0.12 / burn 0.23 are pre-releases only);
 # add each to a crate with `<name>.workspace = true`.
@@ -58,6 +60,9 @@ serde_json = "1.0.145"
 thiserror = "2.0.21"
 num-traits = "0.2.19"
 smallvec = "1.15.1"
+# Background results into the UI; JSON Schema of the project document (for agents / MCP)
+async-channel = "2.5.0"
+schemars = "1.2.3"
 
 # The one development build (as in dsp-kitchen): tests, benchmarks, the CLI and the Python extension
 # use `--profile validate`. Our crates lightly optimized, incremental, with debug assertions and
