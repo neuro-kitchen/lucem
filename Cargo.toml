@@ -28,9 +28,9 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Workspace crates
-lumen-core = { path = "crates/lumen-core", version = "0.1.0" }
+lumen-core = { path = "crates/lumen-core", version = "0.1.0", default-features = false }
 lumen-io = { path = "crates/lumen-io", version = "0.1.0" }
-lumen-ops = { path = "crates/lumen-ops", version = "0.1.0" }
+lumen-ops = { path = "crates/lumen-ops", version = "0.1.0", default-features = false }
 lumen-ml = { path = "crates/lumen-ml", version = "0.1.0" }
 lumen-pipeline = { path = "engine/lumen-pipeline", version = "0.1.0" }
 lumen-view = { path = "serve/lumen-view", version = "0.1.0" }
