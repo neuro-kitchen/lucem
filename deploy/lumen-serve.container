@@ -1,0 +1,43 @@
+# Podman Quadlet: `lumen serve` as a systemd service (starts at boot, restarts on failure).
+# Install for your user:
+#   mkdir -p ~/.config/containers/systemd ~/lumen-data
+#   cp deploy/lumen-serve.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload && systemctl --user start lumen-serve
+#   loginctl enable-linger "$USER"     # keep it running after you log out
+# Logs: journalctl --user -u lumen-serve
+
+[Unit]
+Description=lumen serve: images over QUIC to enrolled clients
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+# The image target for this machine's GPU (deploy/README.md): nvidia, mesa or cpu
+Image=localhost/lumen-serve:nvidia
+# NVIDIA (CDI from the NVIDIA Container Toolkit); for mesa: AddDevice=/dev/dri and
+# GroupAdd=keep-groups; for cpu: neither
+AddDevice=nvidia.com/gpu=all
+# A confined container may not use GPU device files (SELinux): labelling off for this container
+# only; the hardening below stays. Alternative (root, once): setsebool -P container_use_devices on
+SecurityLabelDisable=true
+ContainerName=lumen-serve
+PublishPort=50051:50051/udp
+# You on the host = the container's lumen user (uid 10001), so it can write to ~/lumen-data
+UserNS=keep-id:uid=10001,gid=10001
+# Images and the authority (.lumen-auth: CA, enrolled clients); :Z labels it for SELinux
+Volume=%h/lumen-data:/data:Z
+# Compiled kernels and autotune results, kept across restarts
+Volume=lumen-cache:/home/lumen/.cache
+# Hardening: read-only image files, no Linux capabilities, no privilege gain, a cap on processes
+ReadOnly=true
+DropCapability=all
+NoNewPrivileges=true
+PodmanArgs=--pids-limit=1024
+Exec=serve --bind 0.0.0.0:50051 --name %H --max-clients 8
+
+[Service]
+Restart=on-failure
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

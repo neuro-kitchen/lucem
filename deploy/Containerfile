@@ -1,0 +1,85 @@
+# lumen as a server and batch runner: `lumen serve` gives enrolled clients tiles of the images under
+# /data over QUIC (UDP 50051, TLS), and the same container runs `lumen run` and `lumen doctor` on a
+# GPU passed through, or on the CPU.
+#
+# One binary (CUDA, wgpu and CPU compiled in), three targets that differ only in the system
+# libraries each GPU needs (they share the build stage: a second target compiles nothing):
+#   cpu     no GPU libraries (default, smallest)
+#   nvidia  NVRTC (CUDA's run-time compiler) + the Vulkan loader; the driver comes from the host
+#           through the NVIDIA Container Toolkit:  podman run --device nvidia.com/gpu=all …
+#   mesa    the Vulkan loader + Mesa's Vulkan drivers (AMD, Intel):  podman run --device /dev/dri …
+#
+# Build from the repository root (the build context is the whole workspace):
+#   podman build -f deploy/Containerfile --ignorefile deploy/.containerignore --target nvidia -t lumen-serve:nvidia .
+
+# Rust toolchain of the build
+ARG RUST_VERSION=1.99
+# Debian release of every stage: glibc >= 2.34 for the CPU runtime's prebuilt LLVM (bookworm: 2.36)
+ARG DEBIAN=bookworm
+# Base images pinned by digest (multi-architecture index), so a re-tagged or tampered image cannot
+# enter a build. To update: the new tag's digest from the registry, then build and test again.
+ARG RUST_DIGEST=sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
+ARG DEBIAN_DIGEST=sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+
+FROM docker.io/library/rust:${RUST_VERSION}-${DEBIAN}@${RUST_DIGEST} AS build
+ARG FEATURES=wgpu,cuda,cpu
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/root/.local/share/tracel \
+    cargo build --release --locked -p lumen-cli --no-default-features --features "${FEATURES}" \
+    && install -D -m 0755 target/release/lumen /out/lumen
+
+# What every target shares: the program, a non-root user, /data
+FROM docker.io/library/debian:${DEBIAN}-slim@${DEBIAN_DIGEST} AS base
+COPY --from=build /out/lumen /usr/local/bin/
+# Not root (uid 10001); /data holds the images and the authority of enrolled clients
+RUN useradd --create-home --uid 10001 lumen && install -d -o lumen -g lumen /data
+WORKDIR /data
+VOLUME /data
+# Kernels compiled and autotuned once survive restarts when this is a volume too
+ENV XDG_CACHE_HOME=/home/lumen/.cache XDG_RUNTIME_DIR=/tmp
+RUN install -d -o lumen -g lumen /home/lumen/.cache
+VOLUME /home/lumen/.cache
+EXPOSE 50051/udp
+ENTRYPOINT ["lumen"]
+ENV LUMEN_SERVE_AUTH_DIR=/data/.lumen-auth
+ENV LUMEN_SERVE_DATA=/data
+# Listen on every interface of the container; only enrolled clients get in
+CMD ["serve", "--bind", "0.0.0.0:50051"]
+
+# NVIDIA: CUDA and Vulkan. The host's driver is passed in by the NVIDIA Container Toolkit (CDI); the
+# image brings what the driver does not: NVRTC, the Vulkan loader, and libX11 / libXext.
+FROM base AS nvidia
+USER root
+ARG CUDA_NVRTC=13-0
+ARG CUDA_REPO=https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64
+# Pinned: the build fails if the downloaded keyring is not this file
+ADD --checksum=sha256:e7f219eab6fe4819cdb5c15b98233dc3420302d9c00883219cd3d896857cf48d ${CUDA_REPO}/cuda-keyring_1.1-1_all.deb /tmp/cuda-keyring.deb
+RUN dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libvulkan1 libx11-6 libxext6 cuda-nvrtc-${CUDA_NVRTC} \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "/usr/local/cuda-$(echo ${CUDA_NVRTC} | tr - .)/targets/x86_64-linux/lib" > /etc/ld.so.conf.d/cuda-nvrtc.conf \
+    && ldconfig
+# Vulkan through the driver's EGL library, which works without an X server
+RUN install -d /usr/share/vulkan/icd.d \
+    && printf '{"file_format_version": "1.0.1", "ICD": {"library_path": "libEGL_nvidia.so.0", "api_version": "1.3.0"}}\n' \
+       > /usr/share/vulkan/icd.d/nvidia_egl.json
+ENV VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_egl.json
+ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+USER lumen
+
+# AMD and Intel: Vulkan through wgpu, with Mesa's drivers
+FROM base AS mesa
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+USER lumen
+
+# No GPU: the CPU runtime only
+FROM base AS cpu
+ENV LUMEN_RUNTIME=cpu
+USER lumen

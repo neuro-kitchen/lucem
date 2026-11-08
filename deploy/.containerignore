@@ -1,0 +1,15 @@
+# Build context of deploy/Containerfile (the repository root): sources only
+target/
+.data/
+.git/
+.tasks/
+.knowledge/
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.so
+playground/
+node_modules/
+*.zarr/
+*.ome.tif
+*.ome.tiff
