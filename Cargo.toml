@@ -36,7 +36,7 @@ lumen-pipeline = { path = "engine/lumen-pipeline", version = "0.1.0" }
 lumen-view = { path = "serve/lumen-view", version = "0.1.0" }
 lumen-app-core = { path = "app/lumen-app-core", version = "0.1.0" }
 
-# Latest stable versions on crates.io 2026-11-05 (cubecl 0.12 / burn 0.23 are pre-releases only);
+# Latest stable versions on crates.io 2026-11-08 (cubecl 0.12 / burn 0.23 are pre-releases only);
 # add each to a crate with `<name>.workspace = true`.
 # Compute (as in dsp-kitchen)
 # `persistence`: autotune decisions survive the process; with the compiled-kernel cache turned on
@@ -56,10 +56,10 @@ image = "0.25.10"
 tiff = "0.11.3"
 # Common
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = "1.0.154"
 thiserror = "2.0.21"
 num-traits = "0.2.19"
-smallvec = "1.15.1"
+smallvec = "1.16.5"
 # Background results into the UI; JSON Schema of the project document (for agents / MCP)
 async-channel = "2.5.0"
 schemars = "1.2.3"
