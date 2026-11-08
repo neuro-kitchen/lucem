@@ -132,6 +132,14 @@ pub enum Op {
     Dilate { radius: usize },
     /// Drops objects smaller than `min_size` px.
     RemoveSmall { min_size: usize },
+    /// On where A or B is on.
+    MaskUnion {},
+    /// On where A and B are on.
+    MaskIntersect {},
+    /// On where A is on and B is off.
+    MaskSubtract {},
+    /// On where the mask is off.
+    MaskInvert {},
     /// Connected objects of a mask, numbered.
     Label {},
     /// Grows the marker labels over the relief image (splits touching objects).
@@ -169,6 +177,10 @@ impl Op {
             Op::Erode { .. } => "erode",
             Op::Dilate { .. } => "dilate",
             Op::RemoveSmall { .. } => "remove_small",
+            Op::MaskUnion {} => "mask_union",
+            Op::MaskIntersect {} => "mask_intersect",
+            Op::MaskSubtract {} => "mask_subtract",
+            Op::MaskInvert {} => "mask_invert",
             Op::Label {} => "label",
             Op::Watershed { .. } => "watershed",
             Op::MaskImage {} => "mask_image",
@@ -201,6 +213,10 @@ impl Op {
             Op::Erode { .. } => "Erode",
             Op::Dilate { .. } => "Dilate",
             Op::RemoveSmall { .. } => "Remove small",
+            Op::MaskUnion {} => "Mask union",
+            Op::MaskIntersect {} => "Mask intersect",
+            Op::MaskSubtract {} => "Mask subtract",
+            Op::MaskInvert {} => "Mask invert",
             Op::Label {} => "Label objects",
             Op::Watershed { .. } => "Watershed",
             Op::MaskImage {} => "Mask image",
@@ -216,7 +232,7 @@ impl Op {
             Op::Gamma { .. } | Op::Rescale { .. } | Op::Clahe { .. } | Op::Combine { .. } | Op::MaskImage {} => "Intensity",
             Op::RollingBall { .. } | Op::TvDenoise { .. } | Op::WhiteTophat { .. } | Op::MorphGradient { .. } => "Restore",
             Op::Canny { .. } | Op::OtsuThreshold { .. } | Op::Threshold { .. } => "Threshold",
-            Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::RemoveSmall { .. } => "Mask",
+            Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::RemoveSmall { .. } | Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} => "Mask",
             Op::Label {} | Op::Watershed { .. } => "Segment",
             Op::Measure {} => "Measure",
         }
@@ -226,7 +242,8 @@ impl Op {
     pub fn inputs(&self) -> Vec<(PortType, &'static str)> {
         use PortType::*;
         match self {
-            Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::RemoveSmall { .. } | Op::Label {} => vec![(Mask, "mask")],
+            Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::RemoveSmall { .. } | Op::Label {} | Op::MaskInvert {} => vec![(Mask, "mask")],
+            Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} => vec![(Mask, "A"), (Mask, "B")],
             Op::Watershed { .. } => vec![(Image, "relief"), (Labels, "markers")],
             Op::MaskImage {} => vec![(Image, "image"), (Mask, "mask")],
             Op::Combine { .. } => vec![(Image, "A"), (Image, "B")],
@@ -238,7 +255,7 @@ impl Op {
     pub fn output(&self) -> PortType {
         use PortType::*;
         match self {
-            Op::Canny { .. } | Op::OtsuThreshold { .. } | Op::Threshold { .. } | Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::RemoveSmall { .. } => Mask,
+            Op::Canny { .. } | Op::OtsuThreshold { .. } | Op::Threshold { .. } | Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::RemoveSmall { .. } | Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} => Mask,
             Op::Label {} | Op::Watershed { .. } => Labels,
             Op::Measure {} => Table,
             _ => Image,
@@ -329,7 +346,7 @@ impl Op {
             Op::Threshold { value } => fin("value", *value),
             Op::Watershed { compactness } => if compactness.is_finite() && *compactness >= 0.0 { Ok(()) } else { Err("compactness must be ≥ 0".into()) },
             Op::Combine { a, b } => fin("a", *a).and(fin("b", *b)),
-            Op::RemoveSmall { .. } | Op::Sobel {} | Op::Laplace {} | Op::Label {} | Op::MaskImage {} | Op::Measure {} => Ok(()),
+            Op::RemoveSmall { .. } | Op::Sobel {} | Op::Laplace {} | Op::Label {} | Op::MaskImage {} | Op::Measure {} | Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} => Ok(()),
         }
     }
 
@@ -397,6 +414,14 @@ impl Op {
                 let opts = WatershedOptions { compactness: *compactness, ..WatershedOptions::default() };
                 Value::Labels(watershed(client, image(0)?, labels(1)?, None, None, &opts).map_err(e)?)
             }
+            Op::MaskUnion {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), |a, b| a | b)?),
+            Op::MaskIntersect {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), |a, b| a & b)?),
+            Op::MaskSubtract {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), |a, b| a & !b)?),
+            Op::MaskInvert {} => {
+                let m = mask(0)?;
+                let out: Vec<u32> = m.to_host(client).into_iter().map(|v| (v == 0) as u32).collect();
+                Value::Mask(DeviceArray::from_host(client, m.shape().clone(), out).map_err(|err| err.to_string())?)
+            }
             Op::MaskImage {} => {
                 // No device product kernel yet: the region is small, multiply on the host
                 let (a, m) = (image(0)?, mask(1)?);
@@ -419,6 +444,16 @@ impl Op {
             Op::Measure {} => Value::Table(region_features(client, labels(0)?, Some(image(1)?)).map_err(e)?),
         })
     }
+}
+
+/// A pixel-by-pixel combination of two masks (0 / 1).
+fn mask_pair(client: &Client, a: &DeviceArray<u32>, b: &DeviceArray<u32>, name: &str, f: impl Fn(bool, bool) -> bool) -> Result<DeviceArray<u32>, String> {
+    if a.dims() != b.dims() {
+        return Err(format!("{name}: the masks differ in size"));
+    }
+    let (va, vb) = (a.to_host(client), b.to_host(client));
+    let out: Vec<u32> = va.iter().zip(vb.iter()).map(|(x, y)| f(*x != 0, *y != 0) as u32).collect();
+    DeviceArray::from_host(client, a.shape().clone(), out).map_err(|e| e.to_string())
 }
 
 fn threshold(client: &Client, a: &DeviceArray<f32>, t: f64) -> Result<DeviceArray<u32>, String> {
@@ -453,6 +488,10 @@ pub fn catalog() -> Vec<Op> {
         Op::Erode { radius: 1 },
         Op::Dilate { radius: 1 },
         Op::RemoveSmall { min_size: 30 },
+        Op::MaskUnion {},
+        Op::MaskIntersect {},
+        Op::MaskSubtract {},
+        Op::MaskInvert {},
         Op::Label {},
         Op::Watershed { compactness: 0.0 },
         Op::Measure {},
