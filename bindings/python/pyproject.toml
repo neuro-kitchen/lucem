@@ -11,6 +11,8 @@ authors = [{ name = "jesusdpa1" }]
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.12"
 dependencies = ["numpy>=2.5"]
+# PyPI rejects any upload carrying this classifier; remove it when lumen is ready to be published
+classifiers = ["Private :: Do Not Upload"]
 
 [project.urls]
 Repository = "https://github.com/neuro-kitchen/lumen"
