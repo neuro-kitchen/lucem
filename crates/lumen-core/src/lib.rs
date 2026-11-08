@@ -17,6 +17,7 @@
 pub mod device;
 pub mod error;
 pub mod shape;
+pub mod tiling;
 
 #[cfg(feature = "compute")]
 pub mod compute;
@@ -36,3 +37,4 @@ pub use cubecl;
 pub use device::{ComputeError, ComputeTarget};
 pub use error::{CoreError, CoreResult};
 pub use shape::{AxisSplit, Shape};
+pub use tiling::{Block, Zyx};
