@@ -1,0 +1,61 @@
+# Checks every push to main and pull request. GitHub runners have no GPU, so tests run on the CubeCL
+# CPU runtime only (LUMEN_TEST_RUNTIMES=cpu). The GPU runtimes are run locally.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  LUMEN_TEST_RUNTIMES: cpu
+
+jobs:
+  rust:
+    name: Rust (check, CPU-runtime tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      # ~/.local/share/tracel: the LLVM bundle the CPU runtime downloads at build time
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-directories: ~/.local/share/tracel
+      # lumen-app's GUI stack (GPUI) builds against these system libraries on Linux
+      - name: System libraries for lumen-app
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev
+      # Not --all-targets: the benchmarks in crates/lumen-ops/tests do not compile against the current API
+      - name: Check the workspace
+        run: cargo check --workspace
+      - name: Unit tests
+        run: cargo test --workspace --exclude lumen-app --exclude lumen-py --lib
+
+  python:
+    name: Python (build, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-directories: ~/.local/share/tracel
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Development environment and package
+        run: uv sync
+      - name: Tests
+        run: uv run python -m pytest bindings/python/tests -q

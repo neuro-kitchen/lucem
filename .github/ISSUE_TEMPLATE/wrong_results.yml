@@ -1,0 +1,51 @@
+name: Wrong or different results
+description: It runs, but the output differs from scipy.ndimage, scikit-image, or another runtime
+labels: ["results"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        lumen's operations are compared with host references such as scipy.ndimage and
+        scikit-image. Every runtime should give the same result up to rounding.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Filter
+        - Morphology
+        - Threshold or segmentation
+        - Measurement or analysis table
+        - Colour or stain operation
+        - Reading a format
+        - Pipeline
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: compare
+    attributes:
+      label: What you compared
+      description: The lumen operation and the reference call, with their parameters.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: difference
+    attributes:
+      label: How large is the difference
+      description: Max absolute or relative error, or the counts found vs expected. An image helps.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: lumen version and runtime
+      placeholder: "Does another runtime give the same result?"
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Data
+      description: How to get data that shows it (synthetic is best). Do not attach images you may not share.

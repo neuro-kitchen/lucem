@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use lumen in your work, please cite it as below."
+type: software
+title: "lumen: GPU-accelerated image analysis for biology"
+abstract: >-
+  A computer-vision workstation for researchers, written in Rust: image operations written once in
+  CubeCL and run on any GPU or the CPU, multiscale OME-Zarr viewing, annotation, measurement and
+  reproducible pipelines of operators.
+authors:
+  - given-names: Jesus
+    family-names: Penaloza Aponte
+    orcid: "https://orcid.org/0000-0001-5903-2291"
+repository-code: "https://github.com/neuro-kitchen/lumen"
+license:
+  - MIT
+  - Apache-2.0
+keywords:
+  - image analysis
+  - microscopy
+  - histology
+  - OME-Zarr
+  - GPU
+  - CubeCL
+  - Rust

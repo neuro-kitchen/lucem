@@ -1,0 +1,65 @@
+name: Bug report
+description: Something fails, crashes, hangs or errors
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Results that run but look wrong (vs scipy.ndimage, scikit-image or
+        another runtime) have their own form: **Wrong or different results**.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got. Paste the error message.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest steps or code that show it. A sample image from the start screen is best; say how large your image is if it matters.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Used through
+      multiple: true
+      options:
+        - Desktop app
+        - Rust crates
+        - Python
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      multiple: true
+      options:
+        - wgpu (Vulkan / Metal / DirectX 12)
+        - CUDA
+        - CPU runtime
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: lumen version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, GPU and driver version.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Anything else printed. For a crash, run with `RUST_BACKTRACE=1`.
+      render: text
