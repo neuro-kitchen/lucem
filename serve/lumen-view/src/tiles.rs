@@ -40,10 +40,12 @@ impl ChannelDisplay {
     }
 }
 
-/// A display tile: `(level, tx, ty)`.
+/// A display tile: `(level, z, tx, ty)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TileKey {
     pub level: usize,
+    /// Plane along z at that level (0 for a 2D image).
+    pub z: usize,
     pub tx: usize,
     pub ty: usize,
 }
@@ -67,6 +69,7 @@ pub enum TileResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct RawKey {
     level: usize,
+    z: usize,
     channel: usize,
     tx: usize,
     ty: usize,
@@ -161,9 +164,9 @@ impl TileService {
         self.shared.ready.notify_all();
     }
 
-    /// Raw values of every channel at pixel `(x, y)` of `level`, from tiles already read (`None`
-    /// where the tile is not in the cache; never reads the disk).
-    pub fn sample(&self, level: usize, x: usize, y: usize) -> Vec<Option<f32>> {
+    /// Raw values of every channel at pixel `(x, y)` of plane `z` of `level`, from tiles already
+    /// read (`None` where the tile is not in the cache; never reads the disk).
+    pub fn sample(&self, level: usize, z: usize, x: usize, y: usize) -> Vec<Option<f32>> {
         let py = &self.shared.pyramid;
         let Some(l) = py.levels.get(level) else { return Vec::new() };
         if x >= l.width || y >= l.height {
@@ -173,14 +176,15 @@ impl TileService {
         let Ok(mut raw) = self.shared.raw.lock() else { return Vec::new() };
         (0..py.channels.len())
             .map(|c| {
-                raw.get(&RawKey { level, channel: c, tx, ty }).and_then(|(d, w, _)| d.get((y - ty * l.tile_h) * w + (x - tx * l.tile_w)).copied())
+                raw.get(&RawKey { level, z, channel: c, tx, ty }).and_then(|(d, w, _)| d.get((y - ty * l.tile_h) * w + (x - tx * l.tile_w)).copied())
             })
             .collect()
     }
 
-    /// A region of one channel at `level` (that level's pixels, clipped), from the raw cache;
-    /// tiles not cached yet are read and kept.
-    pub fn read_region(&self, level: usize, channel: usize, x0: usize, y0: usize, w: usize, h: usize) -> Result<Vec<f32>, String> {
+    /// A region of plane `z` of one channel at `level` (that level's pixels, clipped), from the
+    /// raw cache; tiles not cached yet are read and kept.
+    #[allow(clippy::too_many_arguments)]
+    pub fn read_region(&self, level: usize, z: usize, channel: usize, x0: usize, y0: usize, w: usize, h: usize) -> Result<Vec<f32>, String> {
         let py = &self.shared.pyramid;
         let l = py.levels.get(level).ok_or_else(|| format!("no level {level}"))?.clone();
         let mut out = vec![0.0f32; w * h];
@@ -190,12 +194,12 @@ impl TileService {
         }
         for ty in y0 / l.tile_h..=(y1 - 1) / l.tile_h {
             for tx in x0 / l.tile_w..=(x1 - 1) / l.tile_w {
-                let rk = RawKey { level, channel, tx, ty };
+                let rk = RawKey { level, z, channel, tx, ty };
                 let hit = self.shared.raw.lock().map_err(|e| e.to_string())?.get(&rk);
                 let (data, tw, th) = match hit {
                     Some(t) => t,
                     None => {
-                        let t = py.read_tile(level, channel, tx, ty).map_err(|e| e.to_string())?;
+                        let t = py.read_tile_at(level, channel, z, tx, ty).map_err(|e| e.to_string())?;
                         let d = Arc::new(t.data);
                         self.shared.raw.lock().map_err(|e| e.to_string())?.put(rk, d.clone(), t.width, t.height);
                         (d, t.width, t.height)
@@ -264,12 +268,12 @@ fn make_tile(shared: &Shared, key: TileKey, displays: &[ChannelDisplay]) -> Resu
         if !d.visible {
             continue;
         }
-        let rk = RawKey { level: key.level, channel: c, tx: key.tx, ty: key.ty };
+        let rk = RawKey { level: key.level, z: key.z, channel: c, tx: key.tx, ty: key.ty };
         let cached = shared.raw.lock().map_err(|e| e.to_string())?.get(&rk);
         let (data, tw, th) = match cached {
             Some(hit) => hit,
             None => {
-                let t = py.read_tile(key.level, c, key.tx, key.ty).map_err(|e| e.to_string())?;
+                let t = py.read_tile_at(key.level, c, key.z, key.tx, key.ty).map_err(|e| e.to_string())?;
                 let data = Arc::new(t.data);
                 shared.raw.lock().map_err(|e| e.to_string())?.put(rk, data.clone(), t.width, t.height);
                 (data, t.width, t.height)
@@ -412,7 +416,7 @@ mod tests {
         let py = Arc::new(Pyramid::from_loaded(img));
         let displays = Arc::new(py.channels.iter().map(|c| ChannelDisplay::new(c.color, c.window)).collect::<Vec<_>>());
         let (svc, rx) = TileService::new(py, 2);
-        let keys = vec![TileKey { level: 0, tx: 0, ty: 0 }, TileKey { level: 0, tx: 1, ty: 1 }];
+        let keys = vec![TileKey { level: 0, z: 0, tx: 0, ty: 0 }, TileKey { level: 0, z: 0, tx: 1, ty: 1 }];
         svc.request(1, displays, keys);
         let mut got = 0;
         while got < 2 {
