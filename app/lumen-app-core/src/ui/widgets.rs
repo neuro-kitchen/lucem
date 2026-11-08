@@ -158,6 +158,48 @@ pub fn stepper(id: &str, value: impl Into<SharedString>, on_step: impl Fn(f32, &
         .child(Button::new(SharedString::from(format!("{id}-plus"))).ghost().xsmall().icon(IconName::Plus).on_click(move |_, w, cx| b(1.0, w, cx)))
 }
 
+/// A slider over positions `0..count` (a position along an axis of an image). Dragging anywhere
+/// on the track sets the position.
+pub fn axis_slider(id: String, value: usize, count: usize, on_change: impl Fn(usize, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    use std::cell::Cell;
+    let bounds = Rc::new(Cell::new(gpui_kit::Bounds::<gpui_kit::Pixels>::default()));
+    let on_change = Rc::new(on_change);
+    let frac = if count > 1 { value as f32 / (count - 1) as f32 } else { 0.0 };
+    let at = move |x: gpui_kit::Pixels, b: gpui_kit::Bounds<gpui_kit::Pixels>| -> usize {
+        let f = ((x - b.origin.x).as_f32() / b.size.width.as_f32().max(1.0)).clamp(0.0, 1.0);
+        ((f * (count.saturating_sub(1)) as f32).round() as usize).min(count.saturating_sub(1))
+    };
+    let (keep, down, moved) = (bounds.clone(), bounds.clone(), bounds);
+    let (on_down, on_moved) = (on_change.clone(), on_change);
+    div()
+        .id(SharedString::from(id))
+        .relative()
+        .w_full()
+        .h(px(18.))
+        .cursor_pointer()
+        .child(gpui_kit::canvas(
+            move |b, _, _| keep.set(b),
+            move |b, _, window, _| {
+                let y = b.origin.y + px(b.size.height.as_f32() / 2.0 - 1.5);
+                let track = gpui_kit::Bounds { origin: gpui_kit::point(b.origin.x, y), size: gpui_kit::size(b.size.width, px(3.)) };
+                window.paint_quad(gpui_kit::fill(track, color::control()));
+                let filled = gpui_kit::Bounds { origin: track.origin, size: gpui_kit::size(px(b.size.width.as_f32() * frac), px(3.)) };
+                window.paint_quad(gpui_kit::fill(filled, color::accent()));
+                let knob = gpui_kit::Bounds { origin: gpui_kit::point(b.origin.x + px(b.size.width.as_f32() * frac - 5.0), b.origin.y + px(b.size.height.as_f32() / 2.0 - 5.0)), size: gpui_kit::size(px(10.), px(10.)) };
+                window.paint_quad(gpui_kit::fill(knob, color::accent_hover()));
+            },
+        ).absolute().size_full())
+        .on_mouse_down(gpui_kit::MouseButton::Left, move |e, w, cx| {
+            cx.stop_propagation();
+            on_down(at(e.position.x, down.get()), w, cx);
+        })
+        .on_mouse_move(move |e, w, cx| {
+            if e.pressed_button == Some(gpui_kit::MouseButton::Left) {
+                on_moved(at(e.position.x, moved.get()), w, cx);
+            }
+        })
+}
+
 /// A colour chip.
 pub fn swatch(c: [u8; 3], size: f32) -> impl IntoElement {
     div().flex_none().size(px(size)).rounded(px(3.)).border_1().border_color(color::border()).bg(theme::rgb8(c))

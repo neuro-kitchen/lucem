@@ -45,6 +45,8 @@ pub struct ResultRequest {
     pub rect: [f64; 4],
     /// Screen px per level-0 px (times the display's scale).
     pub zoom: f64,
+    /// The plane shown, level-0 planes.
+    pub z: usize,
 }
 
 /// One view's layer over the visible region.
@@ -110,7 +112,7 @@ fn level_under(py: &Pyramid, side: usize) -> usize {
 
 /// A source node's raster over a region of `level`.
 #[allow(clippy::too_many_arguments)]
-fn source_value(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, id: &str, level: usize, (x0, y0, w, h): (usize, usize, usize, usize)) -> Result<Value, String> {
+fn source_value(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, id: &str, level: usize, z: usize, (x0, y0, w, h): (usize, usize, usize, usize)) -> Result<Value, String> {
     let node = doc.graph.node(id).ok_or_else(|| format!("no node {id}"))?;
     let ds = py.levels[level].downsample;
     match &node.kind {
@@ -118,7 +120,9 @@ fn source_value(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, id
             if img != image {
                 return Err(format!("{id} reads another image ({img})"));
             }
-            let mut values = py.read_region(level, *channel, x0, y0, w, h).map_err(|e| e.to_string())?;
+            let l = &py.levels[level];
+            let plane = ((z as f64 / l.z_downsample) as usize).min(l.depth - 1);
+            let mut values = py.read_region_at(level, *channel, plane, x0, y0, w, h).map_err(|e| e.to_string())?;
             // Raw values to 0–1 by the type's range (thresholds and gamma mean the same on 8- and
             // 16-bit images)
             let top = py.channels.get(*channel).map_or(1.0, |c| c.range.1);
@@ -154,7 +158,7 @@ pub fn analyze(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str) -> 
     let plan = at_downsample(&doc.graph.plan(), ds);
     // Views are evaluated through what feeds them
     let targets: Vec<String> = ids.iter().filter(|id| !matches!(doc.graph.node(id).map(|n| &n.kind), Some(NodeKind::View { .. }))).cloned().collect();
-    let mut source = |id: &str| source_value(client, doc, py, image, id, level, (0, 0, l.width, l.height));
+    let mut source = |id: &str| source_value(client, doc, py, image, id, level, py.depth() / 2, (0, 0, l.width, l.height));
     let values = evaluate_all(client, &plan, &targets, &mut source);
     for (id, v) in &values {
         match v {
@@ -308,7 +312,7 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
         let (x0, y0) = (vx0.saturating_sub(margin), vy0.saturating_sub(margin));
         let (x1, y1) = ((vx1 + margin).min(l.width), (vy1 + margin).min(l.height));
         let (w, h) = (x1 - x0, y1 - y0);
-        let mut source = |id: &str| source_value(client, doc, pyramid, &req.image, id, level, (x0, y0, w, h));
+        let mut source = |id: &str| source_value(client, doc, pyramid, &req.image, id, level, req.z, (x0, y0, w, h));
         let value = match evaluate(client, &plan, &target, &mut source) {
             Ok(v) => v,
             Err(e) => {

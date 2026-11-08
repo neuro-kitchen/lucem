@@ -184,6 +184,8 @@ pub struct ImageCanvas {
     viewer: Option<Viewer>,
     pub zoom: f64,
     pub center: (f64, f64),
+    /// The plane shown, level-0 planes (0 for a 2D image).
+    pub z: usize,
     fit_pending: bool,
     /// The plane's bounds in the window (set while painting).
     bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -221,6 +223,7 @@ impl ImageCanvas {
             viewer: None,
             zoom: 1.0,
             center: (0.0, 0.0),
+            z: 0,
             fit_pending: true,
             bounds: Rc::new(Cell::new(Bounds::default())),
             scale: 1.0,
@@ -301,6 +304,23 @@ impl ImageCanvas {
         self.zoom_at(f, None, cx);
     }
 
+    /// `self.z` at `level`.
+    fn plane_at(&self, level: usize) -> usize {
+        let Some(v) = &self.viewer else { return 0 };
+        let l = &v.pyramid.levels[level];
+        ((self.z as f64 / l.z_downsample) as usize).min(l.depth - 1)
+    }
+
+    /// Shows plane `z` (level-0 planes).
+    pub fn set_z(&mut self, z: usize, cx: &mut Context<Self>) {
+        let Some(v) = &self.viewer else { return };
+        let z = z.min(v.pyramid.depth() - 1);
+        if z != self.z {
+            self.z = z;
+            self.camera_changed(cx);
+        }
+    }
+
     /// The camera moved: results for the new view follow once it rests (200 ms).
     fn camera_changed(&mut self, cx: &mut Context<Self>) {
         cx.notify();
@@ -324,7 +344,8 @@ impl ImageCanvas {
         let rect = self.visible();
         // The finest level whose visible region fits 1024 px a side
         let level = (0..py.levels.len()).find(|&l| (rect[2] / py.levels[l].downsample).max(rect[3] / py.levels[l].downsample) <= 1024.0).unwrap_or(py.coarsest());
-        let key = format!("{level}/{:.0}/{:.0}/{:.0}/{:.0}/{}/{}/{}/{}", rect[0], rect[1], rect[2], rect[3], t.threshold_channel, t.threshold_value, t.threshold_above, t.threshold_sigma);
+        let plane = self.plane_at(level);
+        let key = format!("{level}/{plane}/{:.0}/{:.0}/{:.0}/{:.0}/{}/{}/{}/{}", rect[0], rect[1], rect[2], rect[3], t.threshold_channel, t.threshold_value, t.threshold_above, t.threshold_sigma);
         if key == self.threshold_for {
             return;
         }
@@ -341,7 +362,7 @@ impl ImageCanvas {
                 return None;
             }
             let (w, h) = (x1 - x0, y1 - y0);
-            let mut v = py.read_region(level, t.threshold_channel, x0, y0, w, h).ok()?;
+            let mut v = py.read_region_at(level, t.threshold_channel, plane, x0, y0, w, h).ok()?;
             geometry::blur(&mut v, w, h, t.threshold_sigma / ds);
             let mask: Vec<f32> = v.iter().map(|&x| if (x >= t.threshold_value) == t.threshold_above { 1.0 } else { 0.0 }).collect();
             let img = lumen_view::render_layer(&mask, w, h, lumen_view::LayerStyle::Mask { color, alpha: 0.5 });
@@ -374,9 +395,10 @@ impl ImageCanvas {
             return None;
         }
         let (w, h) = (x1 - x0, y1 - y0);
+        let plane = self.plane_at(level);
         let mut channels = Vec::new();
         for (c, d) in v.display_docs.iter().enumerate().filter(|(_, d)| d.visible) {
-            let mut raw = v.service.read_region(level, c, x0, y0, w, h).ok()?;
+            let mut raw = v.service.read_region(level, plane, c, x0, y0, w, h).ok()?;
             let span = (d.max - d.min).max(1e-12);
             raw.iter_mut().for_each(|x| *x = ((*x - d.min) / span).clamp(0.0, 1.0));
             channels.push(raw);
@@ -395,7 +417,7 @@ impl ImageCanvas {
 
     fn request_results(&mut self, cx: &mut Context<Self>) {
         let Some(v) = &self.viewer else { return };
-        let req = ResultRequest { image: v.image.clone(), rect: self.visible(), zoom: self.zoom * self.scale as f64 };
+        let req = ResultRequest { image: v.image.clone(), rect: self.visible(), zoom: self.zoom * self.scale as f64, z: self.z };
         self.store.update(cx, |s, cx| s.request_results(req, cx));
     }
 
@@ -450,6 +472,7 @@ impl ImageCanvas {
                     self.polygon.clear();
                     self.gesture = None;
                     self.fit_pending = true;
+                    self.z = self.viewer.as_ref().map_or(0, |v| v.pyramid.depth() / 2);
                 }
                 let v = self.viewer.as_mut().expect("just set");
                 if v.display_docs != docs {
@@ -496,14 +519,19 @@ impl ImageCanvas {
         let (vw, vh) = self.view_size();
         let o = self.bounds.get().origin;
         let rect = self.visible();
-        let (zoom, scale, center) = (self.zoom, self.scale as f64, self.center);
+        let (zoom, scale, center, z0) = (self.zoom, self.scale as f64, self.center, self.z);
         let Some(v) = self.viewer.as_mut() else { return Vec::new() };
         let py = v.pyramid.clone();
         let target = py.level_for_zoom(zoom * scale);
         let coarsest = py.coarsest();
+        let plane = |level: usize| {
+            let l = &py.levels[level];
+            ((z0 as f64 / l.z_downsample) as usize).min(l.depth - 1)
+        };
         let tiles_in = |level: usize| -> Vec<TileKey> {
             let l = &py.levels[level];
             let ds = l.downsample;
+            let z = plane(level);
             let (tw, th) = (l.tile_w as f64 * ds, l.tile_h as f64 * ds);
             let tx0 = (rect[0] / tw).floor().max(0.0) as usize;
             let ty0 = (rect[1] / th).floor().max(0.0) as usize;
@@ -512,7 +540,7 @@ impl ImageCanvas {
             let mut out = Vec::new();
             for ty in ty0..ty1 {
                 for tx in tx0..tx1 {
-                    out.push(TileKey { level, tx, ty });
+                    out.push(TileKey { level, z, tx, ty });
                 }
             }
             out
@@ -529,7 +557,7 @@ impl ImageCanvas {
             let l = &py.levels[coarsest];
             for ty in 0..l.tiles_y() {
                 for tx in 0..l.tiles_x() {
-                    want.push(TileKey { level: coarsest, tx, ty });
+                    want.push(TileKey { level: coarsest, z: plane(coarsest), tx, ty });
                 }
             }
         }
@@ -589,7 +617,7 @@ impl ImageCanvas {
         }
         let level = v.pyramid.level_for_zoom(self.zoom * self.scale as f64);
         let ds = v.pyramid.levels[level].downsample;
-        Some((p, level, v.service.sample(level, (p[0] / ds) as usize, (p[1] / ds) as usize)))
+        Some((p, level, v.service.sample(level, self.plane_at(level), (p[0] / ds) as usize, (p[1] / ds) as usize)))
     }
 
     // ------------------------------------------------------------------------
@@ -801,6 +829,17 @@ impl ImageCanvas {
 
     fn on_wheel(&mut self, e: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let local = self.local(e.position);
+        if e.modifiers.alt {
+            // Alt + wheel moves through the planes
+            let dy = match e.delta {
+                ScrollDelta::Lines(d) => d.y as f64,
+                ScrollDelta::Pixels(d) => d.y.as_f32() as f64,
+            };
+            let step = if dy > 0.0 { -1 } else if dy < 0.0 { 1 } else { 0 };
+            self.set_z((self.z as i64 + step).max(0) as usize, cx);
+            cx.stop_propagation();
+            return;
+        }
         match e.delta {
             ScrollDelta::Lines(d) => {
                 self.zoom_at(1.25f64.powf(-d.y as f64), Some(local), cx);
@@ -838,6 +877,8 @@ impl ImageCanvas {
                 self.polygon.pop();
             }
             "delete" | "backspace" => self.store.update(cx, |s, cx| s.delete_selection(cx)),
+            "pageup" => self.set_z(self.z.saturating_sub(1), cx),
+            "pagedown" => self.set_z(self.z + 1, cx),
             "0" if cmd => self.fit(cx),
             "1" if cmd => self.actual_size(cx),
             "=" | "+" => self.zoom_at(1.5, None, cx),
@@ -1320,6 +1361,24 @@ impl Render for ImageCanvas {
             }
         }
         let cached = self.viewer.as_ref().map_or(0, |v| v.service.cached_bytes()) / (1024 * 1024);
+        let depth = self.viewer.as_ref().map_or(1, |v| v.pyramid.depth());
+        let z_now = self.z;
+        let me = cx.entity().downgrade();
+        let z_strip = (depth > 1).then(|| {
+            h_flex()
+                .flex_none()
+                .h(px(26.))
+                .px(px(theme::SM))
+                .gap(px(theme::SM))
+                .border_t_1()
+                .border_color(color::border())
+                .bg(color::chrome())
+                .child(div().flex_none().text_xs().text_color(color::text_muted()).child("z"))
+                .child(div().flex_1().child(crate::ui::widgets::axis_slider("plane-z".to_string(), z_now, depth, move |at, _, cx| {
+                    let _ = me.update(cx, |c, cx| c.set_z(at, cx));
+                })))
+                .child(div().flex_none().min_w(px(64.)).text_xs().font_family("monospace").text_color(color::text_muted()).child(format!("{z_now} / {}", depth - 1)))
+        });
         let footer = h_flex()
             .flex_none()
             .h(px(22.))
@@ -1348,6 +1407,7 @@ impl Render for ImageCanvas {
             .on_key_up(cx.listener(Self::on_key_up))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, window, cx| window.focus(&this.focus, cx)))
             .child(div().flex_1().min_h_0().w_full().child(body))
+            .children(z_strip)
             .child(footer)
     }
 }
