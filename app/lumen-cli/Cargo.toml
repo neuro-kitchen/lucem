@@ -12,4 +12,20 @@ publish = false
 name = "lumen"
 path = "src/main.rs"
 
+[features]
+default = ["wgpu", "cuda", "cpu"]
+wgpu = ["lumen-core/wgpu", "lumen-ops/wgpu"]
+cpu = ["lumen-core/cpu", "lumen-ops/cpu"]
+cuda = ["lumen-core/cuda", "lumen-ops/cuda"]
+hip = ["lumen-core/hip", "lumen-ops/hip"]
+
 [dependencies]
+lumen-core = { workspace = true, features = ["compute"] }
+lumen-io.workspace = true
+lumen-ops.workspace = true
+lumen-pipeline.workspace = true
+lumen-stream.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
