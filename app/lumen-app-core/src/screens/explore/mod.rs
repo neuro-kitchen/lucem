@@ -4,5 +4,6 @@ pub mod canvas;
 pub mod explore_screen;
 pub mod panels;
 pub mod toolbar;
+pub mod views;
 
 pub use explore_screen::ExploreView;

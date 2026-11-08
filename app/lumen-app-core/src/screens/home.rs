@@ -51,6 +51,7 @@ pub fn home(store: &Entity<Store>, open_file: impl Fn(&mut Window, &mut App) + '
     for (i, p) in data.iter().enumerate() {
         samples = samples.child(entry(SharedString::from(format!("data-{i}")), IconName::Microscope, display_name(p), "workspace .data/".into(), p.clone()));
     }
+    samples = samples.child(entry(SharedString::from("sample-volume"), IconName::Box, "Sample volume".to_string(), "generated 256 × 256 × 128, two channels".into(), PathBuf::from("sample:volume")));
     for k in PhantomKind::ALL {
         let path = PathBuf::from(format!("sample:{}", sample_name(*k)));
         samples = samples.child(entry(SharedString::from(format!("sample-{}", sample_name(*k))), IconName::Sparkles, k.title().to_string(), "generated 2048 × 2048".into(), path));

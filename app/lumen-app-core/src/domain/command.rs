@@ -90,6 +90,8 @@ pub enum Command {
     SetNote { note: NoteDoc },
     RemoveNote { id: String },
     Rename { name: String },
+    /// Several commands as one step: all of them apply, or none.
+    Batch { commands: Vec<Command> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -391,6 +393,20 @@ fn apply_inner(doc: &mut ProjectDoc, cmd: Command) -> Result<Changed, CommandErr
                 return Err(invalid(format!("no note {id:?}")));
             }
             Ok(Changed::Notes)
+        }
+        C::Batch { commands } => {
+            let before = doc.clone();
+            let mut changed = Changed::Graph;
+            for c in commands {
+                match apply(doc, c) {
+                    Ok(ch) => changed = ch,
+                    Err(e) => {
+                        *doc = before;
+                        return Err(e);
+                    }
+                }
+            }
+            Ok(changed)
         }
         C::Rename { name } => {
             if name.trim().is_empty() {

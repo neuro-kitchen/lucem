@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use gpui_kit::{AppContext as _, Context, EventEmitter};
 use lumen_io::{generate_phantom, PhantomKind, Pyramid};
+use lumen_pipeline::{Op, PortType};
 
 use crate::domain::command::{apply, Changed, Command, CommandError};
-use crate::domain::graph::NodeKind;
+use crate::domain::graph::{NodeKind, ViewStyle};
 use crate::domain::annotation::{Annotation, Shape};
 use crate::domain::geometry;
 use crate::domain::project::{ChannelDoc, ProjectDoc, PROJECT_FILE};
@@ -38,6 +39,38 @@ pub enum AppEvent {
     Results,
     Tool,
     Selection,
+    /// A view was asked for from the menu.
+    View(ViewRequest),
+}
+
+/// What a pane of Explore shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewKind {
+    /// One plane, full canvas.
+    Plane,
+    /// The XY, XZ and YZ planes together.
+    Ortho,
+    /// The volume rendered.
+    Volume,
+}
+
+/// A view menu command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewRequest {
+    Show(ViewKind),
+    AddPane,
+    ClosePane,
+}
+
+/// What the Layers panel can do with the selected masks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MaskOperation {
+    Union,
+    Intersect,
+    Subtract,
+    Invert,
+    /// A one-input operator on the first selected mask.
+    Op(Op),
 }
 
 pub struct Store {
@@ -74,6 +107,11 @@ pub struct Store {
     device_pending: bool,
     /// The selected node in the Pipeline (shared so Explore can show it).
     pub selected_node: Option<String>,
+    /// Selected rows of the Layers panel (`view:<id>`, `class:<name>`, `channel:<n>`), in the order
+    /// they were picked.
+    pub layers_selected: Vec<String>,
+    /// Pixels a mask grows or shrinks by.
+    pub mask_radius: usize,
 }
 
 impl EventEmitter<AppEvent> for Store {}
@@ -105,6 +143,8 @@ impl Store {
             device: None,
             device_pending: false,
             selected_node: None,
+            layers_selected: Vec::new(),
+            mask_radius: 2,
         }
     }
 
@@ -426,6 +466,123 @@ impl Store {
     // Results
     // ------------------------------------------------------------------------
 
+    /// Selects a row of the Layers panel, or adds it to (or takes it out of) the selection.
+    pub fn select_layer(&mut self, key: String, additive: bool, cx: &mut Context<Self>) {
+        if additive {
+            match self.layers_selected.iter().position(|k| *k == key) {
+                Some(i) => {
+                    self.layers_selected.remove(i);
+                }
+                None => self.layers_selected.push(key),
+            }
+        } else {
+            self.layers_selected = vec![key];
+        }
+        cx.emit(AppEvent::Selection);
+        cx.notify();
+    }
+
+    /// The selected layers that are masks, in selection order: mask results and annotation classes.
+    pub fn selected_masks(&self) -> Vec<String> {
+        self.layers_selected
+            .iter()
+            .filter(|k| match k.split_once(':') {
+                Some(("class", _)) => true,
+                Some(("view", id)) => self.doc.graph.input(id, 0).and_then(|i| self.doc.graph.node(i)).and_then(|n| n.kind.output()) == Some(PortType::Mask),
+                _ => false,
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Adds the result of `op` on the selected masks as a new layer (one undo step).
+    pub fn apply_mask_operation(&mut self, op: MaskOperation, cx: &mut Context<Self>) {
+        let masks = self.selected_masks();
+        let Some(image) = self.doc.active_image.clone() else { return };
+        let needed = if matches!(op, MaskOperation::Invert | MaskOperation::Op(_)) { 1 } else { 2 };
+        if masks.len() < needed {
+            return;
+        }
+        let mut commands = Vec::new();
+        let mut graph = self.doc.graph.clone();
+        let y = graph.next_row();
+        let mut x = 0.0f32;
+        // Node ids are reserved in a copy of the graph, so they are unique within the batch
+        let fresh = |graph: &mut crate::domain::graph::GraphDoc, base: &str| {
+            let id = graph.fresh_id(base);
+            graph.nodes.push(crate::domain::graph::GraphNode { id: id.clone(), x: 0.0, y: 0.0, kind: NodeKind::View { name: String::new(), style: ViewStyle::default() } });
+            id
+        };
+        let mut sources = Vec::new();
+        let mut names = Vec::new();
+        for key in if needed == 1 { &masks[..1] } else { &masks[..] } {
+            match key.split_once(':') {
+                Some(("view", id)) => {
+                    let Some(from) = self.doc.graph.input(id, 0) else { return };
+                    sources.push(from.to_string());
+                    if let Some(NodeKind::View { name, .. }) = self.doc.graph.node(id).map(|n| &n.kind) {
+                        names.push(name.clone());
+                    }
+                }
+                Some(("class", class)) => {
+                    let existing = self.doc.graph.nodes.iter().find(|n| matches!(&n.kind, NodeKind::Annotations { image: i, class: Some(c) } if *i == image && c == class));
+                    let id = match existing {
+                        Some(n) => n.id.clone(),
+                        None => {
+                            let id = fresh(&mut graph, "annotations");
+                            commands.push(Command::AddNode { kind: NodeKind::Annotations { image: image.clone(), class: Some(class.to_string()) }, x, y, id: Some(id.clone()), after: None });
+                            x += 240.0;
+                            id
+                        }
+                    };
+                    sources.push(id);
+                    names.push(class.to_string());
+                }
+                _ => return,
+            }
+        }
+        let binary = match &op {
+            MaskOperation::Union => Some((Op::MaskUnion {}, "∪")),
+            MaskOperation::Intersect => Some((Op::MaskIntersect {}, "∩")),
+            MaskOperation::Subtract => Some((Op::MaskSubtract {}, "−")),
+            _ => None,
+        };
+        let (last, title) = if let Some((bin, sign)) = binary {
+            let mut current = sources[0].clone();
+            for src in &sources[1..] {
+                let id = fresh(&mut graph, "mask_op");
+                commands.push(Command::AddNode { kind: NodeKind::Op { enabled: true, op: bin.clone() }, x, y, id: Some(id.clone()), after: None });
+                commands.push(Command::Connect { from: current, to: id.clone(), port: 0 });
+                commands.push(Command::Connect { from: src.clone(), to: id.clone(), port: 1 });
+                current = id;
+                x += 240.0;
+            }
+            (current, names.join(&format!(" {sign} ")))
+        } else {
+            let (one, label) = match &op {
+                MaskOperation::Op(o) => (o.clone(), o.title().to_string()),
+                _ => (Op::MaskInvert {}, "Invert".to_string()),
+            };
+            let id = fresh(&mut graph, "mask_op");
+            commands.push(Command::AddNode { kind: NodeKind::Op { enabled: true, op: one }, x, y, id: Some(id.clone()), after: None });
+            commands.push(Command::Connect { from: sources[0].clone(), to: id.clone(), port: 0 });
+            x += 240.0;
+            (id, format!("{label} {}", names.first().map_or("", String::as_str)))
+        };
+        let view = fresh(&mut graph, "view");
+        commands.push(Command::AddNode { kind: NodeKind::View { name: title, style: ViewStyle::default() }, x, y, id: Some(view.clone()), after: None });
+        commands.push(Command::Connect { from: last, to: view.clone(), port: 0 });
+        if self.execute(Command::Batch { commands }, cx).is_ok() {
+            self.layers_selected = vec![format!("view:{view}")];
+            cx.emit(AppEvent::Selection);
+        }
+    }
+
+    /// A view menu command, for Explore.
+    pub fn request_view(&mut self, request: ViewRequest, cx: &mut Context<Self>) {
+        cx.emit(AppEvent::View(request));
+    }
+
     /// What is on screen changed: compute the results there (debounced by the canvas).
     pub fn request_results(&mut self, req: ResultRequest, cx: &mut Context<Self>) {
         if self.last_request.as_ref() == Some(&req) && !self.results.is_empty() {
@@ -730,6 +887,11 @@ impl ChannelHistogram {
 /// Opens a pyramid from a path or a `sample:<name>`.
 pub fn open_pyramid(path: &Path) -> Result<Pyramid, String> {
     let s = path.to_string_lossy();
+    if s == "sample:volume" {
+        let mut py = lumen_io::sample_volume(256, 128).map_err(|e| e.to_string())?;
+        py.path = Some(path.to_path_buf());
+        return Ok(py);
+    }
     if let Some(name) = s.strip_prefix("sample:") {
         let kind = PhantomKind::ALL.iter().copied().find(|k| sample_name(*k) == name).ok_or_else(|| format!("no sample {name:?}"))?;
         let mut img = generate_phantom(kind, 2048, 2048);

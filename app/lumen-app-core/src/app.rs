@@ -10,7 +10,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
 };
 
-use crate::data::store::{AppEvent, Store};
+use crate::data::store::{AppEvent, Store, ViewKind, ViewRequest};
 use crate::domain::command::Command;
 use crate::navigation::actions::*;
 use crate::navigation::route::Workspace;
@@ -208,7 +208,14 @@ impl LumenApp {
             let store = store.clone();
             Button::new("menu-view").ghost().small().label("View").dropdown_menu(move |menu: PopupMenu, _, _| {
                 let (a, b, c) = (store.clone(), store.clone(), store.clone());
-                menu.item(PopupMenuItem::new("Rulers  Ctrl+R").on_click(move |_, _, cx| a.update(cx, |s, cx| s.update_tool(|t| t.rulers = !t.rulers, cx))))
+                let (p, o, v, add, close) = (store.clone(), store.clone(), store.clone(), store.clone(), store.clone());
+                menu.item(PopupMenuItem::new("Plane").on_click(move |_, _, cx| p.update(cx, |s, cx| s.request_view(ViewRequest::Show(ViewKind::Plane), cx))))
+                    .item(PopupMenuItem::new("2D: three planes").on_click(move |_, _, cx| o.update(cx, |s, cx| s.request_view(ViewRequest::Show(ViewKind::Ortho), cx))))
+                    .item(PopupMenuItem::new("3D: volume").on_click(move |_, _, cx| v.update(cx, |s, cx| s.request_view(ViewRequest::Show(ViewKind::Volume), cx))))
+                    .item(PopupMenuItem::new("Add a view").on_click(move |_, _, cx| add.update(cx, |s, cx| s.request_view(ViewRequest::AddPane, cx))))
+                    .item(PopupMenuItem::new("Close this view").on_click(move |_, _, cx| close.update(cx, |s, cx| s.request_view(ViewRequest::ClosePane, cx))))
+                    .separator()
+                    .item(PopupMenuItem::new("Rulers  Ctrl+R").on_click(move |_, _, cx| a.update(cx, |s, cx| s.update_tool(|t| t.rulers = !t.rulers, cx))))
                     .item(PopupMenuItem::new("Results over the image").on_click(move |_, _, cx| b.update(cx, |s, cx| s.update_tool(|t| t.show_results = !t.show_results, cx))))
                     .item(PopupMenuItem::new("Side panel  Tab").on_click(move |_, _, cx| c.update(cx, |s, cx| {
                         let open = !s.prefs.sidebar_open;

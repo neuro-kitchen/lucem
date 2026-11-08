@@ -5,28 +5,42 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, v_flex, Icon, Selectable as _};
-use gpui_kit::{div, px, AnyElement, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window};
+use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{div, px, AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window};
 
-use crate::data::store::{AppEvent, Store};
+use crate::data::store::{AppEvent, Store, ViewKind, ViewRequest};
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::EmptyState;
 
 use super::canvas::ImageCanvas;
 use super::panels::display::DisplayPanel;
 use super::panels::notes::NotesPanel;
-use super::panels::{annotations, results, selection, Tab};
+use super::panels::{annotations, layers, results, selection, Tab};
 use super::toolbar::{options_bar, tool_bar};
+use super::views::{OrthoView, VolumeView};
 
 const LEFT_W: f32 = 296.;
 const RIGHT_W: f32 = 296.;
 const RAIL_W: f32 = 40.;
+/// Views side by side at most.
+const MAX_PANES: usize = 4;
+
+/// One view of the image: what it shows, and its screens, made when first shown.
+struct Pane {
+    kind: ViewKind,
+    plane: Entity<ImageCanvas>,
+    ortho: Option<Entity<OrthoView>>,
+    volume: Option<Entity<VolumeView>>,
+}
 
 pub struct ExploreView {
     store: Entity<Store>,
     pub canvas: Entity<ImageCanvas>,
     display: Entity<DisplayPanel>,
     notes: Entity<NotesPanel>,
+    panes: Vec<Pane>,
+    active_pane: usize,
     _subs: Vec<Subscription>,
 }
 
@@ -35,12 +49,131 @@ impl ExploreView {
         let canvas = cx.new(|cx| ImageCanvas::new(store.clone(), cx));
         let display = cx.new(|cx| DisplayPanel::new(store.clone(), cx));
         let notes = cx.new(|cx| NotesPanel::new(store.clone(), canvas.clone(), window, cx));
-        let subs = vec![cx.subscribe(&store, |_, _, e: &AppEvent, cx| {
+        let subs = vec![cx.subscribe(&store, |this: &mut Self, _, e: &AppEvent, cx| {
+            match e {
+                AppEvent::View(ViewRequest::Show(kind)) => this.show(*kind, cx),
+                AppEvent::View(ViewRequest::AddPane) => this.add_pane(cx),
+                AppEvent::View(ViewRequest::ClosePane) => this.close_pane(cx),
+                _ => {}
+            }
             if !matches!(e, AppEvent::Status) {
                 cx.notify();
             }
         })];
-        Self { store, canvas, display, notes, _subs: subs }
+        let panes = vec![Pane { kind: ViewKind::Plane, plane: canvas.clone(), ortho: None, volume: None }];
+        Self { store, canvas, display, notes, panes, active_pane: 0, _subs: subs }
+    }
+
+    /// Whether the data allows `kind`: the 2D and 3D views need depth.
+    fn allowed(&self, kind: ViewKind, cx: &Context<Self>) -> bool {
+        kind == ViewKind::Plane || self.store.read(cx).active_pyramid().is_some_and(|p| p.is_volume())
+    }
+
+    /// Switches the active view to `kind`.
+    fn show(&mut self, kind: ViewKind, cx: &mut Context<Self>) {
+        if !self.allowed(kind, cx) {
+            self.store.update(cx, |s, cx| s.set_status("This image has no depth: the 2D and 3D views need a z axis", cx));
+            return;
+        }
+        let store = self.store.clone();
+        let p = &mut self.panes[self.active_pane];
+        p.kind = kind;
+        match kind {
+            ViewKind::Ortho if p.ortho.is_none() => p.ortho = Some(cx.new(|cx| OrthoView::new(store, cx))),
+            ViewKind::Volume if p.volume.is_none() => p.volume = Some(cx.new(|cx| VolumeView::new(store, cx))),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Adds a view beside the others (a plane, until switched).
+    fn add_pane(&mut self, cx: &mut Context<Self>) {
+        if self.panes.len() >= MAX_PANES {
+            return;
+        }
+        let store = self.store.clone();
+        let plane = cx.new(|cx| ImageCanvas::new(store, cx));
+        self.panes.push(Pane { kind: ViewKind::Plane, plane, ortho: None, volume: None });
+        self.active_pane = self.panes.len() - 1;
+        cx.notify();
+    }
+
+    /// Closes the active view (the last one stays).
+    fn close_pane(&mut self, cx: &mut Context<Self>) {
+        if self.panes.len() > 1 {
+            self.panes.remove(self.active_pane);
+            self.active_pane = self.active_pane.min(self.panes.len() - 1);
+            cx.notify();
+        }
+    }
+
+    /// The view switcher above the panes.
+    fn view_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let current = self.panes[self.active_pane].kind;
+        let me = cx.entity().downgrade();
+        let toggle = |id: &'static str, icon: IconName, tip: &'static str, kind: ViewKind, allowed: bool| {
+            let me = me.clone();
+            Button::new(id).ghost().small().icon(Icon::new(icon)).tooltip(if allowed { tip } else { "Needs an image with depth (a z axis)" }).selected(current == kind).disabled(!allowed).on_click(move |_, _, cx| {
+                let _ = me.update(cx, |e, cx| e.show(kind, cx));
+            })
+        };
+        let (ortho, volume) = (self.allowed(ViewKind::Ortho, cx), self.allowed(ViewKind::Volume, cx));
+        let (add, close) = (me.clone(), me.clone());
+        h_flex()
+            .flex_none()
+            .h(px(30.))
+            .px(px(theme::SM))
+            .gap(px(2.))
+            .border_b_1()
+            .border_color(color::border())
+            .bg(color::chrome())
+            .child(toggle("view-plane", IconName::Square, "Plane: one plane, full canvas", ViewKind::Plane, true))
+            .child(toggle("view-ortho", IconName::LayoutGrid, "2D: the XY, XZ and YZ planes together", ViewKind::Ortho, ortho))
+            .child(toggle("view-volume", IconName::Box, "3D: the volume rendered", ViewKind::Volume, volume))
+            .child(div().flex_1())
+            .child(Button::new("view-add").ghost().small().icon(Icon::new(IconName::Columns2)).tooltip("Add a view beside this one").disabled(self.panes.len() >= MAX_PANES).on_click(move |_, _, cx| {
+                let _ = add.update(cx, |e, cx| e.add_pane(cx));
+            }))
+            .child(Button::new("view-close").ghost().small().icon(Icon::new(IconName::X)).tooltip("Close this view").disabled(self.panes.len() < 2).on_click(move |_, _, cx| {
+                let _ = close.update(cx, |e, cx| e.close_pane(cx));
+            }))
+    }
+
+    /// The views side by side; a click makes one the active view.
+    fn pane_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let several = self.panes.len() > 1;
+        let tools = self.panes[0].kind == ViewKind::Plane;
+        let mut row = h_flex().flex_1().min_w_0().h_full();
+        for (i, p) in self.panes.iter().enumerate() {
+            let body: AnyElement = match p.kind {
+                ViewKind::Plane => p.plane.clone().into_any_element(),
+                ViewKind::Ortho => p.ortho.clone().map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
+                ViewKind::Volume => p.volume.clone().map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
+            };
+            let me = cx.entity().downgrade();
+            let active = several && i == self.active_pane;
+            row = row.child(
+                div()
+                    .id(("view-pane", i))
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .border_color(if active { color::accent() } else { color::border() })
+                    .when(several, |d| d.border_1())
+                    .on_mouse_down(gpui_kit::MouseButton::Left, move |_, _, cx| {
+                        let _ = me.update(cx, |e, cx| {
+                            if e.active_pane != i {
+                                e.active_pane = i;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .child(body)
+                    .when(i == 0 && tools, |d| d.child(tool_bar(&self.store, &self.canvas, cx))),
+            );
+        }
+        row
     }
 
     fn tabs(&self, cx: &Context<Self>) -> (Option<Tab>, Option<Tab>) {
@@ -74,6 +207,7 @@ impl ExploreView {
 
     fn panel(&self, tab: Tab, width: f32, left: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let body: AnyElement = match tab {
+            Tab::Layers => layers::panel(&self.store, cx),
             Tab::Display => self.display.clone().into_any_element(),
             Tab::Annotations => annotations::panel(&self.store, &self.canvas, cx),
             Tab::Results => results::panel(&self.store, cx),
@@ -130,7 +264,7 @@ impl Render for ExploreView {
                     .w_full()
                     .child(self.rail(&Tab::LEFT, left, true, cx))
                     .children(left.map(|t| self.panel(t, LEFT_W, true, cx)))
-                    .child(div().relative().flex_1().min_w_0().h_full().child(self.canvas.clone()).child(tool_bar(&self.store, &self.canvas, cx)))
+                    .child(v_flex().flex_1().min_w_0().h_full().child(self.view_bar(cx)).child(div().flex_1().min_h_0().w_full().flex().child(self.pane_row(cx))))
                     .children(right.map(|t| self.panel(t, RIGHT_W, false, cx)))
                     .child(self.rail(&Tab::RIGHT, right, false, cx)),
             )
