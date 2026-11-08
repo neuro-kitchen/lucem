@@ -2,10 +2,12 @@
 
 pub mod error;
 pub mod image_io;
+pub mod loader;
 pub mod ome_zarr;
 pub mod phantoms;
 pub mod project_io;
 pub mod pyramid;
+pub mod zarr_writer;
 
 pub use error::{IoError, IoResult};
 pub use image_io::{load_image_file, save_image_file, LoadedImage};
@@ -15,4 +17,6 @@ pub use ome_zarr::{
 };
 pub use phantoms::{generate_phantom, PhantomKind};
 pub use project_io::{ProjectManifest, SavedModifier};
-pub use pyramid::{ChannelInfo, LevelInfo, Pyramid, Tile, MEMORY_TILE};
+pub use loader::{BlockLoader, LoadedBlock};
+pub use pyramid::{sample_volume, ChannelInfo, LevelInfo, Plane, PlaneAxis, Pyramid, Tile, MEMORY_TILE};
+pub use zarr_writer::{Sample, SampleType, WriterOptions, ZarrWriter};

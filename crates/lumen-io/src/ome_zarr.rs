@@ -132,8 +132,20 @@ struct LabelsZAttrs {
     labels: Vec<String>,
 }
 
+/// Whether `path`, taken from a file's metadata, stays inside the folder it is joined to: relative,
+/// no `..`, no root or drive prefix.
+pub(crate) fn is_safe_relative_path(path: &str) -> bool {
+    !path.is_empty() && Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// Most bytes a compressed frame may expand to.
+const MAX_DECOMPRESSED_BYTES: usize = 1 << 31;
+
 /// Decompresses a raw LZ4 block (`src`) of known `uncompressed_len`.
 pub(crate) fn lz4_decompress_block(src: &[u8], uncompressed_len: usize) -> IoResult<Vec<u8>> {
+    if uncompressed_len > MAX_DECOMPRESSED_BYTES {
+        return Err(IoError::OmeZarr(format!("LZ4 block declares {uncompressed_len} bytes")));
+    }
     let mut out = vec![0u8; uncompressed_len];
     let mut ip = 0usize;
     let mut op = 0usize;
@@ -220,6 +232,9 @@ pub(crate) fn blosc_decompress(bytes: &[u8]) -> IoResult<Vec<u8>> {
 
     if cbytes > bytes.len() {
         return Err(IoError::OmeZarr("Blosc cbytes exceeds buffer length".to_string()));
+    }
+    if nbytes > MAX_DECOMPRESSED_BYTES {
+        return Err(IoError::OmeZarr(format!("Blosc frame declares {nbytes} bytes")));
     }
 
     let is_memcpy = (flags & 0x02) != 0;
@@ -363,7 +378,7 @@ pub fn inspect_ome_zarr_container(root_dir: &Path) -> IoResult<OmeZarrContainerI
                         container_name = n.clone();
                     }
                 }
-                for ds in &ms.datasets {
+                for ds in ms.datasets.iter().filter(|d| is_safe_relative_path(&d.path)) {
                     if root_dir.join(&ds.path).join(".zarray").is_file() {
                         pyramid_levels.push(ds.path.clone());
                     }
@@ -427,7 +442,7 @@ pub fn inspect_ome_zarr_container(root_dir: &Path) -> IoResult<OmeZarrContainerI
     let labels_dir = root_dir.join("labels");
     if let Ok(lbl_str) = fs::read_to_string(labels_dir.join(".zattrs")) {
         if let Ok(parsed_lbl) = serde_json::from_str::<LabelsZAttrs>(&lbl_str) {
-            for g in parsed_lbl.labels {
+            for g in parsed_lbl.labels.into_iter().filter(|g| is_safe_relative_path(g)) {
                 if labels_dir.join(&g).is_dir() {
                     label_groups.push(g);
                 }
@@ -515,6 +530,15 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
     let zarray_str = fs::read_to_string(array_dir.join(".zarray"))?;
     let meta: ZArrayMeta = serde_json::from_str(&zarray_str)?;
 
+    // This whole-level reader is 2D: never take planes along z for channels
+    if let Ok(text) = fs::read_to_string(info.root_path.join(".zattrs")) {
+        if text.contains("\"z\"") {
+            return Err(IoError::OmeZarr("this image has a z axis: open it through Pyramid, which reads 3D".to_string()));
+        }
+    }
+    if meta.chunks.contains(&0) {
+        return Err(IoError::OmeZarr(format!("Zarr chunks {:?} have an empty axis", meta.chunks)));
+    }
     let (channels, height, width, chunk_c, chunk_y, chunk_x) = match (meta.shape.as_slice(), meta.chunks.as_slice()) {
         (&[h, w], &[cy, cx]) => (1usize, h, w, 1usize, cy, cx),
         (&[c, h, w], &[cc, cy, cx]) => (c, h, w, cc.max(1), cy, cx),
@@ -527,7 +551,7 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
         }
     };
 
-    let n_pixels = height * width;
+    let n_pixels = height.checked_mul(width).filter(|n| *n <= (1usize << 32)).ok_or_else(|| IoError::OmeZarr(format!("Zarr level {height} × {width} is too large to load whole")))?;
     let num_c_load = channels.min(3);
     let mut channel_planes = vec![vec![0.0f32; n_pixels]; num_c_load];
 
