@@ -58,19 +58,20 @@ pub fn slic<F: ImageFloat>(
 
     let n_pixels = h * w;
     let step = ((n_pixels as f64) / (options.n_segments as f64)).sqrt().max(1.0);
-    let step_i = (step.round() as usize).max(1);
     let host_img: Vec<f64> = image.to_host(client).into_iter().map(to_f64).collect();
 
-    // Seed initial cluster centers on a regular grid
-    let mut centers_f64: Vec<[f64; 3]> = Vec::new();
-    let mut r = step_i / 2;
-    while r < h {
-        let mut c = step_i / 2;
-        while c < w {
+    // Seed the cluster centres on a grid of about `n_segments` cells shaped like the image
+    // (n_y × n_x, each seed at its cell's centre): a fixed step can leave fewer seeds than asked,
+    // down to one on a small image
+    let n_y = ((options.n_segments as f64 * h as f64 / w as f64).sqrt().round() as usize).clamp(1, h);
+    let n_x = ((options.n_segments as f64 / n_y as f64).round() as usize).clamp(1, w);
+    let mut centers_f64: Vec<[f64; 3]> = Vec::with_capacity(n_y * n_x);
+    for i in 0..n_y {
+        let r = (((i as f64 + 0.5) * h as f64 / n_y as f64) as usize).min(h - 1);
+        for j in 0..n_x {
+            let c = (((j as f64 + 0.5) * w as f64 / n_x as f64) as usize).min(w - 1);
             centers_f64.push([r as f64, c as f64, host_img[r * w + c]]);
-            c += step_i;
         }
-        r += step_i;
     }
     if centers_f64.is_empty() {
         centers_f64.push([0.0, 0.0, host_img[0]]);
@@ -395,8 +396,7 @@ pub fn random_walker<F: ImageFloat>(
 
     // Solve Dirichlet boundary problem for the first (num_k - 1) labels by Gauss-Seidel SOR
     let iters = max_iter.max(1);
-    for k in 0..(num_k - 1) {
-        let p = &mut probs[k];
+    for p in probs.iter_mut().take(num_k - 1) {
         for _ in 0..iters {
             let mut max_diff = 0.0f64;
             for r in 0..h {

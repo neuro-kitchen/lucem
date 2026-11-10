@@ -62,6 +62,40 @@ pub enum NodeKind {
         #[serde(default)]
         style: ViewStyle,
     },
+    /// A script file (Python `.py` or Rust `.rs`) run on its inputs (Blender's Script node): its
+    /// input ports, output and numbers come from the file's `lumen:` header
+    /// (`crate::data::script`), read again when the file changes.
+    Script {
+        path: String,
+        #[serde(default)]
+        inputs: Vec<ScriptPort>,
+        #[serde(default = "image_port")]
+        output: PortType,
+        #[serde(default)]
+        params: Vec<ScriptParam>,
+        #[serde(default = "yes")]
+        enabled: bool,
+    },
+}
+
+/// An input of a script: its name (the argument) and what it takes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptPort {
+    pub name: String,
+    pub port: PortType,
+}
+
+/// A number a script takes (edited in the Inspector).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptParam {
+    pub name: String,
+    pub value: f64,
+}
+
+fn image_port() -> PortType {
+    PortType::Image
 }
 
 fn yes() -> bool {
@@ -112,11 +146,12 @@ pub struct EdgeDoc {
 
 impl NodeKind {
     /// Input ports: type (`None`: any raster or table) and name.
-    pub fn inputs(&self) -> Vec<(Option<PortType>, &'static str)> {
+    pub fn inputs(&self) -> Vec<(Option<PortType>, String)> {
         match self {
             NodeKind::Source { .. } | NodeKind::Annotations { .. } => Vec::new(),
-            NodeKind::Op { op, .. } => op.inputs().into_iter().map(|(t, n)| (Some(t), n)).collect(),
-            NodeKind::View { .. } => vec![(None, "result")],
+            NodeKind::Op { op, .. } => op.inputs().into_iter().map(|(t, n)| (Some(t), n.to_string())).collect(),
+            NodeKind::View { .. } => vec![(None, "result".to_string())],
+            NodeKind::Script { inputs, .. } => inputs.iter().map(|p| (Some(p.port), p.name.clone())).collect(),
         }
     }
 
@@ -126,6 +161,7 @@ impl NodeKind {
             NodeKind::Annotations { .. } => Some(PortType::Mask),
             NodeKind::Op { op, .. } => Some(op.output()),
             NodeKind::View { .. } => None,
+            NodeKind::Script { output, .. } => Some(*output),
         }
     }
 
@@ -233,14 +269,13 @@ impl GraphDoc {
         let (Some(a), Some(b)) = (self.node(from), self.node(to)) else { return Err(format!("no node {from:?} or {to:?}")) };
         let Some(out) = a.kind.output() else { return Err(format!("{from} has no output (views end a chain)")) };
         let ports = b.kind.inputs();
-        let Some((want, name)) = ports.get(port).copied() else {
+        let Some((want, name)) = ports.get(port).cloned() else {
             return Err(if ports.is_empty() { format!("{to} takes no input") } else { format!("{to} has no input {}", port + 1) });
         };
-        if let Some(want) = want {
-            if want != out {
+        if let Some(want) = want
+            && want != out {
                 return Err(format!("{to}'s {name} input takes {}, {from} gives {}", want.name(), out.name()));
             }
-        }
         if from == to || self.descendants(to).contains(from) {
             return Err("that connection would make a loop".into());
         }
@@ -325,15 +360,17 @@ mod tests {
 
     /// dapi → blur → otsu → label → measure(labels, dapi) → table
     fn segmentation() -> GraphDoc {
-        let mut g = GraphDoc::default();
-        g.nodes = vec![
-            node("dapi", NodeKind::Source { image: "img1".into(), channel: 0 }),
-            node("blur", op(Op::GaussianBlur { sigma: 2.0 })),
-            node("otsu", op(Op::OtsuThreshold { bins: 256 })),
-            node("label", op(Op::Label {})),
-            node("measure", op(Op::Measure {})),
-            node("table", NodeKind::View { name: "Nuclei".into(), style: ViewStyle::default() }),
-        ];
+        let mut g = GraphDoc {
+            nodes: vec![
+                node("dapi", NodeKind::Source { image: "img1".into(), channel: 0 }),
+                node("blur", op(Op::GaussianBlur { sigma: 2.0 })),
+                node("otsu", op(Op::OtsuThreshold { bins: 256 })),
+                node("label", op(Op::Label {})),
+                node("measure", op(Op::Measure {})),
+                node("table", NodeKind::View { name: "Nuclei".into(), style: ViewStyle::default() }),
+            ],
+            ..GraphDoc::default()
+        };
         for (a, b, p) in [("dapi", "blur", 0), ("blur", "otsu", 0), ("otsu", "label", 0), ("label", "measure", 0), ("dapi", "measure", 1), ("measure", "table", 0)] {
             g.connect(a, b, p).unwrap();
         }

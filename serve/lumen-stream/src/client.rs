@@ -50,11 +50,11 @@ impl Session {
     pub async fn tile(&self, path: &str, level: usize, channel: usize, z: usize, tx: usize, ty: usize) -> StreamResult<TileData> {
         let (response, mut recv) = self.ask(&Request::Tile { path: path.into(), level, channel, z, tx, ty }).await?;
         let Response::Tile { width, height } = response else { return Err(StreamError::protocol("expected a tile")) };
-        let bytes = recv.read_to_end(MAX_TILE_BYTES).await.map_err(|e| StreamError::protocol(e))?;
+        let bytes = recv.read_to_end(MAX_TILE_BYTES).await.map_err(StreamError::protocol)?;
         if width.checked_mul(height).and_then(|n| n.checked_mul(4)) != Some(bytes.len()) {
             return Err(StreamError::protocol("the tile's size does not match its data"));
         }
-        let data = bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let data = bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         Ok(TileData { width, height, data })
     }
 

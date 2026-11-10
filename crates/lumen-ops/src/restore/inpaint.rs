@@ -160,6 +160,7 @@ pub fn unwrap_phase_poisson_rhs_2d<F: ImageFloat>(
 /// path algorithm.
 ///
 /// `wrap_around` specifies per-axis periodic boundary wrapping (or `false` on every axis when `None`).
+#[allow(clippy::needless_range_loop)] // neighbourhood / DP index arithmetic reads clearer with indices
 pub fn unwrap_phase_into<F: ImageFloat>(
     client: &Client,
     input: &DeviceArray<F>,
@@ -310,9 +311,9 @@ pub fn unwrap_phase_into<F: ImageFloat>(
 
     let (_, k0) = find_with_offset(&mut parent, &mut rel_k, 0);
     let mut unwrapped = Vec::with_capacity(n);
-    for idx in 0..n {
+    for (idx, &p) in phi.iter().enumerate().take(n) {
         let (_, ki) = find_with_offset(&mut parent, &mut rel_k, idx as u32);
-        unwrapped.push(phi[idx] + ((ki - k0) as f64) * two_pi);
+        unwrapped.push(p + ((ki - k0) as f64) * two_pi);
     }
 
     let dev = DeviceArray::from_host(client, input.shape().clone(), cast_all::<F>(&unwrapped))?;

@@ -1,5 +1,9 @@
 //! Device kernels for label expansion, boundary detection, boundary overlays, and segmentation joining.
 
+// CubeCL kernels: `contains`, `clamp` and `abs_diff` do not lower to device code, so the
+// comparisons stay written out
+#![allow(clippy::manual_range_contains, clippy::manual_clamp, clippy::manual_abs_diff)]
+
 use cubecl::prelude::*;
 use lumen_core::compute::element_position;
 

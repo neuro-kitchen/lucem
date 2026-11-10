@@ -1,7 +1,7 @@
 //! Kernel vs. end-to-end benchmarks for `lumen_ops::measure`.
 
 use lumen_core::{
-    compute::time_device,
+    compute::bench::time_device,
     cubecl::prelude::Client,
     memory::DeviceArray,
     ComputeTarget, Shape,
@@ -17,8 +17,8 @@ fn bench_measure_suite(client: &Client) {
     let w = 128usize;
     let data: Vec<f32> = (0..(h * w)).map(|i| ((i * 37) % 256) as f32 / 255.0).collect();
     let arr = DeviceArray::from_host(client, Shape::new([h, w]), data.clone()).unwrap();
-    let mask_u8: Vec<u8> = data.iter().map(|&v| u8::from(v > 0.5)).collect();
-    let mask = DeviceArray::from_host(client, Shape::new([h, w]), mask_u8).unwrap();
+    let mask_bits: Vec<u32> = data.iter().map(|&v| u32::from(v > 0.5)).collect();
+    let mask = DeviceArray::from_host(client, Shape::new([h, w]), mask_bits).unwrap();
 
     let lbl_t = time_device(client, iters, || {
         let _ = label_components(client, &mask, None).unwrap();

@@ -15,6 +15,10 @@ async-channel.workspace = true
 gpui-kit.workspace = true
 lumen-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
 lumen-io.workspace = true
+# Histology workflows (stains, tissue, cells, classifiers)
+lumen-hist = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
+# Machine-learning plugins: the contract only (the models run in separate programs)
+lumen-ml.workspace = true
 lumen-ops = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
 lumen-pipeline.workspace = true
 lumen-view.workspace = true

@@ -25,7 +25,7 @@ pub fn spline_pole_1d_kernel<F: lumen_core::element::ImageFloat>(
         let mut i = 0u32;
         while i < len {
             let idx = (base + i * inner) as usize;
-            data[idx] = data[idx] * gain;
+            data[idx] *= gain;
             i += 1u32;
         }
 
@@ -36,7 +36,7 @@ pub fn spline_pole_1d_kernel<F: lumen_core::element::ImageFloat>(
         let mut m = 1u32;
         while m < terms {
             c0 += zn * data[(base + m * inner) as usize];
-            zn = zn * pole;
+            zn *= pole;
             m += 1u32;
         }
         data[base as usize] = c0;
@@ -45,7 +45,7 @@ pub fn spline_pole_1d_kernel<F: lumen_core::element::ImageFloat>(
         while f_idx < len {
             let cur = (base + f_idx * inner) as usize;
             let prev = (base + (f_idx - 1u32) * inner) as usize;
-            data[cur] = data[cur] + pole * data[prev];
+            data[cur] += pole * data[prev];
             f_idx += 1u32;
         }
 

@@ -1,5 +1,9 @@
 //! Test helpers shared by every lumen crate (not part of the public API).
 
+/// Device tests share the devices (read); a test that shuts them down takes them alone (write),
+/// so it neither stops the others' devices nor counts their threads.
+pub static DEVICE_TESTS: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 /// Defines a `#[test]` that runs `$body(&client)` on every CubeCL runtime of
 /// [`ComputeTarget::for_tests`](crate::ComputeTarget::for_tests) (compiled in, limited by
 /// `LUMEN_TEST_RUNTIMES`), so tests never name a runtime. Several bugs appear on one runtime only
@@ -22,6 +26,7 @@ macro_rules! runtime_test {
                     $body(&client)
                 }
             }
+            let _shared = $crate::test_support::DEVICE_TESTS.read().unwrap_or_else(|e| e.into_inner());
             let targets = $crate::ComputeTarget::for_tests();
             assert!(!targets.is_empty(), "no CubeCL runtime to test (compiled in and allowed by LUMEN_TEST_RUNTIMES)");
             for target in targets {

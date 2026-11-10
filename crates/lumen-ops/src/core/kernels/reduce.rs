@@ -47,7 +47,7 @@ pub fn row_sum_min_max_kernel<F: lumen_core::element::ImageFloat>(
         while stride.read() > 0u32 {
             let half = stride.read() as usize;
             if u < half {
-                sh_sum[u] = sh_sum[u] + sh_sum[u + half];
+                sh_sum[u] += sh_sum[u + half];
                 sh_min[u] = F::min(sh_min[u], sh_min[u + half]);
                 sh_max[u] = F::max(sh_max[u], sh_max[u + half]);
             }
@@ -113,7 +113,7 @@ pub fn row_mean_var_kernel<F: lumen_core::element::ImageFloat>(
                 if nb > 0u32 {
                     let delta = sh_mean[u + half] - sh_mean[u];
                     let nf = n as f32;
-                    sh_mean[u] = sh_mean[u] + delta * (nb as f32) / nf;
+                    sh_mean[u] += delta * (nb as f32) / nf;
                     sh_m2[u] = sh_m2[u] + sh_m2[u + half] + delta * delta * (na as f32) * (nb as f32) / nf;
                     sh_count[u] = n;
                 }

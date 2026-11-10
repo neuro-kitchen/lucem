@@ -125,7 +125,7 @@ mod tests {
         let se = StructuringElement::rectangle([2, 2]).unwrap();
         let flat = DeviceArray::from_host(client, Shape::new([4, 4]), vec![5u32; 16]).unwrap();
         let ent0: Vec<f32> = windowed_entropy(client, &flat, &se, PadMode::Nearest).unwrap().to_host(client);
-        assert_close(&ent0, &vec![0.0; 16], 1e-6, client.name());
+        assert_close(&ent0, &[0.0; 16], 1e-6, client.name());
     }
     runtime_test!(test_windowed_entropy, entropy_zero_on_uniform_and_one_on_binary_checkerboard);
 }

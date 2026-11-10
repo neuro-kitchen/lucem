@@ -30,53 +30,104 @@ pub const RULER: f32 = 20.;
 /// Right sidebar width (px).
 pub const SIDEBAR_W: f32 = 304.;
 
-/// The surfaces, from the deepest.
+/// What the user chose in Settings, read by every colour (switched at run time).
+mod look {
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+
+    pub static DARK: AtomicBool = AtomicBool::new(true);
+    pub static ACCENT: AtomicU32 = AtomicU32::new(0x3d65a8);
+    pub static PASTEBOARD: AtomicU8 = AtomicU8::new(0);
+    pub static FONT: AtomicU32 = AtomicU32::new(15);
+
+    pub fn dark() -> bool {
+        DARK.load(Ordering::Relaxed)
+    }
+}
+
+/// Accent colours offered in Settings: name and RGB.
+pub const ACCENTS: [(&str, u32); 6] = [("Blue", 0x3d65a8), ("Teal", 0x2b7f86), ("Green", 0x3f8a52), ("Purple", 0x7451b8), ("Orange", 0xb8622a), ("Pink", 0xb24470)];
+/// Pasteboards offered in Settings (what is around the image).
+pub const PASTEBOARDS: [&str; 3] = ["Grey", "Dark", "Light"];
+
+/// Sets the look: dark or light, the accent (RGB), the pasteboard (index of [`PASTEBOARDS`]) and
+/// the interface text size (px). [`apply`] then hands it to the component library.
+pub fn set_look(dark: bool, accent: u32, pasteboard: u8, font: f32) {
+    use std::sync::atomic::Ordering;
+    look::DARK.store(dark, Ordering::Relaxed);
+    look::ACCENT.store(accent, Ordering::Relaxed);
+    look::PASTEBOARD.store(pasteboard, Ordering::Relaxed);
+    look::FONT.store(font.round().clamp(12.0, 18.0) as u32, Ordering::Relaxed);
+}
+
+/// Sets the look from the preferences (the system's appearance when the theme follows it).
+pub fn configure(prefs: &crate::data::prefs::Prefs, window: &Window) {
+    use gpui_kit::WindowAppearance as W;
+    let dark = prefs.theme.unwrap_or_else(|| matches!(window.appearance(), W::Dark | W::VibrantDark));
+    set_look(dark, prefs.accent, prefs.pasteboard, prefs.font_size);
+}
+
+pub fn is_dark() -> bool {
+    look::dark()
+}
+
+/// The surfaces, from the deepest: dark values, then light ones.
 pub mod color {
     use super::*;
 
-    /// The image canvas behind the image.
-    pub fn canvas() -> Hsla {
-        rgb(0x121212).into()
+    fn pick(dark: u32, light: u32) -> Hsla {
+        rgb(if look::dark() { dark } else { light }).into()
     }
-    /// Title bar, tool bar, rulers.
+
+    /// The pasteboard behind the image (Affinity style): grey by default, so an image with black
+    /// edges reads as a page on it.
+    pub fn canvas() -> Hsla {
+        match look::PASTEBOARD.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => pick(0x161616, 0x2a2a2a),
+            2 => pick(0x8a8a8a, 0xf0f0f0),
+            _ => pick(0x3a3a3a, 0xbcbcbc),
+        }
+    }
+    /// Title bar, tool column, rulers, tab strips.
     pub fn chrome() -> Hsla {
-        rgb(0x181818).into()
+        pick(0x222222, 0xe4e4e4)
     }
     /// Panels.
     pub fn panel() -> Hsla {
-        rgb(0x1f1f1f).into()
+        pick(0x2a2a2a, 0xf2f2f2)
     }
-    /// Raised blocks inside panels, popovers.
+    /// Raised blocks inside panels, popovers, panel group headers.
     pub fn raised() -> Hsla {
-        rgb(0x262626).into()
+        pick(0x313131, 0xfafafa)
     }
     /// Controls (buttons, inputs).
     pub fn control() -> Hsla {
-        rgb(0x2e2e2e).into()
+        pick(0x3a3a3a, 0xe0e0e0)
     }
     pub fn hover() -> Hsla {
-        rgb(0x383838).into()
+        pick(0x454545, 0xd4d4d4)
     }
+    /// Separators: darker than the surfaces they divide in dark mode (Affinity's thin lines).
     pub fn border() -> Hsla {
-        rgb(0x3a3a3a).into()
+        pick(0x171717, 0xc6c6c6)
     }
     pub fn text() -> Hsla {
-        rgb(0xe6e6e6).into()
+        pick(0xe6e6e6, 0x1c1c1c)
     }
-    /// Secondary text: 4.6:1 on controls, 6.7:1 on panels.
+    /// Secondary text: ≥ 5:1 on controls and panels in both modes.
     pub fn text_muted() -> Hsla {
-        rgb(0xa0a0a0).into()
+        pick(0xb0b0b0, 0x555555)
     }
     /// Disabled only.
     pub fn text_disabled() -> Hsla {
-        rgb(0x6e6e6e).into()
+        pick(0x6e6e6e, 0x9a9a9a)
     }
-    /// The one accent: selection, the active tool, primary actions (white text 5.8:1).
+    /// The one accent: selection, the active tool, primary actions (white text on it).
     pub fn accent() -> Hsla {
-        rgb(0x3d65a8).into()
+        rgb(look::ACCENT.load(std::sync::atomic::Ordering::Relaxed)).into()
     }
     pub fn accent_hover() -> Hsla {
-        rgb(0x4a72b5).into()
+        let a = accent();
+        Hsla { l: (a.l + 0.07).min(0.9), ..a }
     }
     pub fn danger() -> Hsla {
         rgb(0xd65c5c).into()
@@ -89,14 +140,15 @@ pub mod color {
     }
 }
 
-/// Base font size (rem).
+/// Base font size (px) by default.
 pub const FONT_SIZE: f32 = 15.;
 
-/// Applies the dark theme and the tokens to the component library.
+/// Applies the look ([`set_look`]) and the tokens to the component library, and redraws.
 pub fn apply(window: &mut Window, cx: &mut App) {
-    Theme::change(ThemeMode::Dark, Some(window), cx);
+    Theme::change(if is_dark() { ThemeMode::Dark } else { ThemeMode::Light }, Some(window), cx);
+    let font = look::FONT.load(std::sync::atomic::Ordering::Relaxed) as f32;
     Theme::update(cx, |t| {
-        t.font_size = px(FONT_SIZE);
+        t.font_size = px(font);
         t.radius = px(5.);
         t.radius_lg = px(8.);
         t.shadow = true;
@@ -106,7 +158,7 @@ pub fn apply(window: &mut Window, cx: &mut App) {
         c.muted = color::raised();
         c.muted_foreground = color::text_muted();
         c.border = color::border();
-        c.input = color::border();
+        c.input = color::hover();
         c.ring = color::accent();
         c.caret = color::text();
         c.selection = color::accent().opacity(0.45);
@@ -121,11 +173,11 @@ pub fn apply(window: &mut Window, cx: &mut App) {
         c.sidebar_primary_foreground = rgb(0xffffff).into();
         c.primary = color::accent();
         c.primary_hover = color::accent_hover();
-        c.primary_active = rgb(0x355a96).into();
+        c.primary_active = color::accent();
         c.primary_foreground = rgb(0xffffff).into();
         c.secondary = color::control();
         c.secondary_hover = color::hover();
-        c.secondary_active = rgb(0x333333).into();
+        c.secondary_active = color::hover();
         c.secondary_foreground = color::text();
         c.accent = color::control();
         c.accent_foreground = color::text();
@@ -143,7 +195,7 @@ pub fn apply(window: &mut Window, cx: &mut App) {
         c.list_active_border = color::accent();
         c.list_head = color::raised();
         c.table = color::panel();
-        c.table_even = rgb(0x222222).into();
+        c.table_even = color::raised();
         c.table_head = color::raised();
         c.table_head_foreground = color::text_muted();
         c.table_active = color::accent().opacity(0.25);
@@ -156,14 +208,15 @@ pub fn apply(window: &mut Window, cx: &mut App) {
         c.info = color::accent();
         c.link = rgb(0x7fa6e6).into();
         c.scrollbar = rgba(0x00000000).into();
-        c.scrollbar_thumb = rgba(0xffffff33).into();
-        c.scrollbar_thumb_hover = rgba(0xffffff55).into();
+        c.scrollbar_thumb = if is_dark() { rgba(0xffffff33).into() } else { rgba(0x00000033).into() };
+        c.scrollbar_thumb_hover = if is_dark() { rgba(0xffffff55).into() } else { rgba(0x00000055).into() };
         c.window_border = color::border();
         c.overlay = rgba(0x00000080).into();
         c.drag_border = color::accent();
         c.drop_target = color::accent().opacity(0.2);
         c.chart_grid = color::border();
     });
+    window.refresh();
 }
 
 /// `px` of a token.

@@ -174,6 +174,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn shutdown_stops_the_device_threads() {
+        let _alone = crate::test_support::DEVICE_TESTS.write().unwrap_or_else(|e| e.into_inner());
         let Some(target) = ComputeTarget::for_tests().into_iter().find(|t| *t != ComputeTarget::Cpu) else { return };
         let client = target.client().unwrap();
         let data: Vec<u8> = (0..64u8).collect();
@@ -190,6 +191,7 @@ mod tests {
 
     #[test]
     fn runs_on_available_targets_and_refuses_missing_ones() {
+        let _shared = crate::test_support::DEVICE_TESTS.read().unwrap_or_else(|e| e.into_inner());
         for target in ComputeTarget::for_tests() {
             assert!(!target.run(RuntimeName).unwrap().is_empty());
         }

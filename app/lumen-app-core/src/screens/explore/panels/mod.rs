@@ -1,9 +1,12 @@
-//! Explore's side panels, one per tab (VS Code style): Layers, Display, Annotations and Results
-//! on the left; Selection and Notes on the right.
+//! Explore's panels, in the side docks: Layers on the left, the studio on the right (Affinity
+//! style: groups stacked top to bottom, each with its tabs, all on screen at once).
 
 pub mod annotations;
 pub mod display;
+pub mod histology;
+pub mod history;
 pub mod layers;
+pub mod navigator;
 pub mod notes;
 pub mod results;
 pub mod selection;
@@ -17,11 +20,18 @@ pub enum Tab {
     Results,
     Selection,
     Notes,
+    Navigator,
+    History,
+    Histology,
 }
 
 impl Tab {
-    pub const LEFT: [Tab; 4] = [Tab::Layers, Tab::Display, Tab::Annotations, Tab::Results];
-    pub const RIGHT: [Tab; 2] = [Tab::Selection, Tab::Notes];
+    /// The right dock's groups, top to bottom, and the tabs of each (Layers is the left dock).
+    /// Classes are managed in Layers, so the Annotations tab is not in a group (still reachable
+    /// by key).
+    pub const RIGHT_GROUPS: [&'static [Tab]; 3] = [&[Tab::Display], &[Tab::Results, Tab::Selection, Tab::Notes, Tab::Histology], &[Tab::Navigator, Tab::History]];
+    /// Heights of the right dock's groups (px; `None`: what is left).
+    pub const RIGHT_SIZES: [Option<f32>; 3] = [None, Some(220.), Some(260.)];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -31,11 +41,14 @@ impl Tab {
             Tab::Results => "results",
             Tab::Selection => "selection",
             Tab::Notes => "notes",
+            Tab::Navigator => "navigator",
+            Tab::History => "history",
+            Tab::Histology => "histology",
         }
     }
 
     pub fn from_key(k: &str) -> Option<Tab> {
-        Tab::LEFT.iter().chain(Tab::RIGHT.iter()).copied().find(|t| t.key() == k)
+        [Tab::Layers, Tab::Annotations].iter().chain(Tab::RIGHT_GROUPS.iter().flat_map(|g| g.iter())).copied().find(|t| t.key() == k)
     }
 
     pub fn title(self) -> &'static str {
@@ -46,6 +59,9 @@ impl Tab {
             Tab::Results => "Results",
             Tab::Selection => "Selection",
             Tab::Notes => "Notes",
+            Tab::Navigator => "Navigator",
+            Tab::History => "History",
+            Tab::Histology => "Histology",
         }
     }
 
@@ -55,9 +71,12 @@ impl Tab {
             Tab::Layers => IconName::Layers2,
             Tab::Display => IconName::SlidersHorizontal,
             Tab::Annotations => IconName::Shapes,
-            Tab::Results => IconName::Layers,
+            Tab::Results => IconName::ChartColumn,
             Tab::Selection => IconName::Info,
             Tab::Notes => IconName::StickyNote,
+            Tab::Navigator => IconName::Map,
+            Tab::History => IconName::Clock,
+            Tab::Histology => IconName::Microscope,
         }
     }
 }

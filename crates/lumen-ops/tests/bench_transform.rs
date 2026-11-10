@@ -1,7 +1,7 @@
 //! Kernel vs. end-to-end benchmarks for `lumen_ops::transform`.
 
 use lumen_core::{
-    compute::time_device,
+    compute::bench::time_device,
     cubecl::prelude::Client,
     memory::DeviceArray,
     ComputeTarget, Shape,
@@ -17,14 +17,14 @@ fn bench_transform_suite(client: &Client) {
     let w = 64usize;
     let data: Vec<f32> = (0..(h * w)).map(|i| ((i * 47) % 256) as f32 / 255.0).collect();
     let arr = DeviceArray::from_host(client, Shape::new([h, w]), data.clone()).unwrap();
-    let mask_u8: Vec<u8> = data.iter().map(|&v| u8::from(v > 0.8)).collect();
-    let mask = DeviceArray::from_host(client, Shape::new([h, w]), mask_u8).unwrap();
+    let mask_bits: Vec<u32> = data.iter().map(|&v| u32::from(v > 0.8)).collect();
+    let mask = DeviceArray::from_host(client, Shape::new([h, w]), mask_bits).unwrap();
 
     let rot_t = time_device(client, iters, || {
         let _ = rotate(client, &arr, 30.0, false, None, &WarpSettings::default()).unwrap();
     });
     let res_t = time_device(client, iters, || {
-        let _ = resize(client, &arr, &[32, 32], None, &WarpSettings::default()).unwrap();
+        let _ = resize(client, &arr, [32, 32], true, &WarpSettings::default()).unwrap();
     });
     let swirl_t = time_device(client, iters, || {
         let _ = swirl(client, &arr, None, 2.0, 25.0, 0.0, &WarpSettings::default()).unwrap();
@@ -36,10 +36,8 @@ fn bench_transform_suite(client: &Client) {
         let _ = gaussian_pyramid(
             client,
             &arr,
-            &Pyramid {
-                max_layer: Some(2),
-                ..Pyramid::default()
-            },
+            2,
+            &Pyramid::default(),
         )
         .unwrap();
     });
@@ -49,7 +47,7 @@ fn bench_transform_suite(client: &Client) {
     });
     let radon_t = time_device(client, iters, || {
         let thetas: Vec<f64> = (0..30).map(|i| i as f64 * 6.0).collect();
-        let _ = radon(client, &arr, Some(&thetas), true).unwrap();
+        let _ = radon(client, &arr, Some(&thetas)).unwrap();
     });
 
     eprintln!(

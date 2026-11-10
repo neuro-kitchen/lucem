@@ -403,3 +403,4 @@ mod tests {
     }
     runtime_test!(test_order_filters, median_and_extrema_remove_impulse_spike);
 }
+

@@ -34,7 +34,7 @@ use crate::domain::annotation::{Annotation, Shape};
 use crate::domain::command::Command;
 use crate::domain::geometry;
 use crate::domain::project::ChannelDoc;
-use crate::domain::tool::{step_brush, Tool};
+use crate::domain::tool::{step_brush, Overlays, Tool};
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::format_length;
 
@@ -42,6 +42,15 @@ use crate::ui::widgets::format_length;
 const TILE_CAP: usize = 384;
 const MIN_ZOOM: f64 = 1.0 / 512.0;
 const MAX_ZOOM: f64 = 64.0;
+
+/// What was clicked for the segmentation model (level-0 px).
+#[derive(Debug, Clone, Copy)]
+enum SamPrompt {
+    /// A point on the object (`true`) or off it.
+    Point([f64; 2], bool),
+    /// A box around it.
+    Box([f64; 2], [f64; 2]),
+}
 
 /// What the pointer is doing.
 #[derive(Debug, Clone)]
@@ -94,7 +103,7 @@ impl Wand {
         let mut seen = std::collections::HashSet::new();
         let mut stack = vec![(sx as isize, sy as isize)];
         seen.insert((sx as isize, sy as isize));
-        let (mut bx0, mut by0, mut bx1, mut by1) = self.bbox.map_or((usize::MAX, usize::MAX, 0, 0), |b| b);
+        let (mut bx0, mut by0, mut bx1, mut by1) = self.bbox.unwrap_or((usize::MAX, usize::MAX, 0, 0));
         while let Some((x, y)) = stack.pop() {
             let i = (y * w + x) as usize;
             self.mask[i] = 1;
@@ -178,14 +187,86 @@ struct Viewer {
     _pump: Task<()>,
 }
 
+/// A closed brush stroke and what it encloses as one outline (level-0 px): the largest piece of
+/// [`traced`] with the inside filled.
+fn filled_outline(points: &[[f64; 2]], radius: f64) -> Option<Vec<[f64; 2]>> {
+    let area = |p: &Vec<[f64; 2]>| p.iter().zip(p.iter().cycle().skip(1)).map(|(a, b)| a[0] * b[1] - b[0] * a[1]).sum::<f64>().abs();
+    traced(points, radius, true).into_iter().max_by(|a, b| area(a).total_cmp(&area(b)))
+}
+
+/// The outlines (level-0 px) of what a brush stroke paints, with the region inside its path too
+/// when `fill`: rasterized at about 4 px across the brush, then traced.
+fn traced(points: &[[f64; 2]], radius: f64, fill: bool) -> Vec<Vec<[f64; 2]>> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let (x0, y0, x1, y1) = points.iter().fold((f64::MAX, f64::MAX, f64::MIN, f64::MIN), |b, p| (b.0.min(p[0]), b.1.min(p[1]), b.2.max(p[0]), b.3.max(p[1])));
+    let (ox, oy) = (x0 - radius - 2.0, y0 - radius - 2.0);
+    let (bw, bh) = (x1 - x0 + 2.0 * radius + 4.0, y1 - y0 + 2.0 * radius + 4.0);
+    // About 4 raster px across the brush, at most 2048 px a side
+    let ds = (radius / 4.0).max(bw.max(bh) / 2048.0).max(1e-3);
+    let (w, h) = (((bw / ds).ceil() as usize).max(1), ((bh / ds).ceil() as usize).max(1));
+    let moved: Vec<[f64; 2]> = points.iter().map(|p| [p[0] - ox, p[1] - oy]).collect();
+    let ann = |shape: Shape| Annotation { id: String::new(), image: String::new(), shape, class: "fill".into(), note: String::new(), z: None };
+    let (stroke, region) = (ann(Shape::Stroke { points: moved.clone(), radius, erase: false }), ann(Shape::Freehand { points: moved }));
+    let shapes: Vec<&Annotation> = if fill { vec![&region, &stroke] } else { vec![&stroke] };
+    let mask: Vec<u8> = crate::domain::annotation::rasterize(&shapes, None, 0, 0, w, h, ds).into_iter().map(|v| u8::from(v != 0)).collect();
+    geometry::mask_to_polygons(&mask, w, h, 4).into_iter().map(|p| geometry::simplify(&p, 0.6).into_iter().map(|[x, y]| [x * ds + ox, y * ds + oy]).collect::<Vec<_>>()).filter(|p| p.len() >= 3).collect()
+}
+
+/// Opacity of painted strokes.
+const PAINT_ALPHA: f32 = 0.45;
+/// Longest side of a paint raster (px).
+const PAINT_MAX_SIDE: f64 = 4096.0;
+
+/// The brush and eraser strokes of the shown plane over a region, one colour per class.
+struct PaintLayer {
+    /// Level-0 rectangle it covers, and level-0 px per raster px.
+    rect: [f64; 4],
+    ds: f64,
+    /// Image, plane and annotations revision it was made for.
+    key: String,
+    image: Option<Arc<RenderImage>>,
+}
+
+/// The strokes (`Shape::Stroke`) of each class over `rect` (level-0) at `ds` level-0 px per pixel,
+/// as BGRA with straight alpha: brush strokes fill, eraser strokes of any class clear, in drawing
+/// order. Returns the rectangle the raster covers and the image (`None` when nothing is painted).
+/// `classes`: name, colour and opacity (times `alpha`) of each class drawn.
+fn paint_raster(strokes: &[Annotation], classes: &[(String, [u8; 3], f32)], rect: [f64; 4], ds: f64, alpha: f32) -> ([f64; 4], Option<Arc<RenderImage>>) {
+    let (w, h) = (((rect[2] / ds).ceil() as usize).max(1), ((rect[3] / ds).ceil() as usize).max(1));
+    // Shifted so the region starts at 0 (the rasterizer's region is in unsigned pixels)
+    let shifted: Vec<Annotation> = strokes.iter().map(|a| Annotation { shape: a.shape.translated(-rect[0], -rect[1]), ..a.clone() }).collect();
+    let mut out = vec![0u8; w * h * 4];
+    let mut any = false;
+    for (name, color, opacity) in classes {
+        let a8 = ((alpha * opacity).clamp(0.0, 1.0) * 255.0) as u8;
+        if !shifted.iter().any(|a| &a.class == name && matches!(a.shape, Shape::Stroke { erase: false, .. })) {
+            continue;
+        }
+        let list: Vec<&Annotation> = shifted.iter().filter(|a| &a.class == name || matches!(a.shape, Shape::Stroke { erase: true, .. })).collect();
+        let mask = crate::domain::annotation::rasterize(&list, None, 0, 0, w, h, ds);
+        for (i, &m) in mask.iter().enumerate() {
+            if m != 0 {
+                out[i * 4..i * 4 + 4].copy_from_slice(&[color[2], color[1], color[0], a8]);
+                any = true;
+            }
+        }
+    }
+    let covered = [rect[0], rect[1], w as f64 * ds, h as f64 * ds];
+    (covered, any.then(|| lumen_view::bgra_image(w, h, out)))
+}
+
 pub struct ImageCanvas {
     store: Entity<Store>,
     pub focus: FocusHandle,
     viewer: Option<Viewer>,
     pub zoom: f64,
     pub center: (f64, f64),
-    /// The plane shown, level-0 planes (0 for a 2D image).
+    /// The plane shown, level-0 planes (0 for a 2D image): the z of the store's 3D cursor.
     pub z: usize,
+    /// Screen px on the left covered by the floating tool bar (Fit leaves them free).
+    pub inset_left: f32,
     fit_pending: bool,
     /// The plane's bounds in the window (set while painting).
     bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -204,15 +285,76 @@ pub struct ImageCanvas {
     threshold: Option<([f64; 4], Arc<RenderImage>)>,
     threshold_for: String,
     threshold_task: Option<Task<()>>,
+    /// Brush and eraser strokes of the shown plane as one raster per class, so overlapping parts
+    /// of a stroke are not drawn twice (translucent paths double their alpha where they overlap,
+    /// and their joins spike at sharp turns).
+    paint: Option<PaintLayer>,
+    paint_want: String,
+    paint_task: Option<Task<()>>,
+    /// Histology cells of the shown image as a raster (nuclei filled, cell outlines).
+    cells: Option<PaintLayer>,
+    cells_want: String,
+    cells_task: Option<Task<()>>,
+    /// The stroke being painted, as a raster.
+    live: Option<([f64; 4], Arc<RenderImage>)>,
+    /// Outlines of selected brush strokes (traced from their paint), by id and version.
+    outlines: std::cell::RefCell<HashMap<String, Vec<Vec<[f64; 2]>>>>,
+    /// An image shown whatever is selected (`None`: the selected image).
+    pub pinned: Option<String>,
+    /// Only this channel is drawn (a cell of the Channels view).
+    pub channel: Option<usize>,
+    /// No plane strip, footer or scale bar (a cell of a grid).
+    pub compact: bool,
+    /// Its own footer (position, values, level, zoom); off in Explore, whose bottom bar shows the
+    /// focused view's.
+    pub footer: bool,
+    /// This view's own overlays; `None`: the shared ones (the tool state's).
+    pub overlays: Option<Overlays>,
+    /// Asks for the pipeline's results when its camera moves (the focused view does; the others
+    /// draw what it gets).
+    pub results_source: bool,
+    /// Threads reading its tiles.
+    pub threads: usize,
+    /// The camera is being set from a linked view: not sent back.
+    syncing: bool,
     _subs: Vec<Subscription>,
 }
+
+/// What the bottom bar shows of a view.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CanvasStatus {
+    /// The pointer's position (µm when the pixel size is known) and the values under it.
+    pub position: Option<String>,
+    pub values: Option<String>,
+    /// The pyramid level drawn and its downsample.
+    pub level: Option<String>,
+    pub zoom: f64,
+    pub cached_mb: usize,
+}
+
+/// What a canvas tells the views linked to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CanvasEvent {
+    /// Its camera moved: screen px per level-0 px, and the level-0 point at the middle.
+    Camera { zoom: f64, center: (f64, f64) },
+}
+
+impl gpui_kit::EventEmitter<CanvasEvent> for ImageCanvas {}
 
 impl ImageCanvas {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         let subs = vec![cx.subscribe(&store, |this, _, e: &AppEvent, cx| {
             match e {
                 AppEvent::ImageReady(_) => this.fit_pending = true,
-                AppEvent::Document(crate::domain::command::Changed::Images) => this.fit_pending = this.viewer.as_ref().map(|v| v.image.clone()) != this.store.read(cx).doc.active_image,
+                AppEvent::Cursor => {
+                    let s = this.store.read(cx);
+                    let z = this.viewer.as_ref().and_then(|v| s.cursor_of(&v.image)).map_or(0, |c| c[0]);
+                    if z != this.z && this.viewer.is_some() {
+                        this.z = z;
+                        this.camera_changed(cx);
+                    }
+                }
+                AppEvent::Document(crate::domain::command::Changed::Images) => this.fit_pending = this.viewer.as_ref().map(|v| v.image.clone()) != this.image_id(this.store.read(cx)),
                 _ => {}
             }
             cx.notify();
@@ -224,6 +366,7 @@ impl ImageCanvas {
             zoom: 1.0,
             center: (0.0, 0.0),
             z: 0,
+            inset_left: 0.0,
             fit_pending: true,
             bounds: Rc::new(Cell::new(Bounds::default())),
             scale: 1.0,
@@ -236,6 +379,22 @@ impl ImageCanvas {
             threshold: None,
             threshold_for: String::new(),
             threshold_task: None,
+            paint: None,
+            cells: None,
+            cells_want: String::new(),
+            cells_task: None,
+            paint_want: String::new(),
+            paint_task: None,
+            live: None,
+            outlines: Default::default(),
+            pinned: None,
+            channel: None,
+            compact: false,
+            footer: true,
+            overlays: None,
+            results_source: true,
+            threads: TileService::default_threads(),
+            syncing: false,
             _subs: subs,
         }
     }
@@ -243,6 +402,68 @@ impl ImageCanvas {
     // ------------------------------------------------------------------------
     // Camera
     // ------------------------------------------------------------------------
+
+    /// The image it shows: the pinned one while it is in the project, else the selected one.
+    pub fn image_id(&self, s: &Store) -> Option<String> {
+        self.pinned.clone().filter(|p| s.doc.image(p).is_some()).or_else(|| s.doc.active_image.clone())
+    }
+
+    /// The pointer's position and values, the level and the zoom (for the bottom bar).
+    /// Changes an overlay: this view's own when it has them, else the shared ones.
+    pub fn toggle_overlay(&mut self, f: impl FnOnce(&mut Overlays), cx: &mut Context<Self>) {
+        match self.overlays.as_mut() {
+            Some(o) => {
+                f(o);
+                cx.notify();
+            }
+            None => self.store.update(cx, |s, cx| {
+                s.update_tool(
+                    |t| {
+                        let mut o = t.overlays();
+                        f(&mut o);
+                        t.set_overlays(o);
+                    },
+                    cx,
+                )
+            }),
+        }
+    }
+
+    pub fn status(&self, cx: &App) -> CanvasStatus {
+        let Some(v) = &self.viewer else { return CanvasStatus::default() };
+        let um = v.pyramid.pixel_size_um;
+        let names: Vec<String> = self.store.read(cx).doc.image(&v.image).map(|i| i.channels.iter().map(|c| c.label.clone()).collect()).unwrap_or_default();
+        let (mut position, mut values) = (None, None);
+        if let Some((p, _, vals)) = self.readout() {
+            position = Some(match um {
+                Some(u) => format!("x {:.1}  y {:.1} µm", p[0] * u, p[1] * u),
+                None => format!("x {:.0}  y {:.0} px", p[0], p[1]),
+            });
+            let v: Vec<String> = vals.iter().enumerate().map(|(i, x)| format!("{} {}", names.get(i).map_or("", String::as_str), x.map_or("–".to_string(), |x| trim(x as f64)))).collect();
+            values = (!v.is_empty()).then(|| v.join("  "));
+        }
+        let l = v.pyramid.level_for_zoom(self.zoom * self.scale as f64);
+        CanvasStatus {
+            position,
+            values,
+            level: Some(format!("level {l}/{} · {}×", v.pyramid.levels.len() - 1, trim(v.pyramid.levels[l].downsample))),
+            zoom: self.zoom,
+            cached_mb: v.service.cached_bytes() / (1024 * 1024),
+        }
+    }
+
+    /// Takes the camera of a linked view (not sent back to it).
+    pub fn set_camera(&mut self, zoom: f64, center: (f64, f64), cx: &mut Context<Self>) {
+        if self.zoom == zoom && self.center == center {
+            return;
+        }
+        self.zoom = zoom;
+        self.center = center;
+        self.fit_pending = false;
+        self.syncing = true;
+        self.camera_changed(cx);
+        self.syncing = false;
+    }
 
     fn view_size(&self) -> (f32, f32) {
         let b = self.bounds.get().size;
@@ -293,8 +514,10 @@ impl ImageCanvas {
         }
         self.fit_pending = false;
         let (iw, ih) = (v.pyramid.width() as f64, v.pyramid.height() as f64);
-        self.zoom = ((w as f64 - 48.0) / iw).min((h as f64 - 48.0) / ih).clamp(MIN_ZOOM, MAX_ZOOM);
-        self.center = (iw / 2.0, ih / 2.0);
+        let inset = self.inset_left as f64;
+        self.zoom = ((w as f64 - 48.0 - inset) / iw).min((h as f64 - 48.0) / ih).clamp(MIN_ZOOM, MAX_ZOOM);
+        // The image sits in the part the tool bar leaves free
+        self.center = (iw / 2.0 - inset / 2.0 / self.zoom, ih / 2.0);
         self.camera_changed(cx);
     }
 
@@ -315,19 +538,32 @@ impl ImageCanvas {
     pub fn set_z(&mut self, z: usize, cx: &mut Context<Self>) {
         let Some(v) = &self.viewer else { return };
         let z = z.min(v.pyramid.depth() - 1);
+        let id = v.image.clone();
         if z != self.z {
             self.z = z;
             self.camera_changed(cx);
+            // The other views follow the cursor
+            self.store.update(cx, |s, cx| {
+                if let Some(mut at) = s.cursor_of(&id) {
+                    at[0] = z;
+                    s.set_cursor_of(&id, at, cx);
+                }
+            });
         }
     }
 
     /// The camera moved: results for the new view follow once it rests (200 ms).
     fn camera_changed(&mut self, cx: &mut Context<Self>) {
         cx.notify();
-        self.refresh = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(200)).await;
-            let _ = this.update(cx, |c, cx| c.request_results(cx));
-        }));
+        if !self.syncing {
+            cx.emit(CanvasEvent::Camera { zoom: self.zoom, center: self.center });
+        }
+        if self.results_source {
+            self.refresh = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(200)).await;
+                let _ = this.update(cx, |c, cx| c.request_results(cx));
+            }));
+        }
     }
 
     /// The Threshold tool's mask over the visible region, recomputed (off the UI thread) when
@@ -379,6 +615,208 @@ impl ImageCanvas {
         }));
     }
 
+    /// The paint raster of the visible region, made again (off the UI thread) when the strokes,
+    /// the plane or the image change, when the view leaves what it covers, or when the zoom
+    /// changes by more than half. It covers twice the view, so panning rarely needs a new one.
+    /// Keeps the cell raster for the view (twice the view, at about screen resolution), made in
+    /// the background when the view or the cells change.
+    fn sync_cells(&mut self, cx: &mut Context<Self>) {
+        let Some(v) = &self.viewer else {
+            self.cells = None;
+            return;
+        };
+        let s = self.store.read(cx);
+        let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
+        let cells: Vec<lumen_hist::HistObject> = if s.hist.show && ov.annotations { s.hist.cells.get(&v.image).cloned().unwrap_or_default() } else { Vec::new() };
+        let key = format!("{}/{}/{}", v.image, s.hist.rev, ov.opacity);
+        let (iw, ih) = (v.pyramid.width() as f64, v.pyramid.height() as f64);
+        let view = self.visible();
+        let ds_view = 1.0 / self.zoom.max(1e-9);
+        let (vx0, vy0, vx1, vy1) = (view[0].max(0.0), view[1].max(0.0), (view[0] + view[2]).min(iw), (view[1] + view[3]).min(ih));
+        if let Some(p) = &self.cells {
+            let covers = p.image.is_none() || (p.rect[0] <= vx0 && p.rect[1] <= vy0 && p.rect[0] + p.rect[2] >= vx1 && p.rect[1] + p.rect[3] >= vy1);
+            let ratio = p.ds / ds_view;
+            if p.key == key && covers && (0.67..=1.5).contains(&ratio) {
+                return;
+            }
+        }
+        let x0 = (view[0] - view[2] * 0.5).clamp(0.0, iw);
+        let y0 = (view[1] - view[3] * 0.5).clamp(0.0, ih);
+        let x1 = (view[0] + view[2] * 1.5).clamp(0.0, iw);
+        let y1 = (view[1] + view[3] * 1.5).clamp(0.0, ih);
+        let rect = [x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0)];
+        let ds = ds_view.max(rect[2].max(rect[3]) / PAINT_MAX_SIDE);
+        let want = format!("{key}/{:.0}/{:.0}/{:.0}/{:.0}/{ds:.5}", rect[0], rect[1], rect[2], rect[3]);
+        if self.cells_want == want {
+            return;
+        }
+        self.cells_want = want;
+        if cells.is_empty() {
+            if let Some(old) = self.cells.replace(PaintLayer { rect, ds, key, image: None }).and_then(|p| p.image) {
+                self.drops.push(old);
+            }
+            return;
+        }
+        let color = s.hist_color();
+        let alpha = ov.opacity;
+        let work = cx.background_spawn(async move { crate::data::hist::cells_raster(&cells, &color, rect, ds, alpha) });
+        self.cells_task = Some(cx.spawn(async move |this, cx| {
+            let image = work.await;
+            let _ = this.update(cx, |c, cx| {
+                if let Some(old) = c.cells.replace(PaintLayer { rect, ds, key, image }).and_then(|p| p.image) {
+                    c.drops.push(old);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn sync_paint(&mut self, cx: &mut Context<Self>) {
+        let Some(v) = &self.viewer else {
+            self.paint = None;
+            return;
+        };
+        let s = self.store.read(cx);
+        let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
+        let (shown, alpha) = (ov.annotations, PAINT_ALPHA * ov.opacity);
+        let key = format!("{}/{}/{}/{shown}/{alpha:.3}", v.image, self.z, s.annotations_rev);
+        let (iw, ih) = (v.pyramid.width() as f64, v.pyramid.height() as f64);
+        let view = self.visible();
+        let ds_view = 1.0 / self.zoom.max(1e-9);
+        let (vx0, vy0, vx1, vy1) = (view[0].max(0.0), view[1].max(0.0), (view[0] + view[2]).min(iw), (view[1] + view[3]).min(ih));
+        if let Some(p) = &self.paint {
+            let covers = p.image.is_none() || (p.rect[0] <= vx0 && p.rect[1] <= vy0 && p.rect[0] + p.rect[2] >= vx1 && p.rect[1] + p.rect[3] >= vy1);
+            let ratio = p.ds / ds_view;
+            if p.key == key && covers && (0.67..=1.5).contains(&ratio) {
+                return;
+            }
+        }
+        // Twice the view, inside the image
+        let x0 = (view[0] - view[2] * 0.5).clamp(0.0, iw);
+        let y0 = (view[1] - view[3] * 0.5).clamp(0.0, ih);
+        let x1 = (view[0] + view[2] * 1.5).clamp(0.0, iw);
+        let y1 = (view[1] + view[3] * 1.5).clamp(0.0, ih);
+        let rect = [x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0)];
+        let ds = ds_view.max(rect[2].max(rect[3]) / PAINT_MAX_SIDE);
+        let want = format!("{key}/{:.0}/{:.0}/{:.0}/{:.0}/{ds:.5}", rect[0], rect[1], rect[2], rect[3]);
+        if self.paint_want == want {
+            return;
+        }
+        self.paint_want = want;
+        let z = self.z;
+        let strokes: Vec<Annotation> = if shown { s.doc.annotations_of(&v.image).filter(|a| a.on_plane(z) && matches!(a.shape, Shape::Stroke { .. })).cloned().collect() } else { Vec::new() };
+        let classes: Vec<(String, [u8; 3], f32)> = s.doc.classes.iter().filter(|c| c.visible).map(|c| (c.name.clone(), c.color, c.opacity)).collect();
+        if strokes.is_empty() {
+            if let Some(old) = self.paint.replace(PaintLayer { rect, ds, key, image: None }).and_then(|p| p.image) {
+                self.drops.push(old);
+            }
+            return;
+        }
+        let work = cx.background_spawn(async move { paint_raster(&strokes, &classes, rect, ds, alpha) });
+        self.paint_task = Some(cx.spawn(async move |this, cx| {
+            let (rect, image) = work.await;
+            let _ = this.update(cx, |c, cx| {
+                if let Some(old) = c.paint.replace(PaintLayer { rect, ds, key, image }).and_then(|p| p.image) {
+                    c.drops.push(old);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The brush or eraser stroke in progress as a raster at screen resolution (an eraser shows
+    /// as a dark wash until it is applied).
+    fn refresh_live(&mut self, cx: &App) {
+        let Some(Gesture::Path { tool, points, radius }) = &self.gesture else { return };
+        let (x0, y0, x1, y1) = points.iter().fold((f64::MAX, f64::MAX, f64::MIN, f64::MIN), |b, p| (b.0.min(p[0]), b.1.min(p[1]), b.2.max(p[0]), b.3.max(p[1])));
+        let r = *radius;
+        let rect = [x0 - r - 1.0, y0 - r - 1.0, x1 - x0 + 2.0 * r + 2.0, y1 - y0 + 2.0 * r + 2.0];
+        let ds = (1.0 / self.zoom.max(1e-9)).max(rect[2].max(rect[3]) / PAINT_MAX_SIDE);
+        let s = self.store.read(cx);
+        let erase = *tool == Tool::Eraser;
+        let color = if erase { [0, 0, 0] } else { s.doc.class(&s.tool.class).map_or([255, 255, 255], |c| c.color) };
+        let stroke = Annotation { id: String::new(), image: String::new(), shape: Shape::Stroke { points: points.clone(), radius: r, erase: false }, class: "live".into(), note: String::new(), z: None };
+        let (covered, image) = paint_raster(&[stroke], &[("live".to_string(), color, 1.0)], rect, ds, PAINT_ALPHA);
+        if let Some(old) = std::mem::replace(&mut self.live, image.map(|i| (covered, i))) {
+            self.drops.push(old.1);
+        }
+    }
+
+    /// Sends the visible region (its shown channels as RGB, at the finest level that fits 1024 px a
+    /// side) and the prompt to the segmentation model; the regions it outlines become annotations.
+    fn segment(&mut self, prompt: SamPrompt, cx: &mut Context<Self>) {
+        use std::hash::{Hash, Hasher};
+        let Some(v) = &self.viewer else { return };
+        let py = v.pyramid.clone();
+        let (iw, ih) = (py.width() as f64, py.height() as f64);
+        let rect = self.visible();
+        let (rx0, ry0, rx1, ry1) = (rect[0].max(0.0), rect[1].max(0.0), (rect[0] + rect[2]).min(iw), (rect[1] + rect[3]).min(ih));
+        if rx1 <= rx0 || ry1 <= ry0 {
+            return;
+        }
+        let level = (0..py.levels.len()).find(|&l| (rx1 - rx0).max(ry1 - ry0) / py.levels[l].downsample <= 1024.0).unwrap_or(py.coarsest());
+        let l = py.levels[level].clone();
+        let ds = l.downsample;
+        let (x0, y0) = ((rx0 / ds).floor() as usize, (ry0 / ds).floor() as usize);
+        let w = (((rx1 - rx0) / ds).ceil() as usize).max(1).min(l.width.saturating_sub(x0));
+        let h = (((ry1 - ry0) / ds).ceil() as usize).max(1).min(l.height.saturating_sub(y0));
+        if w < 8 || h < 8 {
+            return;
+        }
+        let plane = self.plane_at(level);
+        let displays = v.displays.clone();
+        let mut planes = Vec::new();
+        for (c, d) in displays.iter().enumerate().filter(|(_, d)| d.visible) {
+            match v.service.read_region(level, plane, c, x0, y0, w, h) {
+                Ok(p) => planes.push((p, *d)),
+                Err(e) => return self.store.update(cx, |s, cx| s.set_status(format!("Segment: {e}"), cx)),
+            }
+        }
+        if planes.is_empty() {
+            return self.store.update(cx, |s, cx| s.set_status("Segment: no channel is shown", cx));
+        }
+        let refs: Vec<(&[f32], ChannelDisplay)> = planes.iter().map(|(p, d)| (p.as_slice(), *d)).collect();
+        let bgra = lumen_view::composite_bgra(&refs, w * h);
+        let rgb: Vec<u8> = bgra.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (&v.image, level, plane, x0, y0, w, h, format!("{:?}", displays)).hash(&mut hasher);
+        let to = |p: [f64; 2]| (((p[0] / ds) - x0 as f64) as f32, ((p[1] / ds) - y0 as f64) as f32);
+        let prompts = vec![match prompt {
+            SamPrompt::Point(p, positive) => {
+                let (x, y) = to(p);
+                lumen_ml::Prompt::Point { x, y, positive }
+            }
+            SamPrompt::Box(a, b) => {
+                let ((ax, ay), (bx, by)) = (to(a), to(b));
+                lumen_ml::Prompt::Box { x0: ax.min(bx), y0: ay.min(by), x1: ax.max(bx), y1: ay.max(by) }
+            }
+        }];
+        let job = crate::data::ml::SegmentJob {
+            image: v.image.clone(),
+            z: self.plane_of_drawing(),
+            class: self.store.read(cx).tool.class.clone(),
+            origin: [x0 as f64 * ds, y0 as f64 * ds],
+            ds,
+            width: w as u32,
+            height: h as u32,
+            rgb,
+            prompts,
+            key: format!("{:016x}", hasher.finish()),
+        };
+        // A volume, with "Through z": the object is followed on the planes of this level
+        let through = (self.store.read(cx).tool.sam_through_z && py.is_volume()).then(|| crate::data::ml::ZRun {
+            reader: v.service.region_reader(),
+            level,
+            plane,
+            depth: l.depth,
+            z_downsample: l.z_downsample,
+            x0,
+            y0,
+            displays: displays.iter().enumerate().filter(|(_, d)| d.visible).map(|(c, d)| (c, *d)).collect(),
+        });
+        self.store.update(cx, |s, cx| s.segment(job, through, cx));
+    }
+
     /// Starts a wand stroke at `p`: reads the visible region of the visible channels.
     fn start_wand(&mut self, p: [f64; 2], cx: &mut Context<Self>) -> Option<Wand> {
         let v = self.viewer.as_ref()?;
@@ -415,7 +853,8 @@ impl ImageCanvas {
         Some(wand)
     }
 
-    fn request_results(&mut self, cx: &mut Context<Self>) {
+    /// Asks the store for the results of what it shows.
+    pub fn request_results(&mut self, cx: &mut Context<Self>) {
         let Some(v) = &self.viewer else { return };
         let req = ResultRequest { image: v.image.clone(), rect: self.visible(), zoom: self.zoom * self.scale as f64, z: self.z };
         self.store.update(cx, |s, cx| s.request_results(req, cx));
@@ -434,9 +873,15 @@ impl ImageCanvas {
     /// Follows the store: the shown image (a new viewer) and its channel display.
     fn sync_viewer(&mut self, cx: &mut Context<Self>) {
         let s = self.store.read(cx);
-        let active = s.doc.active_image.clone();
+        let active = self.image_id(s);
         let pyramid = active.as_ref().and_then(|id| s.pyramids.get(id).cloned());
-        let docs: Vec<ChannelDoc> = s.doc.active().map(|i| i.channels.clone()).unwrap_or_default();
+        let mut docs: Vec<ChannelDoc> = active.as_ref().and_then(|id| s.doc.image(id)).map(|i| i.channels.clone()).unwrap_or_default();
+        // A cell of the Channels view draws its one channel
+        if let Some(only) = self.channel {
+            for (i, d) in docs.iter_mut().enumerate() {
+                d.visible = i == only;
+            }
+        }
         match (&active, pyramid) {
             (Some(id), Some(py)) => {
                 let same = self.viewer.as_ref().is_some_and(|v| &v.image == id && Arc::ptr_eq(&v.pyramid, &py));
@@ -444,7 +889,7 @@ impl ImageCanvas {
                     if let Some(old) = self.viewer.take() {
                         self.drops.extend(old.tiles.into_values().map(|t| t.image));
                     }
-                    let (service, rx) = TileService::new(py.clone(), TileService::default_threads());
+                    let (service, rx) = TileService::new(py.clone(), self.threads);
                     let pump = cx.spawn(async move |this, cx| {
                         while let Ok(first) = rx.recv().await {
                             let mut batch = vec![first];
@@ -472,7 +917,7 @@ impl ImageCanvas {
                     self.polygon.clear();
                     self.gesture = None;
                     self.fit_pending = true;
-                    self.z = self.viewer.as_ref().map_or(0, |v| v.pyramid.depth() / 2);
+                    self.z = self.store.read(cx).cursor_of(id).map_or(0, |c| c[0]);
                 }
                 let v = self.viewer.as_mut().expect("just set");
                 if v.display_docs != docs {
@@ -517,7 +962,6 @@ impl ImageCanvas {
     /// Asks for the tiles in view, evicts far ones; returns what to draw (coarse first).
     fn plan_tiles(&mut self) -> Vec<(Bounds<Pixels>, Arc<RenderImage>)> {
         let (vw, vh) = self.view_size();
-        let o = self.bounds.get().origin;
         let rect = self.visible();
         let (zoom, scale, center, z0) = (self.zoom, self.scale as f64, self.center, self.z);
         let Some(v) = self.viewer.as_mut() else { return Vec::new() };
@@ -600,7 +1044,8 @@ impl ImageCanvas {
                 let (sx, sy) = (((x0 - center.0) * zoom + vw as f64 / 2.0) as f32, ((y0 - center.1) * zoom + vh as f64 / 2.0) as f32);
                 let (sw, sh) = ((t.width as f64 * ds * zoom) as f32, (t.height as f64 * ds * zoom) as f32);
                 // Half a pixel of overlap hides seams between neighbours
-                let b = Bounds { origin: point(o.x + px(sx - 0.25), o.y + px(sy - 0.25)), size: size(px(sw + 0.5), px(sh + 0.5)) };
+                // Plane-local: the paint adds where the plane is now
+                let b = Bounds { origin: point(px(sx - 0.25), px(sy - 0.25)), size: size(px(sw + 0.5), px(sh + 0.5)) };
                 draw.push((b, t.image.clone()));
             }
         }
@@ -637,14 +1082,34 @@ impl ImageCanvas {
     fn add_annotation(&mut self, shape: Shape, cx: &mut Context<Self>) {
         let Some(image) = self.viewer.as_ref().map(|v| v.image.clone()) else { return };
         let class = if matches!(shape, Shape::Line { .. }) { "Measurement".to_string() } else { self.store.read(cx).tool.class.clone() };
-        let a = Annotation { id: String::new(), image, shape, class, note: String::new() };
+        let z = self.plane_of_drawing();
+        let a = Annotation { id: String::new(), image, shape, class, note: String::new(), z };
         self.store.update(cx, |s, cx| {
-            if s.execute(Command::AddAnnotation { annotation: a }, cx).is_ok() {
-                if let Some(last) = s.doc.annotations.last().map(|a| a.id.clone()) {
+            if s.execute(Command::AddAnnotation { annotation: a }, cx).is_ok()
+                && let Some(last) = s.doc.annotations.last().map(|a| a.id.clone()) {
                     s.select([last], cx);
                 }
-            }
         });
+    }
+
+    /// The outline(s) of what a brush stroke painted (level-0 px), traced once per version.
+    fn stroke_outlines(&self, id: &str, points: &[[f64; 2]], radius: f64) -> Vec<Vec<[f64; 2]>> {
+        let key = format!("{id}/{}/{radius}/{:?}", points.len(), points.last());
+        if let Some(o) = self.outlines.borrow().get(&key) {
+            return o.clone();
+        }
+        let o = traced(points, radius, false);
+        let mut cache = self.outlines.borrow_mut();
+        if cache.len() > 64 {
+            cache.clear();
+        }
+        cache.insert(key, o.clone());
+        o
+    }
+
+    /// The plane new annotations belong to: the shown plane of a volume, none on a 2D image.
+    fn plane_of_drawing(&self) -> Option<usize> {
+        self.viewer.as_ref().filter(|v| v.pyramid.is_volume()).map(|_| self.z)
     }
 
     /// The topmost annotation of the shown image at `p`.
@@ -652,7 +1117,7 @@ impl ImageCanvas {
         let image = self.viewer.as_ref()?.image.clone();
         let s = self.store.read(cx);
         let tol = 6.0 / self.zoom;
-        s.doc.annotations.iter().rev().filter(|a| a.image == image && s.doc.class(&a.class).is_none_or(|c| c.visible)).find(|a| a.shape.hit(p[0], p[1], tol)).map(|a| a.id.clone())
+        s.doc.annotations.iter().rev().filter(|a| a.image == image && a.on_plane(self.z) && s.doc.class(&a.class).is_none_or(|c| c.visible)).find(|a| a.shape.hit(p[0], p[1], tol)).map(|a| a.id.clone())
     }
 
     fn close_polygon(&mut self, cx: &mut Context<Self>) {
@@ -677,7 +1142,15 @@ impl ImageCanvas {
         }
         match tool {
             Tool::Zoom => self.zoom_at(if e.modifiers.alt { 0.5 } else { 2.0 }, Some(local), cx),
-            Tool::Select | Tool::Probe => {
+            Tool::Probe => {
+                // The 3D cursor to the pixel clicked (the other views follow)
+                if let Some(id) = self.viewer.as_ref().map(|v| v.image.clone()) {
+                    let at = [self.z, p[1].max(0.0) as usize, p[0].max(0.0) as usize];
+                    self.store.update(cx, |s, cx| s.set_cursor_of(&id, at, cx));
+                }
+                self.gesture = Some(Gesture::Pan { mouse: local, center: self.center });
+            }
+            Tool::Select => {
                 match self.hit(p, cx) {
                     Some(id) => {
                         let sel = self.store.read(cx).selection.clone();
@@ -700,11 +1173,12 @@ impl ImageCanvas {
                     }
                 }
             }
-            Tool::Rect | Tool::Ellipse | Tool::Ruler => self.gesture = Some(Gesture::Drag { tool, a: p, b: p }),
+            Tool::Rect | Tool::Ellipse | Tool::Ruler | Tool::Segment => self.gesture = Some(Gesture::Drag { tool, a: p, b: p }),
             Tool::Lasso => self.gesture = Some(Gesture::Path { tool, points: vec![p], radius: 0.0 }),
             Tool::Brush | Tool::Eraser => {
                 let radius = self.brush_radius(cx);
                 self.gesture = Some(Gesture::Path { tool, points: vec![p], radius });
+                self.refresh_live(cx);
             }
             Tool::Wand => {
                 if let Some(w) = self.start_wand(p, cx) {
@@ -743,6 +1217,7 @@ impl ImageCanvas {
             self.gesture = None;
         }
         let zoom = self.zoom;
+        let mut repaint_live = false;
         match &mut self.gesture {
             Some(Gesture::Pan { mouse, center }) => {
                 self.center = (center.0 - (local.0 - mouse.0) as f64 / zoom, center.1 - (local.1 - mouse.1) as f64 / zoom);
@@ -750,22 +1225,28 @@ impl ImageCanvas {
                 return;
             }
             Some(Gesture::Drag { b, .. }) => *b = p,
+            // Shift: a straight line from where the stroke started
+            Some(Gesture::Path { points, tool, .. }) if e.modifiers.shift && *tool != Tool::Lasso => {
+                points.truncate(1);
+                points.push(p);
+                repaint_live = true;
+            }
             Some(Gesture::Path { points, radius, tool }) => {
                 let last = *points.last().expect("starts with one point");
                 // Points every 2 screen px (fine enough on screen, few enough to draw fast)
                 let step = if *tool == Tool::Lasso { 2.0 / zoom } else { (2.0 / zoom).max(*radius * 0.1) };
                 if (p[0] - last[0]).hypot(p[1] - last[1]) >= step {
                     points.push(p);
+                    repaint_live = *tool != Tool::Lasso;
                 }
             }
             Some(Gesture::Wand(w)) => {
                 let old = w.overlay.as_ref().map(|o| o.1.clone());
                 w.stroke_to(p);
-                if let (Some(o), Some(n)) = (old, w.overlay.as_ref()) {
-                    if !Arc::ptr_eq(&o, &n.1) {
+                if let (Some(o), Some(n)) = (old, w.overlay.as_ref())
+                    && !Arc::ptr_eq(&o, &n.1) {
                         self.drops.push(o);
                     }
-                }
             }
             Some(Gesture::Move { start, now, moved }) => {
                 *now = p;
@@ -775,11 +1256,25 @@ impl ImageCanvas {
             }
             None => {}
         }
+        if repaint_live {
+            self.refresh_live(cx);
+        }
         cx.notify();
     }
 
-    fn on_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_up(&mut self, e: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(g) = self.gesture.take() else { return };
+        // Segment: a click is a point (Alt: not this), a drag a box
+        if let Gesture::Drag { tool: Tool::Segment, a, b } = &g {
+            let tiny = ((b[0] - a[0]) * self.zoom).abs() < 4.0 && ((b[1] - a[1]) * self.zoom).abs() < 4.0;
+            let prompt = if tiny { SamPrompt::Point(*a, !e.modifiers.alt) } else { SamPrompt::Box(*a, *b) };
+            self.segment(prompt, cx);
+            cx.notify();
+            return;
+        }
+        if let Some(l) = self.live.take() {
+            self.drops.push(l.1);
+        }
         match g {
             Gesture::Pan { .. } => {}
             Gesture::Drag { tool, a, b } => {
@@ -796,7 +1291,17 @@ impl ImageCanvas {
             }
             Gesture::Path { tool, points, radius } => match tool {
                 Tool::Lasso if points.len() >= 3 => self.add_annotation(Shape::Freehand { points }, cx),
-                Tool::Brush | Tool::Eraser => self.add_annotation(Shape::Stroke { points, radius, erase: tool == Tool::Eraser }, cx),
+                Tool::Brush | Tool::Eraser => {
+                    // A stroke ending near its start also fills what it encloses (when asked)
+                    let closed = points.len() >= 8 && (points[0][0] - points[points.len() - 1][0]).hypot(points[0][1] - points[points.len() - 1][1]) <= radius * 2.0;
+                    let filled = (tool == Tool::Brush && closed && self.store.read(cx).tool.brush_fill).then(|| filled_outline(&points, radius)).flatten();
+                    if let Some(outline) = filled {
+                        // One region: the stroke and what it encloses
+                        self.add_annotation(Shape::Polygon { points: outline }, cx);
+                    } else {
+                        self.add_annotation(Shape::Stroke { points, radius, erase: tool == Tool::Eraser }, cx);
+                    }
+                }
                 _ => {}
             },
             Gesture::Wand(w) => {
@@ -806,7 +1311,8 @@ impl ImageCanvas {
                 let shapes: Vec<Shape> = w.polygons().into_iter().filter(|p| p.len() >= 3).map(|points| Shape::Polygon { points }).collect();
                 if let Some(image) = self.viewer.as_ref().map(|v| v.image.clone()) {
                     let class = self.store.read(cx).tool.class.clone();
-                    let annotations: Vec<Annotation> = shapes.into_iter().map(|shape| Annotation { id: String::new(), image: image.clone(), shape, class: class.clone(), note: String::new() }).collect();
+                    let z = self.plane_of_drawing();
+                    let annotations: Vec<Annotation> = shapes.into_iter().map(|shape| Annotation { id: String::new(), image: image.clone(), shape, class: class.clone(), note: String::new(), z }).collect();
                     if !annotations.is_empty() {
                         self.store.update(cx, |s, cx| {
                             let _ = s.execute(Command::AddAnnotations { annotations }, cx);
@@ -879,6 +1385,10 @@ impl ImageCanvas {
             "delete" | "backspace" => self.store.update(cx, |s, cx| s.delete_selection(cx)),
             "pageup" => self.set_z(self.z.saturating_sub(1), cx),
             "pagedown" => self.set_z(self.z + 1, cx),
+            // Overlay toggles: A annotations, Shift+F fill, Shift+N names
+            "a" if !cmd && !k.modifiers.alt && !k.modifiers.shift => self.toggle_overlay(|o| o.annotations = !o.annotations, cx),
+            "f" if !cmd && k.modifiers.shift => self.toggle_overlay(|o| o.fill = !o.fill, cx),
+            "n" if !cmd && k.modifiers.shift => self.toggle_overlay(|o| o.names = !o.names, cx),
             "0" if cmd => self.fit(cx),
             "1" if cmd => self.actual_size(cx),
             "=" | "+" => self.zoom_at(1.5, None, cx),
@@ -934,19 +1444,37 @@ impl ImageCanvas {
             _ => (0.0, 0.0),
         };
         let rect = self.visible();
-        for a in s.doc.annotations.iter().filter(|a| a.image == v.image) {
+        let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
+        let (shown, filled, opacity) = (ov.annotations, ov.fill, ov.opacity);
+        for a in s.doc.annotations.iter().filter(|a| shown && a.image == v.image && a.on_plane(self.z)) {
             let Some(class) = s.doc.class(&a.class) else { continue };
             if !class.visible {
                 continue;
             }
             let selected = s.selection.contains(&a.id);
+            // Brush and eraser strokes are in the paint raster; a selected one shows the outline
+            // of what it painted
+            if matches!(a.shape, Shape::Stroke { .. }) && !selected {
+                continue;
+            }
             let shape = if selected && delta != (0.0, 0.0) { a.shape.translated(delta.0, delta.1) } else { a.shape.clone() };
             let (bx0, by0, bx1, by1) = shape.bounds();
             if bx1 < rect[0] || by1 < rect[1] || bx0 > rect[0] + rect[2] || by0 > rect[1] + rect[3] {
                 continue;
             }
-            let c = theme::rgb8(class.color);
-            out.push(stroke_of(&shape, c, selected, zoom, |p| self.to_screen(p)));
+            let c = theme::rgb8(class.color).opacity((opacity * class.opacity).max(0.15));
+            if let Shape::Stroke { points, radius, erase: false } = &shape {
+                for outline in self.stroke_outlines(&a.id, points, *radius) {
+                    let pts: Vec<(f32, f32)> = outline.iter().map(|p| self.to_screen(*p)).collect();
+                    out.push(Stroke { points: geometry::thin(&pts, 1.5), closed: true, fill: None, width: 2.0, color: c, selected: true, dot: false });
+                }
+                continue;
+            }
+            let mut st = stroke_of(&shape, c, selected, zoom, |p| self.to_screen(p));
+            if let Some(Fill::Area(alpha)) = st.fill {
+                st.fill = filled.then_some(Fill::Area(alpha * opacity));
+            }
+            out.push(st);
         }
         // In progress
         let live = theme::rgb8(s.doc.class(&s.tool.class).map_or([255, 255, 255], |c| c.color));
@@ -954,16 +1482,15 @@ impl ImageCanvas {
             Some(Gesture::Drag { tool, a, b }) => {
                 let (x0, y0, x1, y1) = (a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1]));
                 let shape = match tool {
-                    Tool::Rect => Shape::Rect { x: x0, y: y0, w: (x1 - x0).max(1e-6), h: (y1 - y0).max(1e-6) },
+                    Tool::Rect | Tool::Segment => Shape::Rect { x: x0, y: y0, w: (x1 - x0).max(1e-6), h: (y1 - y0).max(1e-6) },
                     Tool::Ellipse => Shape::Ellipse { cx: (x0 + x1) / 2.0, cy: (y0 + y1) / 2.0, rx: (x1 - x0).max(1e-6) / 2.0, ry: (y1 - y0).max(1e-6) / 2.0 },
                     _ => Shape::Line { x0: a[0], y0: a[1], x1: b[0], y1: b[1] },
                 };
                 out.push(stroke_of(&shape, if *tool == Tool::Ruler { gpui_kit::white() } else { live }, true, zoom, |p| self.to_screen(p)));
             }
-            Some(Gesture::Path { tool, points, radius }) => {
-                let shape = if *tool == Tool::Lasso { Shape::Polygon { points: points.clone() } } else { Shape::Stroke { points: points.clone(), radius: *radius, erase: *tool == Tool::Eraser } };
-                let mut st = stroke_of(&shape, live, false, zoom, |p| self.to_screen(p));
-                st.closed = *tool != Tool::Lasso && st.closed;
+            // Brush and eraser strokes in progress are the live raster
+            Some(Gesture::Path { tool: Tool::Lasso, points, .. }) => {
+                let st = stroke_of(&Shape::Polygon { points: points.clone() }, live, false, zoom, |p| self.to_screen(p));
                 out.push(st);
             }
             _ => {}
@@ -990,7 +1517,7 @@ impl ImageCanvas {
                 out.push((p.0, p.1, text));
             }
         };
-        for a in s.doc.annotations.iter().filter(|a| a.image == v.image) {
+        for a in s.doc.annotations.iter().filter(|a| a.image == v.image && a.on_plane(self.z)) {
             match &a.shape {
                 Shape::Line { x0, y0, x1, y1 } => {
                     let len = a.shape.length().unwrap_or(0.0);
@@ -1002,6 +1529,18 @@ impl ImageCanvas {
                     push((sx, sy - 20.0), crate::ui::widgets::format_area(shape.area().unwrap_or(0.0), um));
                 }
                 _ => {}
+            }
+        }
+        // Names (class, or the note) at the middle of each region and point
+        let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
+        if ov.names && ov.annotations {
+            for a in s.doc.annotations.iter().filter(|a| a.image == v.image && a.on_plane(self.z)) {
+                if matches!(a.shape, Shape::Line { .. } | Shape::Stroke { erase: true, .. }) || s.doc.class(&a.class).is_some_and(|c| !c.visible) {
+                    continue;
+                }
+                let (x0, y0, x1, y1) = a.shape.bounds();
+                let (sx, sy) = self.to_screen([(x0 + x1) / 2.0, (y0 + y1) / 2.0]);
+                push((sx - 20.0, sy), if a.note.is_empty() { a.class.clone() } else { a.note.clone() });
             }
         }
         if let Some(Gesture::Drag { tool: Tool::Ruler, a, b }) = &self.gesture {
@@ -1079,17 +1618,16 @@ struct Stroke {
 #[derive(Clone, Copy)]
 enum Fill {
     Area(f32),
-    /// A brush stroke: its width on screen and whether it erases.
-    Brush(f32, bool),
 }
 
-fn stroke_of(shape: &Shape, color: Hsla, selected: bool, zoom: f32, to_screen: impl Fn([f64; 2]) -> (f32, f32)) -> Stroke {
+fn stroke_of(shape: &Shape, color: Hsla, selected: bool, _zoom: f32, to_screen: impl Fn([f64; 2]) -> (f32, f32)) -> Stroke {
     // At screen resolution: a long stroke seen zoomed out is a few points to draw
     let points: Vec<(f32, f32)> = geometry::thin(&shape.outline().into_iter().map(&to_screen).collect::<Vec<_>>(), 1.5);
     match shape {
         Shape::Point { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: true },
         Shape::Line { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: false },
-        Shape::Stroke { radius, erase, .. } => Stroke { points, closed: false, fill: Some(Fill::Brush((*radius as f32 * 2.0 * zoom).max(1.0), *erase)), width: 1.0, color, selected, dot: false },
+        // A selected stroke: its path (the paint itself is a raster)
+        Shape::Stroke { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: false },
         _ => Stroke { points, closed: true, fill: Some(Fill::Area(if selected { 0.22 } else { 0.12 })), width: if selected { 2.0 } else { 1.5 }, color, selected, dot: false },
     }
 }
@@ -1134,14 +1672,6 @@ fn paint_stroke(window: &mut Window, o: gpui_kit::Point<Pixels>, s: &Stroke) {
                 window.paint_path(p, s.color.opacity(alpha));
             }
         }
-        Some(Fill::Brush(width, erase)) => {
-            let mut b = PathBuilder::stroke(px(width));
-            b.add_polygon(&pts, false);
-            if let Ok(p) = b.build() {
-                window.paint_path(p, if erase { gpui_kit::black().opacity(0.45) } else { s.color.opacity(0.45) });
-            }
-            return;
-        }
         _ => {}
     }
     // A dark halo under the line keeps it visible on bright tissue
@@ -1179,8 +1709,13 @@ impl Render for ImageCanvas {
         }
         let tiles = self.plan_tiles();
         self.sync_threshold(cx);
+        self.sync_paint(cx);
+        self.sync_cells(cx);
         let s = self.store.read(cx);
-        let tool = s.tool.clone();
+        let mut tool = s.tool.clone();
+        if let Some(o) = self.overlays {
+            tool.set_overlays(o);
+        }
         let image = self.viewer.as_ref().map(|v| v.image.clone());
         let um = self.viewer.as_ref().and_then(|v| v.pyramid.pixel_size_um);
         // Result layers of the shown image
@@ -1188,21 +1723,30 @@ impl Render for ImageCanvas {
         if tool.show_results {
             for n in s.doc.graph.views() {
                 let visible = matches!(&n.kind, crate::domain::graph::NodeKind::View { style, .. } if style.visible);
-                if let Some(r) = s.results.get(&n.id).filter(|r| visible && Some(&r.image) == image.as_ref()) {
-                    if let Some(l) = &r.layer {
+                if let Some(r) = s.results.get(&n.id).filter(|r| visible && Some(&r.image) == image.as_ref())
+                    && let Some(l) = &r.layer {
                         overlays.push((r.rect, l.clone()));
                     }
-                }
             }
+        }
+        if let Some(p) = &self.cells
+            && let Some(img) = &p.image {
+                overlays.push((p.rect, img.clone()));
+            }
+        if let Some(p) = &self.paint
+            && let Some(img) = &p.image {
+                overlays.push((p.rect, img.clone()));
+            }
+        if let Some(l) = &self.live {
+            overlays.push((l.0, l.1.clone()));
         }
         if let Some(t) = &self.threshold {
             overlays.push((t.0, t.1.clone()));
         }
-        if let Some(Gesture::Wand(w)) = &self.gesture {
-            if let Some(o) = &w.overlay {
+        if let Some(Gesture::Wand(w)) = &self.gesture
+            && let Some(o) = &w.overlay {
                 overlays.push((o.0, o.1.clone()));
             }
-        }
         let strokes = self.annotation_paths(cx);
         let labels = self.labels(cx);
         let (zoom, center) = (self.zoom, self.center);
@@ -1213,10 +1757,28 @@ impl Render for ImageCanvas {
             _ => None,
         };
         let cursor = self.cursor(cx);
+        // Where the image lies (plane-local px), for its frame and shadow
+        let frame = self.viewer.as_ref().map(|v| {
+            let (a, b) = (self.to_screen([0.0, 0.0]), self.to_screen([v.pyramid.width() as f64, v.pyramid.height() as f64]));
+            (a.0, a.1, b.0 - a.0, b.1 - a.1)
+        });
+        // The 3D cursor as a crosshair (x red, y green)
+        let crosshair = if tool.crosshair {
+            self.viewer.as_ref().and_then(|v| s.cursor_of(&v.image)).map(|c| self.to_screen([c[2] as f64 + 0.5, c[1] as f64 + 0.5]))
+        } else {
+            None
+        };
         let drops = std::mem::take(&mut self.drops);
         let bounds_cell = self.bounds.clone();
         let plane = canvas(
-            move |bounds, _, _| bounds_cell.set(bounds),
+            move |bounds, window, _| {
+                // The plane moved or changed size (a side panel opened or closed, a pane was
+                // added): everything was laid out for the old bounds, so render again
+                if bounds_cell.get() != bounds {
+                    bounds_cell.set(bounds);
+                    window.refresh();
+                }
+            },
             move |bounds, _, window, _| {
                 for img in drops {
                     let _ = window.drop_image(img);
@@ -1224,7 +1786,16 @@ impl Render for ImageCanvas {
                 let o = bounds.origin;
                 window.paint_quad(fill(bounds, color::canvas()));
                 window.with_content_mask(Some(gpui_kit::ContentMask { bounds }), |window| {
+                    // The image as a document on the pasteboard: a soft shadow and a black page,
+                    // so dark edges of a fluorescence image still read as its edge
+                    if let Some((fx, fy, fw, fh)) = frame {
+                        for (grow, alpha) in [(10.0, 0.10), (6.0, 0.14), (3.0, 0.22)] {
+                            window.paint_quad(fill(Bounds { origin: point(o.x + px(fx - grow + 2.0), o.y + px(fy - grow + 4.0)), size: size(px(fw + 2.0 * grow), px(fh + 2.0 * grow)) }, gpui_kit::black().opacity(alpha)));
+                        }
+                        window.paint_quad(fill(Bounds { origin: point(o.x + px(fx), o.y + px(fy)), size: size(px(fw), px(fh)) }, gpui_kit::black()));
+                    }
                     for (b, img) in tiles {
+                        let b = Bounds { origin: point(o.x + b.origin.x, o.y + b.origin.y), size: b.size };
                         let _ = window.paint_image(bounds, b, Corners::default(), img, 0, false);
                     }
                     for (r, img) in overlays {
@@ -1235,6 +1806,11 @@ impl Render for ImageCanvas {
                     }
                     for st in &strokes {
                         paint_stroke(window, o, st);
+                    }
+                    if let Some((cx_, cy_)) = crosshair {
+                        let (bw, bh) = (bounds.size.width, bounds.size.height);
+                        window.paint_quad(fill(Bounds { origin: point(o.x + px(cx_), o.y), size: size(px(1.), bh) }, theme::rgb8([235, 92, 92]).opacity(0.85)));
+                        window.paint_quad(fill(Bounds { origin: point(o.x, o.y + px(cy_)), size: size(bw, px(1.)) }, theme::rgb8([92, 200, 120]).opacity(0.85)));
                     }
                     if let Some((m, r)) = brush {
                         let c = point(o.x + px(m.0), o.y + px(m.1));
@@ -1258,7 +1834,7 @@ impl Render for ImageCanvas {
             div().absolute().size_full().flex().items_center().justify_center().text_sm().text_color(color::text_muted()).child(if s.opening.is_empty() { "No image".to_string() } else { format!("Opening {}…", s.opening.join(", ")) })
         });
         let (bar_px, bar_label) = self.scale_bar(um);
-        let scale_bar = image.is_some().then(|| {
+        let scale_bar = (image.is_some() && !self.compact).then(|| {
             v_flex()
                 .absolute()
                 .left(px(theme::LG))
@@ -1317,9 +1893,9 @@ impl Render for ImageCanvas {
             .size_full();
             let labels = ticks.into_iter().map(move |(t, l)| {
                 if horizontal {
-                    div().absolute().left(px(t + 3.0)).top(px(1.)).text_size(px(10.)).text_color(color::text_muted()).child(l)
+                    div().absolute().left(px(t + 3.0)).top(px(1.)).whitespace_nowrap().text_size(px(10.)).text_color(color::text_muted()).child(l)
                 } else {
-                    div().absolute().top(px(t + 2.0)).left(px(2.)).text_size(px(10.)).text_color(color::text_muted()).child(l)
+                    div().absolute().top(px(t + 2.0)).left(px(1.)).whitespace_nowrap().text_size(px(9.)).text_color(color::text_muted()).child(l)
                 }
             });
             div().relative().overflow_hidden().flex_none().when(horizontal, |d| d.h(px(theme::RULER)).flex_1()).when(!horizontal, |d| d.w(px(theme::RULER)).h_full()).border_color(color::border()).when(horizontal, |d| d.border_b_1()).when(!horizontal, |d| d.border_r_1()).child(ruler_canvas).children(labels)
@@ -1345,7 +1921,7 @@ impl Render for ImageCanvas {
         let readout = self.readout();
         let level_text = self.viewer.as_ref().map(|v| {
             let l = v.pyramid.level_for_zoom(zoom * self.scale as f64);
-            format!("{} {}/{}", v.pyramid.levels[l].path, l, v.pyramid.levels.len() - 1)
+            format!("{l}/{} · {}×", v.pyramid.levels.len() - 1, trim(v.pyramid.levels[l].downsample))
         });
         let names: Vec<String> = s.doc.active().map(|i| i.channels.iter().map(|c| c.label.clone()).collect()).unwrap_or_default();
         let mut info = Vec::new();
@@ -1364,7 +1940,7 @@ impl Render for ImageCanvas {
         let depth = self.viewer.as_ref().map_or(1, |v| v.pyramid.depth());
         let z_now = self.z;
         let me = cx.entity().downgrade();
-        let z_strip = (depth > 1).then(|| {
+        let z_strip = (depth > 1 && !self.compact).then(|| {
             h_flex()
                 .flex_none()
                 .h(px(26.))
@@ -1394,8 +1970,13 @@ impl Render for ImageCanvas {
             .child(div().flex_1())
             .when(s.computing, |d| d.child(div().text_color(color::warning()).child("computing results…")))
             .children(level_text.map(|t| div().child(format!("level {t}"))))
-            .child(div().child(format!("{:.1} %", zoom * 100.0)))
-            .child(div().child(format!("{cached} MB cached")));
+            .child({
+                let me = cx.entity().downgrade();
+                crate::ui::widgets::scrub_label("plane-zoom", format!("{:.1} %", zoom * 100.0), move |d, _, cx| {
+                    let _ = me.update(cx, |c, cx| c.zoom_at(if d > 0.0 { 1.05 } else { 1.0 / 1.05 }, None, cx));
+                })
+            })
+            .when(cached > 0, |d| d.child(div().child(format!("{cached} MB cached"))));
 
         v_flex()
             .id("image-canvas")
@@ -1408,6 +1989,6 @@ impl Render for ImageCanvas {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, window, cx| window.focus(&this.focus, cx)))
             .child(div().flex_1().min_h_0().w_full().child(body))
             .children(z_strip)
-            .child(footer)
+            .when(!self.compact && self.footer, |d| d.child(footer))
     }
 }

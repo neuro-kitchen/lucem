@@ -5,3 +5,4 @@ pub mod explore;
 pub mod home;
 pub mod palette;
 pub mod pipeline;
+pub mod settings;

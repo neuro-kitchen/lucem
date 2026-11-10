@@ -107,7 +107,7 @@ pub fn block_reduce_2d_kernel<F: lumen_core::element::ImageFloat>(
                 } else if op == 3u32 {
                     acc = F::max(acc, v);
                 } else {
-                    acc = acc + v;
+                    acc += v;
                 }
                 dc += 1u32;
             }

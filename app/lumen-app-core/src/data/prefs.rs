@@ -11,13 +11,68 @@ pub struct Prefs {
     pub recent: Vec<PathBuf>,
     #[serde(default = "yes")]
     pub sidebar_open: bool,
-    #[serde(default = "yes")]
+    /// Rulers on the canvas edges (off by default: the image fills the canvas).
+    #[serde(default)]
     pub rulers: bool,
     /// Explore's side panels: the tab shown on each side (`None`: the side is closed).
     #[serde(default = "left_tab")]
     pub left_tab: Option<String>,
     #[serde(default)]
     pub right_tab: Option<String>,
+    /// The studio on the right (Affinity style): the tab shown in each group, and which groups
+    /// are collapsed to their tab strip.
+    #[serde(default)]
+    pub studio_tabs: Vec<String>,
+    #[serde(default)]
+    pub studio_collapsed: Vec<bool>,
+    /// Explore's side docks as the user arranged them (which panels, grouped how, active tabs,
+    /// sizes): the dock's own state of each side, `{"left": …, "right": …}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dock_sides: Option<serde_json::Value>,
+    /// The Pipeline docked under the views in Explore.
+    #[serde(default)]
+    pub pipeline_dock: bool,
+    /// Views of the same image move and zoom together.
+    #[serde(default)]
+    pub link_views: bool,
+    /// Explore's side docks shown (left: Layers; right: the studio).
+    #[serde(default = "yes")]
+    pub left_open: bool,
+    #[serde(default = "yes")]
+    pub right_open: bool,
+    /// Appearance: dark (`Some(true)`), light (`Some(false)`) or the system's (`None`).
+    #[serde(default = "dark")]
+    pub theme: Option<bool>,
+    /// Accent colour (RGB).
+    #[serde(default = "accent")]
+    pub accent: u32,
+    /// What is around the image: 0 grey, 1 dark, 2 light.
+    #[serde(default)]
+    pub pasteboard: u8,
+    /// Interface text size (px).
+    #[serde(default = "font_size")]
+    pub font_size: f32,
+    /// Threads reading tiles of the first view (0: the machine's cores, at most 8).
+    #[serde(default)]
+    pub tile_threads: usize,
+    /// The compute backend (`wgpu`, `cuda`, `cpu`; `None`: automatic).
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// The model the Segment tool uses (a plugin's model id; `None`: the plugin's default).
+    #[serde(default)]
+    pub ml_model: Option<String>,
+}
+
+fn dark() -> Option<bool> {
+    Some(true)
+}
+
+fn accent() -> u32 {
+    0x3d65a8
+}
+
+fn font_size() -> f32 {
+    15.0
 }
 
 fn left_tab() -> Option<String> {
@@ -30,7 +85,7 @@ fn yes() -> bool {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { recent: Vec::new(), sidebar_open: true, rulers: true, left_tab: left_tab(), right_tab: None }
+        Self { recent: Vec::new(), sidebar_open: true, rulers: false, left_tab: left_tab(), right_tab: None, studio_tabs: Vec::new(), studio_collapsed: Vec::new(), pipeline_dock: false, link_views: false, left_open: true, right_open: true, theme: dark(), accent: accent(), pasteboard: 0, font_size: font_size(), tile_threads: 0, runtime: None, ml_model: None, dock_sides: None }
     }
 }
 

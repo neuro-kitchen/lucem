@@ -84,7 +84,7 @@ pub fn chan_vese_step_2d_kernel<F: lumen_core::element::ImageFloat>(
 
         let lap = p_up + p_dn + p_lt + p_rt - F::new(4.0f32) * p;
         let eps = F::new(1.0f32);
-        let pi = F::new(3.14159265f32);
+        let pi = F::new(core::f32::consts::PI);
         let dirac = eps / (pi * (eps * eps + p * p));
 
         let val = image[i];
@@ -165,14 +165,14 @@ pub fn morph_smooth_curv_2d_kernel<F: lumen_core::element::ImageFloat>(
 
         // 3x3 median/majority approximation of morphological curvature operator
         let mut sum = u_in[i];
-        sum = sum + u_in[(r_up * w + c) as usize];
-        sum = sum + u_in[(r_dn * w + c) as usize];
-        sum = sum + u_in[(r * w + c_lt) as usize];
-        sum = sum + u_in[(r * w + c_rt) as usize];
-        sum = sum + u_in[(r_up * w + c_lt) as usize];
-        sum = sum + u_in[(r_up * w + c_rt) as usize];
-        sum = sum + u_in[(r_dn * w + c_lt) as usize];
-        sum = sum + u_in[(r_dn * w + c_rt) as usize];
+        sum += u_in[(r_up * w + c) as usize];
+        sum += u_in[(r_dn * w + c) as usize];
+        sum += u_in[(r * w + c_lt) as usize];
+        sum += u_in[(r * w + c_rt) as usize];
+        sum += u_in[(r_up * w + c_lt) as usize];
+        sum += u_in[(r_up * w + c_rt) as usize];
+        sum += u_in[(r_dn * w + c_lt) as usize];
+        sum += u_in[(r_dn * w + c_rt) as usize];
         u_out[i] = if sum >= F::new(4.5f32) {
             F::new(1.0f32)
         } else {

@@ -22,6 +22,10 @@ fn main() {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1480.), px(920.)), cx))),
             window_min_size: Some(size(px(900.), px(560.))),
             app_id: Some("org.neuro-kitchen.lumen".into()),
+            // The app draws its own frame on Linux (rounded corners and a shadow while it floats):
+            // the window behind them is transparent
+            window_background: gpui_kit::WindowBackgroundAppearance::Transparent,
+            window_decorations: Some(gpui_kit::WindowDecorations::Client),
             ..TitleBar::window_options()
         };
         let s = store.clone();

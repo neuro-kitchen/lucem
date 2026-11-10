@@ -1,0 +1,15 @@
+[package]
+name = "lumen-hub"
+description = "Verified downloads and the local cache of published artifacts (model weights) for lumen's plugins: all network access of the models is here"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sha2.workspace = true
+ureq.workspace = true
+flate2.workspace = true
+tar.workspace = true

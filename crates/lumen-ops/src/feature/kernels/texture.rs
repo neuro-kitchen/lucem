@@ -124,7 +124,7 @@ pub fn lbp_2d_kernel<F: lumen_core::element::ImageFloat>(
             let sample = (one - fy) * ((one - fx) * v00 + fx * v01)
                 + fy * ((one - fx) * v10 + fx * v11);
             if (sample + eps) >= center {
-                code = code | (1u32 << p);
+                code |= 1u32 << p;
             }
             p += 1u32;
         }

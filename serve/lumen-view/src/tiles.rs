@@ -10,7 +10,7 @@
 //! arrives, so the screen never goes blank while it refines.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 
 use gpui_kit::RenderImage;
@@ -75,9 +75,12 @@ struct RawKey {
     ty: usize,
 }
 
+/// A raw tile: its values, width, height and when it was last used.
+type RawEntry = (Arc<Vec<f32>>, usize, usize, u64);
+
 /// Raw tiles by key, least recently used dropped first once over `budget` bytes.
 struct RawCache {
-    map: HashMap<RawKey, (Arc<Vec<f32>>, usize, usize, u64)>,
+    map: HashMap<RawKey, RawEntry>,
     bytes: usize,
     budget: usize,
     clock: u64,
@@ -108,6 +111,22 @@ impl RawCache {
     }
 }
 
+/// The raw cache of a pyramid, shared by every service of it: views of the same image read a
+/// tile from disk once and share one memory budget.
+fn shared_raw_cache(pyramid: &Arc<Pyramid>) -> Arc<Mutex<RawCache>> {
+    type Caches = Vec<(Weak<Pyramid>, Weak<Mutex<RawCache>>)>;
+    static CACHES: Mutex<Caches> = Mutex::new(Vec::new());
+    let new = || Arc::new(Mutex::new(RawCache { map: HashMap::new(), bytes: 0, budget: RAW_BUDGET, clock: 0 }));
+    let Ok(mut caches) = CACHES.lock() else { return new() };
+    caches.retain(|(p, c)| p.strong_count() > 0 && c.strong_count() > 0);
+    if let Some(c) = caches.iter().find(|(p, _)| p.upgrade().is_some_and(|p| Arc::ptr_eq(&p, pyramid))).and_then(|(_, c)| c.upgrade()) {
+        return c;
+    }
+    let c = new();
+    caches.push((Arc::downgrade(pyramid), Arc::downgrade(&c)));
+    c
+}
+
 struct Request {
     rev: u64,
     displays: Arc<Vec<ChannelDisplay>>,
@@ -118,7 +137,7 @@ struct Shared {
     pyramid: Arc<Pyramid>,
     queue: Mutex<Option<Request>>,
     ready: Condvar,
-    raw: Mutex<RawCache>,
+    raw: Arc<Mutex<RawCache>>,
     closed: Mutex<bool>,
 }
 
@@ -134,11 +153,12 @@ impl TileService {
     /// Starts `threads` workers; finished tiles arrive on the returned receiver.
     pub fn new(pyramid: Arc<Pyramid>, threads: usize) -> (Self, async_channel::Receiver<TileResult>) {
         let (tx, rx) = async_channel::unbounded();
+        let raw = shared_raw_cache(&pyramid);
         let shared = Arc::new(Shared {
             pyramid,
             queue: Mutex::new(None),
             ready: Condvar::new(),
-            raw: Mutex::new(RawCache { map: HashMap::new(), bytes: 0, budget: RAW_BUDGET, clock: 0 }),
+            raw,
             closed: Mutex::new(false),
         });
         for i in 0..threads.max(1) {
@@ -185,43 +205,72 @@ impl TileService {
     /// raw cache; tiles not cached yet are read and kept.
     #[allow(clippy::too_many_arguments)]
     pub fn read_region(&self, level: usize, z: usize, channel: usize, x0: usize, y0: usize, w: usize, h: usize) -> Result<Vec<f32>, String> {
-        let py = &self.shared.pyramid;
-        let l = py.levels.get(level).ok_or_else(|| format!("no level {level}"))?.clone();
-        let mut out = vec![0.0f32; w * h];
-        let (x1, y1) = ((x0 + w).min(l.width), (y0 + h).min(l.height));
-        if x0 >= x1 || y0 >= y1 {
-            return Ok(out);
-        }
-        for ty in y0 / l.tile_h..=(y1 - 1) / l.tile_h {
-            for tx in x0 / l.tile_w..=(x1 - 1) / l.tile_w {
-                let rk = RawKey { level, z, channel, tx, ty };
-                let hit = self.shared.raw.lock().map_err(|e| e.to_string())?.get(&rk);
-                let (data, tw, th) = match hit {
-                    Some(t) => t,
-                    None => {
-                        let t = py.read_tile_at(level, channel, z, tx, ty).map_err(|e| e.to_string())?;
-                        let d = Arc::new(t.data);
-                        self.shared.raw.lock().map_err(|e| e.to_string())?.put(rk, d.clone(), t.width, t.height);
-                        (d, t.width, t.height)
-                    }
-                };
-                let (ox, oy) = (tx * l.tile_w, ty * l.tile_h);
-                let (ax0, ax1) = (x0.max(ox), x1.min(ox + tw));
-                let (ay0, ay1) = (y0.max(oy), y1.min(oy + th));
-                for y in ay0..ay1 {
-                    let src = (y - oy) * tw + (ax0 - ox);
-                    let dst = (y - y0) * w + (ax0 - x0);
-                    out[dst..dst + (ax1 - ax0)].copy_from_slice(&data[src..src + (ax1 - ax0)]);
-                }
-            }
-        }
-        Ok(out)
+        read_region(&self.shared.pyramid, &self.shared.raw, level, z, channel, x0, y0, w, h)
+    }
+
+    /// A handle that reads regions through this service's raw cache from any thread (it does not
+    /// keep the workers alive).
+    pub fn region_reader(&self) -> RegionReader {
+        RegionReader { pyramid: self.shared.pyramid.clone(), raw: self.shared.raw.clone() }
     }
 
     /// Bytes held by the raw tile cache.
     pub fn cached_bytes(&self) -> usize {
         self.shared.raw.lock().map(|r| r.bytes).unwrap_or(0)
     }
+}
+
+/// Reads regions of a pyramid through its shared raw cache, from any thread.
+#[derive(Clone)]
+pub struct RegionReader {
+    pyramid: Arc<Pyramid>,
+    raw: Arc<Mutex<RawCache>>,
+}
+
+impl RegionReader {
+    /// As [`TileService::read_region`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn read_region(&self, level: usize, z: usize, channel: usize, x0: usize, y0: usize, w: usize, h: usize) -> Result<Vec<f32>, String> {
+        read_region(&self.pyramid, &self.raw, level, z, channel, x0, y0, w, h)
+    }
+
+    pub fn pyramid(&self) -> &Arc<Pyramid> {
+        &self.pyramid
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_region(py: &Arc<Pyramid>, raw: &Mutex<RawCache>, level: usize, z: usize, channel: usize, x0: usize, y0: usize, w: usize, h: usize) -> Result<Vec<f32>, String> {
+    let l = py.levels.get(level).ok_or_else(|| format!("no level {level}"))?.clone();
+    let mut out = vec![0.0f32; w * h];
+    let (x1, y1) = ((x0 + w).min(l.width), (y0 + h).min(l.height));
+    if x0 >= x1 || y0 >= y1 {
+        return Ok(out);
+    }
+    for ty in y0 / l.tile_h..=(y1 - 1) / l.tile_h {
+        for tx in x0 / l.tile_w..=(x1 - 1) / l.tile_w {
+            let rk = RawKey { level, z, channel, tx, ty };
+            let hit = raw.lock().map_err(|e| e.to_string())?.get(&rk);
+            let (data, tw, th) = match hit {
+                Some(t) => t,
+                None => {
+                    let t = py.read_tile_at(level, channel, z, tx, ty).map_err(|e| e.to_string())?;
+                    let d = Arc::new(t.data);
+                    raw.lock().map_err(|e| e.to_string())?.put(rk, d.clone(), t.width, t.height);
+                    (d, t.width, t.height)
+                }
+            };
+            let (ox, oy) = (tx * l.tile_w, ty * l.tile_h);
+            let (ax0, ax1) = (x0.max(ox), x1.min(ox + tw));
+            let (ay0, ay1) = (y0.max(oy), y1.min(oy + th));
+            for y in ay0..ay1 {
+                let src = (y - oy) * tw + (ax0 - ox);
+                let dst = (y - y0) * w + (ax0 - x0);
+                out[dst..dst + (ax1 - ax0)].copy_from_slice(&data[src..src + (ax1 - ax0)]);
+            }
+        }
+    }
+    Ok(out)
 }
 
 impl Drop for TileService {
@@ -241,11 +290,10 @@ fn worker(shared: Arc<Shared>, tx: async_channel::Sender<TileResult>) {
                 if *shared.closed.lock().expect("closed flag") {
                     return;
                 }
-                if let Some(r) = q.as_mut() {
-                    if let Some(k) = r.keys.pop_front() {
+                if let Some(r) = q.as_mut()
+                    && let Some(k) = r.keys.pop_front() {
                         break (k, r.rev, r.displays.clone());
                     }
-                }
                 q = shared.ready.wait(q).expect("tile queue");
             }
         };
@@ -312,7 +360,7 @@ pub fn composite_bgra(planes: &[(&[f32], ChannelDisplay)], n: usize) -> Vec<u8> 
         }
     }
     let mut out = vec![0u8; n * 4];
-    for (px, a) in out.chunks_exact_mut(4).zip(acc.iter()) {
+    for (px, a) in out.as_chunks_mut::<4>().0.iter_mut().zip(acc.iter()) {
         px[0] = (a[2].min(1.0) * 255.0).round() as u8;
         px[1] = (a[1].min(1.0) * 255.0).round() as u8;
         px[2] = (a[0].min(1.0) * 255.0).round() as u8;
@@ -340,14 +388,14 @@ pub fn render_layer(values: &[f32], width: usize, height: usize, style: LayerSty
         LayerStyle::Intensity { min, max, lut, alpha } => {
             let span = (max - min).abs().max(1e-12);
             let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
-            for (px, &v) in out.chunks_exact_mut(4).zip(values.iter()) {
+            for (px, &v) in out.as_chunks_mut::<4>().0.iter_mut().zip(values.iter()) {
                 let [r, g, b] = lut.sample_rgb(((v - min) / span).clamp(0.0, 1.0));
                 px.copy_from_slice(&[b, g, r, a]);
             }
         }
         LayerStyle::Mask { color, alpha } => {
             let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
-            for (px, &v) in out.chunks_exact_mut(4).zip(values.iter()) {
+            for (px, &v) in out.as_chunks_mut::<4>().0.iter_mut().zip(values.iter()) {
                 if v != 0.0 {
                     px.copy_from_slice(&[color[2], color[1], color[0], a]);
                 }
@@ -355,7 +403,7 @@ pub fn render_layer(values: &[f32], width: usize, height: usize, style: LayerSty
         }
         LayerStyle::Labels { alpha } => {
             let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
-            for (px, &v) in out.chunks_exact_mut(4).zip(values.iter()) {
+            for (px, &v) in out.as_chunks_mut::<4>().0.iter_mut().zip(values.iter()) {
                 let id = v as u32;
                 if id != 0 {
                     let [r, g, b] = label_color(id);
@@ -398,6 +446,17 @@ pub fn bgra_image(width: usize, height: usize, bgra: Vec<u8>) -> Arc<RenderImage
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn services_of_one_pyramid_share_their_raw_cache() {
+        let py = Arc::new(lumen_io::sample_volume(64, 1).unwrap());
+        let (a, _ra) = TileService::new(py.clone(), 1);
+        let (b, _rb) = TileService::new(py.clone(), 1);
+        assert!(Arc::ptr_eq(&a.shared.raw, &b.shared.raw));
+        let other = Arc::new(lumen_io::sample_volume(64, 1).unwrap());
+        let (c, _rc) = TileService::new(other, 1);
+        assert!(!Arc::ptr_eq(&a.shared.raw, &c.shared.raw));
+    }
 
     #[test]
     fn two_channels_blend_in_their_colours() {

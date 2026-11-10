@@ -277,7 +277,7 @@ mod tests {
         let re = DeviceArray::from_host(client, shape.clone(), vec![1.0f32; 16]).unwrap();
         let im = DeviceArray::<f32>::zeros(client, shape).unwrap();
         fourier_shift_into(client, &re, &im, &[0.0, 0.0]).unwrap();
-        assert_close(&re.to_host(client), &vec![1.0; 16], 1e-6, client.name());
+        assert_close(&re.to_host(client), &[1.0; 16], 1e-6, client.name());
     }
     runtime_test!(test_spectral_filters, fourier_shift_zero_leaves_spectrum_unchanged);
 }

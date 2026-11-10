@@ -416,7 +416,7 @@ mod tests {
 
         // 180-degree rotation around center (2, 2) maps (1, 2) to (3, 2)
         let mut asym = vec![0.0f32; 25];
-        asym[1 * 5 + 2] = 8.0;
+        asym[5 + 2] = 8.0;
         let asym_img = DeviceArray::from_host(client, Shape::new([5, 5]), asym).unwrap();
         let rot = rotate(client, &asym_img, 180.0, false, None, &cfg).unwrap().to_host(client);
         assert_close(&[rot[3 * 5 + 2] as f64], &[8.0], 1e-4, client.name());
@@ -432,7 +432,7 @@ mod tests {
         )
         .unwrap()
         .to_host(client);
-        assert_close(&res, &vec![4.5; 20], 1e-4, client.name());
+        assert_close(&res, &[4.5; 20], 1e-4, client.name());
     }
     runtime_test!(test_geometric_warps, shift_rotate_and_resize_preserve_known_structures);
 }

@@ -147,15 +147,97 @@ pub fn icon_button(id: impl Into<ElementId>, icon: impl Into<Icon>, tooltip: imp
     Button::new(id).ghost().small().icon(icon).tooltip(tooltip.into())
 }
 
-/// `− value +`: a number changed in steps.
+/// What a stepped number calls with its step (−1, +1, or more when dragged fast).
+pub type OnStep = Rc<dyn Fn(f32, &mut Window, &mut App)>;
+
+/// `− value +`: a number changed in steps, by its buttons or by dragging the number (see
+/// [`scrub_label`]).
 pub fn stepper(id: &str, value: impl Into<SharedString>, on_step: impl Fn(f32, &mut Window, &mut App) + 'static) -> impl IntoElement {
-    let on_step = Rc::new(on_step);
-    let (a, b) = (on_step.clone(), on_step);
+    let on_step: OnStep = Rc::new(on_step);
+    let (a, b, c) = (on_step.clone(), on_step.clone(), on_step);
     h_flex()
         .gap(px(2.))
         .child(Button::new(SharedString::from(format!("{id}-minus"))).ghost().xsmall().icon(IconName::Minus).on_click(move |_, w, cx| a(-1.0, w, cx)))
-        .child(div().min_w(px(52.)).text_center().text_sm().font_family("monospace").child(value.into()))
+        .child(scrub(format!("{id}-value"), value.into(), 52.0, c))
         .child(Button::new(SharedString::from(format!("{id}-plus"))).ghost().xsmall().icon(IconName::Plus).on_click(move |_, w, cx| b(1.0, w, cx)))
+}
+
+/// A number that changes as it is dragged (Affinity / Blender): press it and move left or right;
+/// every [`SCRUB_PX`] px is one step down or up. The pointer may leave it while dragging.
+pub fn scrub_label(id: &str, value: impl Into<SharedString>, on_step: impl Fn(f32, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    scrub(id.to_string(), value.into(), 0.0, Rc::new(on_step))
+}
+
+/// Pointer px per step of a dragged number.
+pub const SCRUB_PX: f32 = 6.0;
+
+thread_local! {
+    /// The number being dragged: its id and the pointer x of the last step.
+    static SCRUBBING: std::cell::RefCell<Option<(String, f32)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn scrub(id: String, value: SharedString, min_w: f32, on_step: OnStep) -> impl IntoElement {
+    let active = SCRUBBING.with(|s| s.borrow().as_ref().is_some_and(|(k, _)| *k == id));
+    let down_id = id.clone();
+    // While dragging, the window's pointer events drive it (the pointer leaves the number)
+    let listener = gpui_kit::canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            if !active {
+                return;
+            }
+            let (id, step) = (id.clone(), on_step.clone());
+            window.on_mouse_event(move |e: &gpui_kit::MouseMoveEvent, phase, window, cx| {
+                if phase != gpui_kit::DispatchPhase::Bubble {
+                    return;
+                }
+                if e.pressed_button != Some(gpui_kit::MouseButton::Left) {
+                    SCRUBBING.with(|s| *s.borrow_mut() = None);
+                    window.refresh();
+                    return;
+                }
+                let x = e.position.x.as_f32();
+                let steps = SCRUBBING.with(|s| match &mut *s.borrow_mut() {
+                    Some((k, last)) if *k == id => {
+                        let n = ((x - *last) / SCRUB_PX).trunc();
+                        *last += n * SCRUB_PX;
+                        n as i32
+                    }
+                    _ => 0,
+                });
+                for _ in 0..steps.unsigned_abs() {
+                    step(steps.signum() as f32, window, cx);
+                }
+            });
+            window.on_mouse_event(|_: &gpui_kit::MouseUpEvent, phase, window, _| {
+                if phase == gpui_kit::DispatchPhase::Bubble {
+                    SCRUBBING.with(|s| *s.borrow_mut() = None);
+                    window.refresh();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full();
+    div()
+        .id(SharedString::from(down_id.clone()))
+        .relative()
+        .min_w(px(min_w))
+        .px(px(4.))
+        .rounded(px(3.))
+        .text_center()
+        .text_sm()
+        .font_family("monospace")
+        .cursor(gpui_kit::CursorStyle::ResizeLeftRight)
+        .when(active, |d| d.bg(color::accent().opacity(0.35)))
+        .when(!active, |d| d.hover(|d| d.bg(color::hover())))
+        .on_mouse_down(gpui_kit::MouseButton::Left, move |e, window, cx| {
+            cx.stop_propagation();
+            SCRUBBING.with(|s| *s.borrow_mut() = Some((down_id.clone(), e.position.x.as_f32())));
+            window.refresh();
+        })
+        .child(value)
+        .child(listener)
 }
 
 /// A slider over positions `0..count` (a position along an axis of an image). Dragging anywhere
@@ -233,7 +315,7 @@ pub fn group_digits(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push('\u{2009}');
         }
         out.push(ch);

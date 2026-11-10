@@ -125,12 +125,11 @@ pub fn watershed<F: ImageFloat>(
     let mut origin_of = vec![0usize; n];
 
     for idx in 0..n {
-        if let Some(ref m) = host_mask {
-            if m[idx] == 0 {
+        if let Some(ref m) = host_mask
+            && m[idx] == 0 {
                 labels[idx] = 0;
                 continue;
             }
-        }
         if labels[idx] > 0 {
             origin_of[idx] = idx;
             heap.push(FloodEntry {
@@ -203,11 +202,10 @@ pub fn watershed<F: ImageFloat>(
             if !ok || n_idx == idx {
                 continue;
             }
-            if let Some(ref m) = host_mask {
-                if m[n_idx] == 0 {
+            if let Some(ref m) = host_mask
+                && m[n_idx] == 0 {
                     continue;
                 }
-            }
             if labels[n_idx] == 0 {
                 let mut dist = 0.0;
                 if options.compactness > 0.0 {

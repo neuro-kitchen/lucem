@@ -114,6 +114,28 @@ impl PipelineView {
             bar = bar.child(menu(id, c.name, c.icon, c.items.into_iter().map(|i| (i.label, i.hint, i.template)).collect()));
         }
         bar = bar.child(divider_v()).child(menu("pipeline-menu-output", "Output", IconName::Eye, vec![("Result view".into(), "shown in Explore / Analyze".into(), Template::View)]));
+        // Blender's Script node: a Python or Rust file as a step
+        let scripts = {
+            let store = self.store.clone();
+            Button::new("pipeline-menu-script").ghost().small().icon(Icon::new(IconName::SquareTerminal)).label("Script").dropdown_menu(move |m: PopupMenu, _, _| {
+                let (a, b, c) = (store.clone(), store.clone(), store.clone());
+                m.label("A step written as a file; edit, save, it runs again")
+                    .item(PopupMenuItem::new("New Python script…").on_click(move |_, _, cx| a.update(cx, |s, cx| s.add_script_node(crate::data::script::Language::Python, cx))))
+                    .item(PopupMenuItem::new("New Rust script…").on_click(move |_, _, cx| b.update(cx, |s, cx| s.add_script_node(crate::data::script::Language::Rust, cx))))
+                    .item(PopupMenuItem::new("Script from a file (.py, .rs)…").on_click(move |_, _, cx| {
+                        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Script file".into()) });
+                        let store = c.clone();
+                        cx.spawn(async move |cx| {
+                            if let Ok(Ok(Some(paths))) = rx.await
+                                && let Some(p) = paths.into_iter().next() {
+                                    store.update(cx, |s, cx| s.add_script_file(p, cx));
+                                }
+                        })
+                        .detach();
+                    }))
+            })
+        };
+        bar = bar.child(scripts);
         let view = {
             let canvas = canvas.clone();
             Button::new("pipeline-menu-view").ghost().small().label("View").dropdown_menu(move |m: PopupMenu, _, _| {
@@ -392,6 +414,56 @@ impl Inspector {
                         "Colours",
                         MenuSelect::new("view-lut", COLORMAPS.iter().map(|m| SharedString::from(*m)).collect(), lut_idx, move |i, _, cx| s3(&move |st: &mut ViewStyle| st.colormap = COLORMAPS[i].to_string(), cx)),
                     ))
+                    .into_any_element()
+            }
+            NodeKind::Script { path, inputs, output, params, enabled } => {
+                let p = std::path::PathBuf::from(path);
+                let lang = crate::data::script::Language::of(&p).map_or("?", |l| l.title());
+                let (store, id2, on) = (self.store.clone(), id.clone(), *enabled);
+                let kind = node.kind.clone();
+                let (open_p, st_open, st_reload, id_reload) = (p.clone(), self.store.clone(), self.store.clone(), id.clone());
+                let mut nums = v_flex().gap(px(theme::XS));
+                for (i, q) in params.iter().enumerate() {
+                    let (store, id, kind) = (self.store.clone(), id.clone(), kind.clone());
+                    // A step of 1 % of the value (0.01 near zero); drag the number
+                    let step = (q.value.abs() * 0.01).max(0.01);
+                    nums = nums.child(row(
+                        q.name.clone(),
+                        stepper(&format!("script-param-{i}"), crate::ui::param_editor::trim_number(q.value), move |d, _, cx| {
+                            let mut k = kind.clone();
+                            if let NodeKind::Script { params, .. } = &mut k
+                                && let Some(p) = params.get_mut(i) {
+                                    p.value += d as f64 * step;
+                                }
+                            Self::exec(&store, Command::SetScript { id: id.clone(), kind: k }, cx);
+                        }),
+                    ));
+                }
+                let declared = inputs.iter().map(|q| format!("{}: {}", q.name, q.port.name())).collect::<Vec<_>>().join(", ");
+                let kind_on = kind.clone();
+                v_flex()
+                    .gap(px(theme::MD))
+                    .child(Checkbox::new("inspector-script-on").checked(on).label("On (off: passes its first input through)").on_click(move |v: &bool, _, cx| {
+                        let mut k = kind_on.clone();
+                        if let NodeKind::Script { enabled, .. } = &mut k {
+                            *enabled = *v;
+                        }
+                        Self::exec(&store, Command::SetScript { id: id2.clone(), kind: k }, cx)
+                    }))
+                    .child(row("Language", div().text_sm().child(lang)))
+                    .child(row("File", div().text_xs().font_family("monospace").truncate().child(path.clone())))
+                    .child(
+                        h_flex()
+                            .gap(px(theme::SM))
+                            .child(Button::new("script-open").small().outline().icon(Icon::new(IconName::SquarePen)).label("Open in editor").on_click(move |_, _, cx| {
+                                if let Err(e) = crate::data::script::open_in_editor(&open_p) {
+                                    st_open.update(cx, |s, cx| s.set_status(format!("Could not open the editor: {e}"), cx));
+                                }
+                            }))
+                            .child(Button::new("script-reload").small().ghost().icon(Icon::new(IconName::RefreshCw)).label("Reload").tooltip("Read the header again and run (saving the file does it too)").on_click(move |_, _, cx| st_reload.update(cx, |s, cx| s.reload_script(&id_reload, cx)))),
+                    )
+                    .when(!params.is_empty(), |d| d.child(Section::new("Numbers").child(nums)))
+                    .child(div().text_xs().text_color(color::text_muted()).child(format!("Takes {} · gives {}. Declared in the file's `lumen:` lines.", if declared.is_empty() { "nothing".to_string() } else { declared }, output.name())))
                     .into_any_element()
             }
         };

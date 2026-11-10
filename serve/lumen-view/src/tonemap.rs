@@ -149,7 +149,7 @@ pub fn build_render_image(
         .clamp(1, 16);
 
     if n_pixels >= 65_536 && num_threads > 1 {
-        let pixels_per_chunk = (valid_lum.len() + num_threads - 1) / num_threads;
+        let pixels_per_chunk = valid_lum.len().div_ceil(num_threads);
         let bytes_per_chunk = pixels_per_chunk * 4;
 
         std::thread::scope(|s| {
@@ -159,7 +159,7 @@ pub fn build_render_image(
             {
                 let lut_ref = &lut_table;
                 s.spawn(move || {
-                    for (px_bytes, &val) in bgra_slice.chunks_exact_mut(4).zip(lum_slice.iter()) {
+                    for (px_bytes, &val) in bgra_slice.as_chunks_mut::<4>().0.iter_mut().zip(lum_slice.iter()) {
                         let idx = (((val - black) * scale) as isize).clamp(0, 1023) as usize;
                         px_bytes.copy_from_slice(&lut_ref[idx]);
                     }
@@ -167,7 +167,7 @@ pub fn build_render_image(
             }
         });
     } else {
-        for (px_bytes, &val) in raw_bgra.chunks_exact_mut(4).zip(valid_lum.iter()) {
+        for (px_bytes, &val) in raw_bgra.as_chunks_mut::<4>().0.iter_mut().zip(valid_lum.iter()) {
             let idx = (((val - black) * scale) as isize).clamp(0, 1023) as usize;
             px_bytes.copy_from_slice(&lut_table[idx]);
         }

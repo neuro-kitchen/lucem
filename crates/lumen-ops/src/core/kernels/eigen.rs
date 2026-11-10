@@ -1,5 +1,9 @@
 //! Per-pixel symmetric $2 \times 2$ and $3 \times 3$ eigenvalue kernels.
 
+// CubeCL kernels: `contains`, `clamp` and `abs_diff` do not lower to device code, so the
+// comparisons stay written out
+#![allow(clippy::manual_range_contains, clippy::manual_clamp, clippy::manual_abs_diff)]
+
 use cubecl::prelude::*;
 use lumen_core::compute::element_position;
 

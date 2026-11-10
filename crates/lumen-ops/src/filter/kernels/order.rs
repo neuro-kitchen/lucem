@@ -149,6 +149,9 @@ pub fn median_3x3_kernel<F: lumen_core::element::ImageFloat>(
 ) {
     let idx = element_position();
     let total = (height as u32) * (width as u32);
+    // Local arrays are declared outside branches (the CPU backend's MLIR lowering rejects them
+    // inside one: "Expected operand type cube.ptr")
+    let mut vals = Array::<F>::new(9usize);
     if (idx as u32) < total {
         let e = idx as u32;
         let w_u = width as u32;
@@ -170,22 +173,23 @@ pub fn median_3x3_kernel<F: lumen_core::element::ImageFloat>(
                 input[(r2 + 2u32) as usize],
             );
         } else {
-            let mut vals = Array::<F>::new(9usize);
             let mut k = 0u32;
-            let mut dy = -1i32;
-            while dy <= 1i32 {
+            let mut dy_i = 0i32;
+            while dy_i <= 2i32 {
+                let dy = dy_i - 1i32;
                 let py = pad_index(y + dy, height, mode);
                 let sy = i32::max(py, 0i32) as u32;
-                let mut dx = -1i32;
-                while dx <= 1i32 {
+                let mut dx_i = 0i32;
+                while dx_i <= 2i32 {
+                    let dx = dx_i - 1i32;
                     let px = pad_index(x + dx, width, mode);
                     let sx = i32::max(px, 0i32) as u32;
                     let raw = input[(sy * w_u + sx) as usize];
                     vals[k as usize] = if py < 0i32 || px < 0i32 { cval } else { raw };
                     k += 1u32;
-                    dx += 1i32;
+                    dx_i += 1i32;
                 }
-                dy += 1i32;
+                dy_i += 1i32;
             }
             output[idx] = med9::<F>(
                 vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8],

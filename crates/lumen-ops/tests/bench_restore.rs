@@ -1,7 +1,7 @@
 //! Kernel vs. end-to-end benchmarks for `lumen_ops::restore`, `lumen_ops::register`, and `lumen_ops::metric`.
 
 use lumen_core::{
-    compute::time_device,
+    compute::bench::time_device,
     cubecl::prelude::Client,
     memory::DeviceArray,
     ComputeTarget, Shape,

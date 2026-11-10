@@ -1,7 +1,7 @@
 //! Kernel vs. end-to-end benchmarks for `lumen_ops::core` primitives.
 
 use lumen_core::{
-    compute::time_device,
+    compute::bench::time_device,
     cubecl::prelude::Client,
     memory::DeviceArray,
     ComputeTarget, Shape,
@@ -28,13 +28,13 @@ fn bench_core_suite(client: &Client) {
         let _ = select::kth_f32(client, &arr, (h * w) / 2).unwrap();
     });
 
-    let mask_u8: Vec<u8> = data.iter().map(|&v| u8::from(v > 0.5)).collect();
-    let mask = DeviceArray::from_host(client, Shape::new([h, w]), mask_u8).unwrap();
+    let mask_bits: Vec<u32> = data.iter().map(|&v| u32::from(v > 0.5)).collect();
+    let mask = DeviceArray::from_host(client, Shape::new([h, w]), mask_bits).unwrap();
     let ccl = time_device(client, iters, || {
         let _ = components::label_components(client, &mask, None).unwrap();
     });
     let edt = time_device(client, iters, || {
-        let _ = distance::euclidean_distance::<u8, f32>(client, &mask, None).unwrap();
+        let _ = distance::euclidean_distance::<u32, f32>(client, &mask, None).unwrap();
     });
 
     eprintln!(

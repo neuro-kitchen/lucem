@@ -263,17 +263,16 @@ pub fn hough_ellipses<E: Numeric + CubeElement>(
                 }
             }
 
-            if let Some((best_bin, &votes)) = bins.iter().enumerate().max_by_key(|&(_, &v)| v) {
-                if votes >= threshold {
+            if let Some((best_bin, &votes)) = bins.iter().enumerate().max_by_key(|&(_, &v)| v)
+                && votes >= threshold {
                     let b = (best_bin as f64) * accuracy;
                     let orientation = dy.atan2(dx);
                     results.push(HoughEllipse { votes, yc, xc, a, b, orientation });
                 }
-            }
         }
     }
 
-    results.sort_by(|x, y| y.votes.cmp(&x.votes));
+    results.sort_by_key(|r| std::cmp::Reverse(r.votes));
     Ok(results)
 }
 

@@ -48,7 +48,7 @@ impl Sample for f32 {
         out.extend(values.iter().flat_map(|v| v.to_le_bytes()));
     }
     fn from_bytes(bytes: &[u8]) -> Vec<Self> {
-        bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+        bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
     }
     fn reduce(values: &[Self]) -> Self {
         values.iter().sum::<f32>() / values.len() as f32
@@ -61,7 +61,7 @@ impl Sample for u32 {
         out.extend(values.iter().flat_map(|v| v.to_le_bytes()));
     }
     fn from_bytes(bytes: &[u8]) -> Vec<Self> {
-        bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+        bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
     }
     fn reduce(values: &[Self]) -> Self {
         values[0]
@@ -120,7 +120,7 @@ impl ZarrWriter {
     /// The chunk grid position of `origin`.
     fn chunk_of(&self, origin: Zyx) -> IoResult<Zyx> {
         let c = self.options.chunks;
-        if (0..3).any(|a| origin[a] % c[a] != 0 || origin[a] >= self.options.shape[a]) {
+        if (0..3).any(|a| !origin[a].is_multiple_of(c[a]) || origin[a] >= self.options.shape[a]) {
             return Err(IoError::OmeZarr(format!("block at {origin:?} is not on the chunk grid {c:?} of shape {:?}", self.options.shape)));
         }
         Ok([origin[0] / c[0], origin[1] / c[1], origin[2] / c[2]])

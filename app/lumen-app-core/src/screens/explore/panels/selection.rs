@@ -17,7 +17,7 @@ pub fn panel(store: &Entity<Store>, cx: &App) -> AnyElement {
     let chosen: Vec<Annotation> = s.doc.annotations.iter().filter(|a| s.selection.contains(&a.id)).cloned().collect();
     let body: AnyElement = match chosen.as_slice() {
         [] => Section::new("Nothing selected")
-            .child(div().text_xs().text_color(color::text_muted()).child("Select an annotation with V (Select) or in the Annotations tab: its class and measurements show here."))
+            .child(div().text_xs().text_color(color::text_muted()).child("Nothing selected (V, or a row in Layers)."))
             .into_any_element(),
         [a] => {
             let names: Vec<SharedString> = s.doc.classes.iter().map(|c| SharedString::from(c.name.clone())).collect();

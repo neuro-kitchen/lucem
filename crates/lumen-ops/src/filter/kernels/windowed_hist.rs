@@ -102,7 +102,7 @@ pub fn windowed_entropy_2d_kernel<F: lumen_core::element::ImageFloat>(
         // Exact entropy without a 256-bin shared array: each distinct value v contributes
         // -(count(v)/N)*log2(count(v)/N), so each occurrence contributes -(1/N)*log2(count(v)/N).
         let n_f = f32::max(n_active as f32, 1.0f32);
-        let inv_ln2 = 1.442_695f32;
+        let inv_ln2 = core::f32::consts::LOG2_E;
         let mut ent = 0.0f32;
         let mut i = 0u32;
         while i < n_active {

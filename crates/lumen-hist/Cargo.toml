@@ -1,0 +1,24 @@
+[package]
+name = "lumen-hist"
+description = "Histology workflows for lumen: stain separation, tissue detection, areas, cell detection and measurement, object and pixel classifiers, intensity scores, density maps, multiplexed phenotypes, superpixels and measurement export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["wgpu", "cuda", "cpu"]
+wgpu = ["lumen-core/wgpu", "lumen-ops/wgpu"]
+cpu = ["lumen-core/cpu", "lumen-ops/cpu"]
+cuda = ["lumen-core/cuda", "lumen-ops/cuda"]
+
+[dependencies]
+cubecl.workspace = true
+lumen-core = { workspace = true, features = ["compute"] }
+lumen-ops.workspace = true
+lumen-ml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

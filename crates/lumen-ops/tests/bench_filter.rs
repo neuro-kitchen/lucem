@@ -1,11 +1,12 @@
 //! Kernel vs. end-to-end benchmarks for `lumen_ops::filter`.
 
 use lumen_core::{
-    compute::time_device,
+    compute::bench::time_device,
     cubecl::prelude::Client,
     memory::DeviceArray,
     ComputeTarget, Shape,
 };
+use lumen_ops::core::StructuringElement;
 use lumen_ops::filter::{
     box_blur, frangi, gaussian_blur, median_filter, sobel, BoxBlur, GaussianBlur, GradientFilter,
     OrderFilter, RidgeFilter,
@@ -28,7 +29,7 @@ fn bench_filter_suite(client: &Client) {
         let _ = sobel(client, &arr, &GradientFilter::default()).unwrap();
     });
     let med = time_device(client, iters, || {
-        let _ = median_filter(client, &arr, None, Some(&[3, 3]), &OrderFilter::default()).unwrap();
+        let _ = median_filter(client, &arr, &StructuringElement::rectangle([3usize, 3]).unwrap(), &OrderFilter::default()).unwrap();
     });
     let frangi_t = time_device(client, iters, || {
         let _ = frangi(

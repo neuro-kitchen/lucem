@@ -97,6 +97,7 @@ impl Default for RollingBall {
 
 /// Estimates the smooth background intensity surface of `input` into `background` by rolling a
 /// non-flat ball or ellipsoid kernel underneath the intensity profile.
+#[allow(clippy::needless_range_loop)] // neighbourhood / DP index arithmetic reads clearer with indices
 pub fn rolling_ball_into<F: ImageFloat>(
     client: &Client,
     input: &DeviceArray<F>,
@@ -279,7 +280,11 @@ mod tests {
         )
         .unwrap()
         .to_host(client);
-        assert_close(&bg, &vec![2.5; h * w], 1e-5, client.name());
+        // Flat background everywhere; under the one-pixel spike the discrete ball rises to what its
+        // neighbours at distance 1 allow: 2.5 + (r − √(r² − 1)) (as scikit-image)
+        let mut want = vec![2.5; h * w];
+        want[7 * w + 7] = 2.5 + (4.0 - (16.0f64 - 1.0).sqrt());
+        assert_close(&bg, &want, 1e-5, client.name());
     }
     runtime_test!(test_rolling_ball, rolling_ball_extracts_smooth_background_under_peak);
 }

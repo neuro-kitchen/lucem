@@ -41,6 +41,10 @@ pub enum AppEvent {
     Selection,
     /// A view was asked for from the menu.
     View(ViewRequest),
+    /// The 3D cursor of the shown image moved.
+    Cursor,
+    /// Bring a level-0 point of the shown image into the focused view.
+    Reveal([f64; 2]),
 }
 
 /// What a pane of Explore shows.
@@ -52,14 +56,93 @@ pub enum ViewKind {
     Ortho,
     /// The volume rendered.
     Volume,
+    /// Each channel on its own, and the channels together, side by side (linked).
+    Channels,
+}
+
+impl ViewKind {
+    pub const ALL: [ViewKind; 4] = [ViewKind::Plane, ViewKind::Ortho, ViewKind::Volume, ViewKind::Channels];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            ViewKind::Plane => "Plane",
+            ViewKind::Ortho => "2D",
+            ViewKind::Volume => "3D",
+            ViewKind::Channels => "Channels",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            ViewKind::Plane => "One plane, full canvas",
+            ViewKind::Ortho => "The XY, XZ and YZ planes through the cursor",
+            ViewKind::Volume => "The volume rendered",
+            ViewKind::Channels => "Each channel on its own and all together, moving together",
+        }
+    }
+
+    pub fn icon(self) -> gpui_kit::assets::IconName {
+        use gpui_kit::assets::IconName;
+        match self {
+            ViewKind::Plane => IconName::Square,
+            ViewKind::Ortho => IconName::LayoutGrid,
+            ViewKind::Volume => IconName::Box,
+            ViewKind::Channels => IconName::Columns3,
+        }
+    }
+
+    /// Whether it needs an image with depth.
+    pub fn needs_depth(self) -> bool {
+        matches!(self, ViewKind::Ortho | ViewKind::Volume)
+    }
+}
+
+/// How the views of Explore are laid out (dsp-kitchen's containers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrangement {
+    /// One tab group holding every view.
+    Tabs,
+    /// Side by side.
+    Horizontal,
+    /// Stacked.
+    Vertical,
+    /// Rows of up to ⌈√n⌉ views.
+    Grid,
+}
+
+impl Arrangement {
+    pub const ALL: [Arrangement; 4] = [Arrangement::Tabs, Arrangement::Horizontal, Arrangement::Vertical, Arrangement::Grid];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Arrangement::Tabs => "Tabs",
+            Arrangement::Horizontal => "Side by side",
+            Arrangement::Vertical => "Stacked",
+            Arrangement::Grid => "Grid",
+        }
+    }
 }
 
 /// A view menu command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewRequest {
+    /// The focused view shows this.
     Show(ViewKind),
-    AddPane,
+    /// A new view of this kind beside the focused one.
+    Add(ViewKind),
+    /// Closes the focused view (the last one stays).
     ClosePane,
+    Arrange(Arrangement),
+    /// The Pipeline docked under the views, shown or hidden.
+    TogglePipeline,
+    /// Views move and zoom together, or not.
+    ToggleLink,
+    /// Explore's left dock (Layers), right dock (the studio), or both, shown or hidden.
+    ToggleLeft,
+    ToggleRight,
+    ToggleSides,
+    /// The side docks back to how they come (and forget the saved arrangement).
+    ResetLayout,
 }
 
 /// What the Layers panel can do with the selected masks.
@@ -79,6 +162,9 @@ pub struct Store {
     pub project_file: Option<PathBuf>,
     history: Vec<ProjectDoc>,
     future: Vec<ProjectDoc>,
+    /// What each step of `history` and `future` did (the History panel), in the same order.
+    history_labels: Vec<String>,
+    future_labels: Vec<String>,
     pub prefs: Prefs,
     prefs_path: Option<PathBuf>,
     pub workspace: Workspace,
@@ -105,6 +191,10 @@ pub struct Store {
     results_gen: Arc<AtomicU64>,
     pub device: Option<Arc<Device>>,
     device_pending: bool,
+    /// Bumped when the device changes: what lives on the old one (3D volumes) is dropped.
+    pub device_generation: u64,
+    /// Machine-learning plugins and their jobs.
+    pub ml: super::ml::MlState,
     /// The selected node in the Pipeline (shared so Explore can show it).
     pub selected_node: Option<String>,
     /// Selected rows of the Layers panel (`view:<id>`, `class:<name>`, `channel:<n>`), in the order
@@ -112,6 +202,18 @@ pub struct Store {
     pub layers_selected: Vec<String>,
     /// Pixels a mask grows or shrinks by.
     pub mask_radius: usize,
+    /// Rows of the Layers tree folded shut (view state).
+    pub layers_collapsed: HashSet<String>,
+    /// When each script node's file was last seen changed (the watcher runs while there are any).
+    script_seen: HashMap<String, std::time::SystemTime>,
+    script_watch: bool,
+    /// The 3D cursor `[z, y, x]` (level-0 voxels) of each image: the plane every view shows and
+    /// where the three planes of the 2D view cross. View state, not in the undo history.
+    cursors: HashMap<String, [usize; 3]>,
+    /// Bumped whenever annotations or classes change (views that rasterize them follow it).
+    pub annotations_rev: u64,
+    /// Histology: cells by image, the stains, detection and classifier settings.
+    pub hist: super::hist::HistState,
 }
 
 impl EventEmitter<AppEvent> for Store {}
@@ -124,6 +226,8 @@ impl Store {
             project_file: None,
             history: Vec::new(),
             future: Vec::new(),
+            history_labels: Vec::new(),
+            future_labels: Vec::new(),
             prefs,
             prefs_path,
             workspace: Workspace::Explore,
@@ -142,9 +246,17 @@ impl Store {
             results_gen: Arc::new(AtomicU64::new(0)),
             device: None,
             device_pending: false,
+            device_generation: 0,
+            ml: Default::default(),
             selected_node: None,
             layers_selected: Vec::new(),
             mask_radius: 2,
+            layers_collapsed: HashSet::new(),
+            script_seen: HashMap::new(),
+            script_watch: false,
+            cursors: HashMap::new(),
+            annotations_rev: 0,
+            hist: Default::default(),
         }
     }
 
@@ -155,15 +267,19 @@ impl Store {
     /// Runs a command on the document, saves it and says what changed.
     pub fn execute(&mut self, cmd: Command, cx: &mut Context<Self>) -> Result<Changed, CommandError> {
         let before = self.doc.clone();
+        let label = cmd.label();
         let result = apply(&mut self.doc, cmd);
         match &result {
             Ok(change) => {
                 if before != self.doc {
                     self.history.push(before);
+                    self.history_labels.push(label);
                     if self.history.len() > UNDO_DEPTH {
                         self.history.remove(0);
+                        self.history_labels.remove(0);
                     }
                     self.future.clear();
+                    self.future_labels.clear();
                     self.save();
                 }
                 self.after_change(change.clone(), cx);
@@ -183,16 +299,37 @@ impl Store {
         let before = std::mem::replace(&mut self.doc, doc);
         if redo {
             self.history.push(before);
+            let label = self.future_labels.pop().unwrap_or_default();
+            self.history_labels.push(label);
         } else {
             self.future.push(before);
+            let label = self.history_labels.pop().unwrap_or_default();
+            self.future_labels.push(label);
         }
         self.save();
         self.selection.retain(|id| self.doc.annotations.iter().any(|a| &a.id == id));
+        self.annotations_rev += 1;
         self.ensure_pyramids(cx);
         self.after_change(Changed::Graph, cx);
         cx.emit(AppEvent::Document(Changed::Images));
         cx.emit(AppEvent::Document(Changed::Annotations));
         self.set_status(if redo { "Redone" } else { "Undone" }, cx);
+    }
+
+    /// The History panel's rows: what each step did, done ones first (oldest first), then the
+    /// undone ones (the next redo first).
+    pub fn history(&self) -> (&[String], Vec<&String>) {
+        (&self.history_labels, self.future_labels.iter().rev().collect())
+    }
+
+    /// Undoes or redoes until `done` steps of the history are applied (a click in History).
+    pub fn undo_to(&mut self, done: usize, cx: &mut Context<Self>) {
+        while self.history.len() > done && !self.history.is_empty() {
+            self.undo(false, cx);
+        }
+        while self.history.len() < done && !self.future.is_empty() {
+            self.undo(true, cx);
+        }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -206,10 +343,13 @@ impl Store {
     fn after_change(&mut self, change: Changed, cx: &mut Context<Self>) {
         match &change {
             Changed::Images => {
+                // Selected layers belong to the image shown before
+                self.layers_selected.clear();
                 self.ensure_pyramids(cx);
                 self.results.retain(|_, r| self.doc.image(&r.image).is_some());
             }
             Changed::Graph => {
+                self.watch_scripts(cx);
                 self.results.retain(|v, _| self.doc.graph.contains(v));
                 self.recompute(cx);
             }
@@ -218,7 +358,16 @@ impl Store {
                 self.recompute(cx);
             }
             Changed::Annotations => {
+                self.annotations_rev += 1;
                 self.selection.retain(|id| self.doc.annotations.iter().any(|a| &a.id == id));
+                // A deleted or renamed class: draw with one that exists, unselect its layer
+                if self.doc.class(&self.tool.class).is_none()
+                    && let Some(c) = self.doc.classes.iter().find(|c| c.name != crate::domain::command::MEASUREMENT) {
+                        self.tool.class = c.name.clone();
+                    }
+                let classes: Vec<String> = self.doc.classes.iter().map(|c| format!("class:{}", c.name)).collect();
+                self.layers_selected.retain(|k| !k.starts_with("class:") || classes.contains(k));
+                self.results.retain(|v, _| self.doc.graph.contains(v));
                 let reads_annotations = self.doc.graph.nodes.iter().any(|n| matches!(n.kind, NodeKind::Annotations { .. }));
                 if reads_annotations {
                     self.recompute(cx);
@@ -232,11 +381,10 @@ impl Store {
 
     /// Writes the project file when the project has a folder.
     fn save(&mut self) {
-        if let Some(path) = &self.project_file {
-            if let Err(e) = self.doc.save(path) {
+        if let Some(path) = &self.project_file
+            && let Err(e) = self.doc.save(path) {
                 self.status = format!("Project not saved: {e}");
             }
-        }
     }
 
     /// The project's folder.
@@ -269,8 +417,11 @@ impl Store {
     /// A new, empty project (not saved anywhere yet).
     pub fn new_project(&mut self, cx: &mut Context<Self>) {
         self.history.push(std::mem::take(&mut self.doc));
+        self.history_labels.push("New project".into());
         self.doc = ProjectDoc::default();
         self.future.clear();
+        self.future_labels.clear();
+        self.layers_selected.clear();
         self.project_file = None;
         self.pyramids.clear();
         self.results.clear();
@@ -282,11 +433,10 @@ impl Store {
     /// Saves the project as `<folder>/project.lumen.json` and keeps saving there.
     pub fn save_in(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         let file = folder.join(PROJECT_FILE);
-        if self.doc.name == "Untitled" {
-            if let Some(n) = folder.file_name() {
+        if self.doc.name == "Untitled"
+            && let Some(n) = folder.file_name() {
                 self.doc.name = n.to_string_lossy().into_owned();
             }
-        }
         // Image paths inside the folder become relative (the folder can move)
         let old = self.folder();
         for img in &mut self.doc.images {
@@ -310,6 +460,9 @@ impl Store {
             Ok(doc) => {
                 self.history.clear();
                 self.future.clear();
+                self.history_labels.clear();
+                self.future_labels.clear();
+                self.layers_selected.clear();
                 self.doc = doc;
                 self.project_file = Some(file.clone());
                 self.pyramids.clear();
@@ -318,6 +471,7 @@ impl Store {
                 self.prefs.push_recent(&file);
                 self.save_prefs();
                 self.after_change(Changed::Images, cx);
+                self.watch_scripts(cx);
                 self.set_workspace(Workspace::Explore, cx);
                 self.set_status(format!("Opened project {}", self.doc.name), cx);
             }
@@ -440,7 +594,8 @@ impl Store {
             let l = py.levels[level].clone();
             (0..py.channels.len())
                 .map(|c| {
-                    let v = py.read_region(level, c, 0, 0, l.width, l.height).unwrap_or_default();
+                    // Every plane of a volume, not only the first
+                    let v = py.read_block(level, c, [0, 0, 0], [l.depth, l.height, l.width]).unwrap_or_default();
                     let lo = v.iter().copied().filter(|x| x.is_finite()).fold(f32::MAX, f32::min);
                     let hi = v.iter().copied().filter(|x| x.is_finite()).fold(f32::MIN, f32::max);
                     let (lo, hi) = if hi > lo { (lo, hi) } else { (0.0, 1.0) };
@@ -462,6 +617,50 @@ impl Store {
         self.doc.active_image.as_ref().and_then(|id| self.pyramids.get(id))
     }
 
+    /// The 3D cursor of the shown image, `[z, y, x]` in level-0 voxels (the centre until moved).
+    pub fn cursor(&self) -> Option<[usize; 3]> {
+        self.cursor_of(self.doc.active_image.as_deref()?)
+    }
+
+    /// The 3D cursor of image `id`.
+    pub fn cursor_of(&self, id: &str) -> Option<[usize; 3]> {
+        let py = self.pyramids.get(id)?;
+        let dims = [py.depth(), py.height(), py.width()];
+        let at = self.cursors.get(id).copied().unwrap_or([dims[0] / 2, dims[1] / 2, dims[2] / 2]);
+        Some(std::array::from_fn(|a| at[a].min(dims[a].saturating_sub(1))))
+    }
+
+    /// Moves the 3D cursor of the shown image (clamped to it).
+    pub fn set_cursor(&mut self, at: [usize; 3], cx: &mut Context<Self>) {
+        let Some(id) = self.doc.active_image.clone() else { return };
+        self.set_cursor_of(&id, at, cx);
+    }
+
+    /// Moves the 3D cursor of image `id` (clamped to it).
+    pub fn set_cursor_of(&mut self, id: &str, at: [usize; 3], cx: &mut Context<Self>) {
+        let id = id.to_string();
+        let Some(py) = self.pyramids.get(&id) else { return };
+        let dims = [py.depth(), py.height(), py.width()];
+        let at: [usize; 3] = std::array::from_fn(|a| at[a].min(dims[a].saturating_sub(1)));
+        if self.cursor_of(&id) != Some(at) {
+            self.cursors.insert(id, at);
+            cx.emit(AppEvent::Cursor);
+            cx.notify();
+        }
+    }
+
+    /// Moves the 3D cursor along one axis (`0` z, `1` y, `2` x) by `delta` voxels.
+    pub fn nudge_cursor(&mut self, axis: usize, delta: i64, cx: &mut Context<Self>) {
+        let Some(mut at) = self.cursor() else { return };
+        at[axis] = (at[axis] as i64 + delta).max(0) as usize;
+        self.set_cursor(at, cx);
+    }
+
+    /// The plane annotations drawn now belong to: the cursor's for a volume, `None` for a 2D image.
+    pub fn drawing_plane(&self) -> Option<usize> {
+        self.active_pyramid().filter(|p| p.is_volume()).and(self.cursor()).map(|c| c[0])
+    }
+
     // ------------------------------------------------------------------------
     // Results
     // ------------------------------------------------------------------------
@@ -479,6 +678,324 @@ impl Store {
             self.layers_selected = vec![key];
         }
         cx.emit(AppEvent::Selection);
+        cx.notify();
+    }
+
+    /// Switches the compute backend (`None`: automatic) while running: what lives on the old
+    /// device is dropped and the results are computed again on the new one.
+    pub fn set_runtime(&mut self, runtime: Option<String>, cx: &mut Context<Self>) {
+        self.prefs.runtime = runtime;
+        self.save_prefs();
+        self.device = None;
+        self.device_pending = false;
+        self.device_generation += 1;
+        self.results.clear();
+        self.analysis = None;
+        cx.emit(AppEvent::Results);
+        self.ensure_device(cx);
+    }
+
+    /// A blur of a 512² image on the device, read back checked: the output must be finite, not
+    /// all zero, and keep the image's mean (CubeCL #1461: zeros are not success). Says how long.
+    pub fn test_device(&mut self, cx: &mut Context<Self>) {
+        let Some(device) = self.device.clone() else {
+            self.ensure_device(cx);
+            return self.set_status("Starting the device; test again when it is up", cx);
+        };
+        self.set_status(format!("Testing {}…", device.label), cx);
+        let task = cx.background_spawn(async move {
+            use lumen_core::memory::DeviceArray;
+            let n = 512usize;
+            let host: Vec<f32> = (0..n * n).map(|i| ((i % n) as f32 / n as f32) * 0.8 + 0.1).collect();
+            let mean_in = host.iter().sum::<f32>() / host.len() as f32;
+            let t0 = std::time::Instant::now();
+            let a = DeviceArray::from_host(&device.client, lumen_core::Shape::new([n, n]), host).map_err(|e| e.to_string())?;
+            let out = Op::GaussianBlur { sigma: 2.0 }.run(&device.client, &[lumen_pipeline::Value::Image(a)])?;
+            let back = out.to_host(&device.client).ok_or("no raster came back")?;
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let mean_out = back.iter().sum::<f32>() / back.len().max(1) as f32;
+            if back.iter().any(|v| !v.is_finite()) {
+                return Err("the device returned values that are not numbers".to_string());
+            }
+            if back.iter().all(|&v| v == 0.0) || (mean_out - mean_in).abs() > 0.05 {
+                return Err(format!("the device returned a wrong result (mean {mean_out:.3}, expected {mean_in:.3})"));
+            }
+            Ok::<_, String>((device.label.clone(), ms))
+        });
+        cx.spawn(async move |this, cx| {
+            let r = task.await;
+            let _ = this.update(cx, |s, cx| match r {
+                Ok((label, ms)) => s.set_status(format!("{label}: a blur of 512 × 512 px, checked, in {ms:.1} ms (first runs include compiling)"), cx),
+                Err(e) => s.set_status(format!("Device test failed: {e}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    // ------------------------------------------------------------------------
+    // Machine-learning plugins
+    // ------------------------------------------------------------------------
+
+    /// Looks for the plugin programs again (in the background) and reads their manifests.
+    pub fn scan_plugins(&mut self, cx: &mut Context<Self>) {
+        if self.ml.scanning {
+            return;
+        }
+        self.ml.scanning = true;
+        let task = cx.background_spawn(async move { lumen_ml::discover() });
+        cx.spawn(async move |this, cx| {
+            let found = task.await;
+            let _ = this.update(cx, |s, cx| {
+                s.ml.scanning = false;
+                s.ml.scanned = true;
+                s.ml.stop_servers();
+                s.ml.plugins = found.iter().filter_map(|r| r.as_ref().ok().cloned()).collect();
+                s.ml.problems = found.into_iter().filter_map(Result::err).collect();
+                cx.emit(AppEvent::Status);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Runs a request on a plugin in the background, its progress in `ml.busy`; `done` gets the
+    /// answer on the UI thread.
+    fn ml_job(&mut self, program: String, label: String, req: lumen_ml::Request, done: impl FnOnce(&mut Self, Result<serde_json::Value, String>, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
+        if self.ml.busy.is_some() {
+            return self.set_status("A model is busy; wait for it to finish", cx);
+        }
+        self.ml.busy = Some((label, None));
+        cx.notify();
+        let server = self.ml.server(&program);
+        let (tx, rx) = async_channel::unbounded::<(String, Option<f32>)>();
+        let task = cx.background_spawn(async move {
+            super::ml::request(&server, &program, &req, &mut |stage, f| {
+                let _ = tx.try_send((stage.to_string(), f));
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            while let Ok((stage, f)) = rx.recv().await {
+                let _ = this.update(cx, |s, cx| {
+                    s.ml.busy = Some((stage, f));
+                    cx.notify();
+                });
+            }
+            let r = task.await;
+            let _ = this.update(cx, |s, cx| {
+                s.ml.busy = None;
+                done(s, r, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Downloads and verifies a model's weights through its plugin.
+    pub fn install_model(&mut self, program: String, model: String, cx: &mut Context<Self>) {
+        let label = format!("Installing {model}");
+        self.ml_job(
+            program,
+            label,
+            lumen_ml::Request::Install { model: model.clone() },
+            move |s, r, cx| {
+                match r {
+                    Ok(_) => s.set_status(if model == lumen_ml::RUNTIME_ID { "ONNX Runtime installed and verified".to_string() } else { format!("{model} installed and verified") }, cx),
+                    Err(e) => s.set_status(format!("{model}: {e}"), cx),
+                }
+                s.scan_plugins(cx);
+            },
+            cx,
+        );
+    }
+
+    /// The model the Segment tool uses.
+    pub fn set_ml_model(&mut self, id: String, cx: &mut Context<Self>) {
+        self.update_prefs(|p| p.ml_model = Some(id), cx);
+    }
+
+    /// Segments the region of `job` with the chosen model; the regions become annotations.
+    /// With `through`, the object is then followed through the planes above and below.
+    pub fn segment(&mut self, job: super::ml::SegmentJob, through: Option<super::ml::ZRun>, cx: &mut Context<Self>) {
+        let Some((program, model, installed)) = self.ml.segmenter(self.prefs.ml_model.as_deref()) else {
+            if !self.ml.scanned {
+                self.scan_plugins(cx);
+            }
+            return self.set_status("No segmentation model: install the SAM plugin (Settings → Models)", cx);
+        };
+        if !installed {
+            return self.set_status(format!("{model} is not installed yet (Settings → Models → Install)"), cx);
+        }
+        if self.ml.busy.is_some() {
+            return self.set_status("The model is still working on the last click", cx);
+        }
+        self.ml.busy = Some((format!("Segmenting with {model}"), None));
+        cx.notify();
+        let server = self.ml.server(&program);
+        let task = cx.background_spawn(async move {
+            let r = super::ml::segment(&server, &program, &model, &job, &mut |_, _| {});
+            (r, job)
+        });
+        cx.spawn(async move |this, cx| {
+            let (r, job) = task.await;
+            let _ = this.update(cx, |s, cx| {
+                s.ml.busy = None;
+                match r {
+                    Ok((shapes, score, res)) => {
+                        let n = shapes.len();
+                        let annotations = shapes.iter().cloned().map(|shape| Annotation { id: String::new(), image: job.image.clone(), shape, class: job.class.clone(), note: String::new(), z: job.z }).collect();
+                        if s.execute(Command::AddAnnotations { annotations }, cx).is_ok() {
+                            let enc = if res.encode_ms > 0.0 { format!("view encoded in {:.0} ms, ", res.encode_ms) } else { String::new() };
+                            s.set_status(format!("{n} region(s) of {} (score {score:.2}; {enc}mask in {:.0} ms)", job.class, res.decode_ms), cx);
+                            if let Some(run) = through {
+                                s.carry_through_z(job, shapes, run, cx);
+                            }
+                        }
+                    }
+                    Err(e) => s.set_status(format!("Segment: {e}"), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Follows a segmented object through the other planes (in the background); every plane it is
+    /// found on adds its regions, all in one undo step.
+    fn carry_through_z(&mut self, job: super::ml::SegmentJob, first: Vec<crate::domain::annotation::Shape>, run: super::ml::ZRun, cx: &mut Context<Self>) {
+        let Some((program, model, true)) = self.ml.segmenter(self.prefs.ml_model.as_deref()) else { return };
+        self.ml.busy = Some(("Following it through z".into(), None));
+        cx.notify();
+        let server = self.ml.server(&program);
+        let (tx, rx) = async_channel::unbounded::<usize>();
+        let task = cx.background_spawn(async move {
+            let r = super::ml::carry_through_z(&server, &program, &model, &job, &first, &run, &mut |n| {
+                let _ = tx.try_send(n);
+            });
+            (r, job)
+        });
+        cx.spawn(async move |this, cx| {
+            while let Ok(n) = rx.recv().await {
+                let alive = this.update(cx, |s, cx| {
+                    s.ml.busy = Some((format!("Following it through z: {n} plane(s)"), None));
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let (r, job) = task.await;
+            let _ = this.update(cx, |s, cx| {
+                s.ml.busy = None;
+                match r {
+                    Ok(planes) if planes.is_empty() => s.set_status("Through z: the object is not on the next planes (or the model is unsure)", cx),
+                    Ok(planes) => {
+                        let (lo, hi) = planes.iter().fold((usize::MAX, 0), |(lo, hi), (z, _)| (lo.min(*z), hi.max(*z)));
+                        let n = planes.len();
+                        let annotations: Vec<Annotation> = planes.into_iter().flat_map(|(z, shapes)| shapes.into_iter().map(move |shape| (z, shape))).map(|(z, shape)| Annotation { id: String::new(), image: job.image.clone(), shape, class: job.class.clone(), note: String::new(), z: Some(z) }).collect();
+                        if s.execute(Command::AddAnnotations { annotations }, cx).is_ok() {
+                            s.set_status(format!("Followed through {n} more plane(s), z {lo}–{hi}"), cx);
+                        }
+                    }
+                    Err(e) => s.set_status(format!("Through z: {e}"), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // ------------------------------------------------------------------------
+    // Script nodes
+    // ------------------------------------------------------------------------
+
+    /// A new script node (Python or Rust) from the template, in the project's `scripts/` folder
+    /// (or the user's), opened in the system's editor.
+    pub fn add_script_node(&mut self, lang: crate::data::script::Language, cx: &mut Context<Self>) {
+        use crate::data::script;
+        let dir = script::scripts_dir(self.folder().as_deref());
+        let path = match script::new_script(&dir, lang) {
+            Ok(p) => p,
+            Err(e) => return self.set_status(format!("Could not write the script: {e}"), cx),
+        };
+        let _ = script::open_in_editor(&path);
+        self.add_script_file(path, cx);
+    }
+
+    /// A script node running an existing `.py` or `.rs` file.
+    pub fn add_script_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        use crate::data::script;
+        if script::Language::of(&path).is_none() {
+            return self.set_status(format!("{}: a script is a .py or .rs file", path.display()), cx);
+        }
+        let header = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| script::read_header(&t));
+        let h = match header {
+            Ok(h) => h,
+            Err(e) => return self.set_status(format!("{}: {e}", path.display()), cx),
+        };
+        let kind = NodeKind::Script { path: path.to_string_lossy().into_owned(), inputs: h.inputs, output: h.output, params: h.params, enabled: true };
+        let y = self.doc.graph.next_row();
+        if self.execute(Command::AddNode { kind, x: 0.0, y, id: None, after: self.selected_node.clone() }, cx).is_ok() {
+            self.set_status(format!("Script {} added; edit it, save, and the node runs again", path.display()), cx);
+        }
+    }
+
+    /// Reads a script node's header again (its ports and numbers; values of numbers kept).
+    pub fn reload_script(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(NodeKind::Script { path, params, enabled, .. }) = self.doc.graph.node(id).map(|n| n.kind.clone()) else { return };
+        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| crate::data::script::read_header(&t)) {
+            Ok(h) => {
+                let params = h.params.into_iter().map(|p| params.iter().find(|q| q.name == p.name).cloned().unwrap_or(p)).collect();
+                let kind = NodeKind::Script { path, inputs: h.inputs, output: h.output, params, enabled };
+                if self.doc.graph.node(id).map(|n| &n.kind) != Some(&kind) {
+                    let _ = self.execute(Command::SetScript { id: id.to_string(), kind }, cx);
+                } else {
+                    self.recompute(cx);
+                }
+            }
+            Err(e) => self.set_status(format!("{path}: {e}"), cx),
+        }
+    }
+
+    /// Watches the files of script nodes (once a second): a saved file is read again and runs.
+    fn watch_scripts(&mut self, cx: &mut Context<Self>) {
+        let any = self.doc.graph.nodes.iter().any(|n| matches!(n.kind, NodeKind::Script { .. }));
+        if self.script_watch || !any {
+            return;
+        }
+        self.script_watch = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let alive = this.update(cx, |s, cx| {
+                    let scripts: Vec<(String, String)> = s.doc.graph.nodes.iter().filter_map(|n| if let NodeKind::Script { path, .. } = &n.kind { Some((n.id.clone(), path.clone())) } else { None }).collect();
+                    if scripts.is_empty() {
+                        s.script_watch = false;
+                        return false;
+                    }
+                    for (id, path) in scripts {
+                        let Ok(t) = std::fs::metadata(&path).and_then(|m| m.modified()) else { continue };
+                        if s.script_seen.insert(id.clone(), t).is_some_and(|old| old != t) {
+                            s.reload_script(&id, cx);
+                        }
+                    }
+                    true
+                });
+                if !matches!(alive, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Folds a row of the Layers tree shut, or opens it.
+    pub fn toggle_layer_open(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.layers_collapsed.remove(key) {
+            self.layers_collapsed.insert(key.to_string());
+        }
         cx.notify();
     }
 
@@ -612,7 +1129,8 @@ impl Store {
         let generation = self.results_gen.fetch_add(1, Ordering::AcqRel) + 1;
         let latest = self.results_gen.clone();
         let doc = self.doc.clone();
-        let key = analysis_key(&doc, &req.image);
+        // The whole-image pass runs on the plane shown
+        let key = analysis_key(&doc, &req.image) ^ (req.z as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         // The whole-image pass again only when what it depends on changed
         let cached = self.analysis.clone().filter(|a| a.key == key);
         let show = self.tool.show_results;
@@ -625,7 +1143,7 @@ impl Store {
             }
             let analysis = match cached {
                 Some(a) => a,
-                None => Arc::new(analyze(&device.client, &doc, &pyramid, &req.image)),
+                None => Arc::new(analyze(&device.client, &doc, &pyramid, &req.image, req.z)),
             };
             if latest.load(Ordering::Acquire) != generation {
                 return Some((analysis, None));
@@ -713,12 +1231,15 @@ impl Store {
         let Some(py) = self.pyramids.get(&img).cloned() else { return };
         let t = self.tool.clone();
         let class = t.class.clone();
+        // A volume: the plane shown
+        let plane = self.drawing_plane();
         self.set_status("Thresholding the whole image…", cx);
         let task = cx.background_spawn(async move {
             let level = (0..py.levels.len()).find(|&l| py.levels[l].width.max(py.levels[l].height) <= 4096).unwrap_or(py.coarsest());
             let l = py.levels[level].clone();
             let ds = l.downsample;
-            let mut v = py.read_region(level, t.threshold_channel, 0, 0, l.width, l.height).map_err(|e| e.to_string())?;
+            let at = plane.map_or(0, |z| ((z as f64 / l.z_downsample) as usize).min(l.depth - 1));
+            let mut v = py.read_region_at(level, t.threshold_channel, at, 0, 0, l.width, l.height).map_err(|e| e.to_string())?;
             geometry::blur(&mut v, l.width, l.height, t.threshold_sigma / ds);
             let mask: Vec<u8> = v.iter().map(|&x| u8::from((x >= t.threshold_value) == t.threshold_above)).collect();
             let min_px = (t.threshold_min_area / (ds * ds)).ceil().max(1.0) as usize;
@@ -736,7 +1257,7 @@ impl Store {
             let _ = this.update(cx, |s, cx| match r {
                 Ok((shapes, level)) => {
                     let n = shapes.len();
-                    let annotations = shapes.into_iter().map(|shape| Annotation { id: String::new(), image: img.clone(), shape, class: class.clone(), note: String::new() }).collect();
+                    let annotations = shapes.into_iter().map(|shape| Annotation { id: String::new(), image: img.clone(), shape, class: class.clone(), note: String::new(), z: plane }).collect();
                     if s.execute(Command::AddAnnotations { annotations }, cx).is_ok() {
                         s.set_status(format!("{n} region(s) of class {class} from the threshold (level {level})"), cx);
                     }
@@ -777,10 +1298,16 @@ impl Store {
         }
         self.device_pending = true;
         self.set_status("Starting the compute device…", cx);
-        let task = cx.background_spawn(async move { Device::discover() });
+        let preferred = self.prefs.runtime.clone();
+        let generation = self.device_generation;
+        let task = cx.background_spawn(async move { Device::discover(preferred.as_deref()) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |s, cx| {
+                // A device asked for before a switch is not the one wanted now
+                if s.device_generation != generation {
+                    return;
+                }
                 s.device_pending = false;
                 match result {
                     Ok(d) => {
@@ -841,6 +1368,13 @@ impl Store {
         cx.notify();
     }
 
+    /// Changes the preferences and saves them.
+    pub fn update_prefs(&mut self, f: impl FnOnce(&mut Prefs), cx: &mut Context<Self>) {
+        f(&mut self.prefs);
+        self.save_prefs();
+        cx.notify();
+    }
+
     pub fn set_sidebar(&mut self, open: bool, cx: &mut Context<Self>) {
         self.prefs.sidebar_open = open;
         self.save_prefs();
@@ -853,8 +1387,129 @@ impl Store {
         cx.notify();
     }
 
+    /// Writes the shown image's annotations as GeoJSON next to the project (or in the working
+    /// folder).
+    pub fn export_geojson(&mut self, cx: &mut Context<Self>) {
+        let Some(img) = self.doc.active().cloned() else { return };
+        let list: Vec<&Annotation> = self.doc.annotations_of(&img.id).collect();
+        let folder = self.folder().or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+        let path = folder.join(format!("{}.geojson", img.name.replace([' ', '/'], "_")));
+        let msg = match std::fs::write(&path, super::geojson::export(&list)) {
+            Ok(()) => format!("{} annotation(s) written to {}", list.len(), path.display()),
+            Err(e) => format!("Could not write {}: {e}", path.display()),
+        };
+        self.set_status(msg, cx);
+    }
+
+    /// Adds the features of a GeoJSON file to the shown image (one undo step); classes it names
+    /// that the project lacks are added.
+    pub fn import_geojson(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(img) = self.doc.active_image.clone() else { return self.set_status("Open an image first", cx) };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => return self.set_status(format!("{}: {e}", path.display()), cx),
+        };
+        let annotations = match super::geojson::import(&text, &img, &self.tool.class) {
+            Ok(a) => a,
+            Err(e) => return self.set_status(format!("{}: {e}", path.display()), cx),
+        };
+        let n = annotations.len();
+        let mut commands: Vec<Command> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for a in &annotations {
+            if self.doc.class(&a.class).is_none() && seen.insert(a.class.clone()) {
+                let hue = (seen.len() * 67 % 360) as f32 / 360.0;
+                let c = gpui_kit::hsla(hue, 0.65, 0.55, 1.0).to_rgb();
+                let class = crate::domain::annotation::ClassDoc { name: a.class.clone(), color: [(c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8], visible: true, opacity: 1.0 };
+                commands.push(Command::SetClass { class });
+            }
+        }
+        commands.push(Command::AddAnnotations { annotations });
+        if self.execute(Command::Batch { commands }, cx).is_ok() {
+            self.set_status(format!("{n} annotation(s) imported from {}", path.display()), cx);
+        }
+    }
+
+    /// Selects annotation `id`, shows its image and plane in Explore and brings it into view.
+    pub fn reveal_annotation(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(a) = self.doc.annotations.iter().find(|a| a.id == id).cloned() else { return };
+        if self.doc.active_image.as_deref() != Some(a.image.as_str()) {
+            let _ = self.execute(Command::SelectImage { id: a.image.clone() }, cx);
+        }
+        self.select([a.id.clone()], cx);
+        if let (Some(z), Some(mut at)) = (a.z, self.cursor_of(&a.image)) {
+            at[0] = z;
+            self.set_cursor_of(&a.image, at, cx);
+        }
+        let (x0, y0, x1, y1) = a.shape.bounds();
+        self.set_workspace(Workspace::Explore, cx);
+        cx.emit(AppEvent::Reveal([(x0 + x1) / 2.0, (y0 + y1) / 2.0]));
+    }
+
+    /// Deletes class `name`; its annotations move to `move_to`, else they go too. Undoable.
+    pub fn delete_class(&mut self, name: String, move_to: Option<String>, cx: &mut Context<Self>) {
+        let n = self.doc.annotations.iter().filter(|a| a.class == name).count();
+        let what = match (&move_to, n) {
+            (_, 0) => format!("Deleted class {name}"),
+            (Some(to), n) => format!("Deleted class {name}; its {n} annotation(s) are now {to}"),
+            (None, n) => format!("Deleted class {name} and its {n} annotation(s)"),
+        };
+        if self.execute(Command::RemoveClass { name, move_to }, cx).is_ok() {
+            self.set_status(format!("{what} (Ctrl+Z brings it back)"), cx);
+        }
+    }
+
+    /// Deletes every class without annotations in the project (not Measurement).
+    pub fn delete_empty_classes(&mut self, cx: &mut Context<Self>) {
+        let empty: Vec<String> = self.doc.classes.iter().filter(|c| c.name != crate::domain::command::MEASUREMENT && !self.doc.annotations.iter().any(|a| a.class == c.name)).map(|c| c.name.clone()).collect();
+        let keep_one = self.doc.classes.iter().filter(|c| c.name != crate::domain::command::MEASUREMENT).count() == empty.len();
+        let commands: Vec<Command> = empty.iter().skip(usize::from(keep_one)).map(|name| Command::RemoveClass { name: name.clone(), move_to: None }).collect();
+        let n = commands.len();
+        if n > 0 && self.execute(Command::Batch { commands }, cx).is_ok() {
+            self.set_status(format!("Deleted {n} empty class(es)"), cx);
+        }
+    }
+
+    /// Renames a class (its annotations follow).
+    pub fn rename_class(&mut self, from: String, to: String, cx: &mut Context<Self>) {
+        let _ = self.execute(Command::RenameClass { from, to }, cx);
+    }
+
+    /// Puts annotations in class `class`.
+    pub fn move_to_class(&mut self, ids: Vec<String>, class: String, cx: &mut Context<Self>) {
+        if !ids.is_empty() {
+            let _ = self.execute(Command::SetAnnotationsClass { ids, class }, cx);
+        }
+    }
+
+    /// Removes an image from the project (with its annotations and the nodes reading it); the
+    /// file stays where it is. Undoable.
+    pub fn remove_image(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(name) = self.doc.image(&id).map(|i| i.name.clone()) else { return };
+        let n = self.doc.annotations.iter().filter(|a| a.image == id).count();
+        if self.execute(Command::RemoveImage { id: id.clone() }, cx).is_ok() {
+            self.set_status(format!("Removed {name} from the project{} — the file is untouched (Ctrl+Z brings it back)", if n > 0 { format!(" with its {n} annotation(s)") } else { String::new() }), cx);
+        }
+    }
+
+    /// Removes a result (a view node of the pipeline).
+    pub fn remove_result(&mut self, id: String, cx: &mut Context<Self>) {
+        let _ = self.execute(Command::RemoveNodes { nodes: vec![id] }, cx);
+    }
+
+    /// The Delete key and the Delete buttons: the selected annotations, else the result layers
+    /// (masks, labels, images of the pipeline) selected in Layers. Classes go only from their
+    /// menu (they may hold many annotations).
     pub fn delete_selection(&mut self, cx: &mut Context<Self>) {
         if self.selection.is_empty() {
+            let views: Vec<String> = self.layers_selected.iter().filter_map(|k| k.strip_prefix("view:")).filter(|id| self.doc.graph.contains(id)).map(str::to_string).collect();
+            let n = views.len();
+            if n > 0 && self.execute(Command::RemoveNodes { nodes: views }, cx).is_ok() {
+                self.layers_selected.retain(|k| !k.starts_with("view:"));
+                self.set_status(format!("Removed {n} result layer(s) (Ctrl+Z brings them back)"), cx);
+            } else if self.layers_selected.iter().any(|k| k.starts_with("class:")) {
+                self.set_status("A class is deleted from its menu (right-click it in Layers)", cx);
+            }
             return;
         }
         let ids: Vec<String> = self.selection.iter().cloned().collect();

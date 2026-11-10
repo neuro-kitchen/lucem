@@ -240,19 +240,19 @@ pub(crate) fn xyz_to_rgb_kernel<F: lumen_core::element::ImageFloat>(
 
 #[cube]
 fn lab_f<F: Float>(t: F) -> F {
-    if t > F::new(0.008856451679035631) {
+    if t > F::new(0.008_856_452) {
         F::powf(t, F::new(1.0 / 3.0))
     } else {
-        F::new(7.787037037037037) * t + F::new(16.0 / 116.0)
+        F::new(7.787_037) * t + F::new(16.0 / 116.0)
     }
 }
 
 #[cube]
 fn lab_f_inv<F: Float>(t: F) -> F {
-    if t > F::new(0.20689655172413793) {
+    if t > F::new(0.206_896_56) {
         t * t * t
     } else {
-        (t - F::new(16.0 / 116.0)) / F::new(7.787037037037037)
+        (t - F::new(16.0 / 116.0)) / F::new(7.787_037)
     }
 }
 
@@ -311,10 +311,10 @@ pub(crate) fn xyz_to_luv_kernel<F: lumen_core::element::ImageFloat>(
         let y = xyz[base + 1usize];
         let z = xyz[base + 2usize];
 
-        let l = if y > F::new(0.008856451679035631) {
+        let l = if y > F::new(0.008_856_452) {
             F::new(116.0) * F::powf(y, F::new(1.0 / 3.0)) - F::new(16.0)
         } else {
-            F::new(903.2962962962963) * y
+            F::new(903.296_3) * y
         };
 
         let denom = x + F::new(15.0) * y + F::new(3.0) * z;
@@ -329,8 +329,8 @@ pub(crate) fn xyz_to_luv_kernel<F: lumen_core::element::ImageFloat>(
             F::new(0.0)
         };
 
-        let un = F::new(0.1978300066428368);
-        let vn = F::new(0.468319994938791);
+        let un = F::new(0.197_83);
+        let vn = F::new(0.468_319_98);
         luv[base] = l;
         luv[base + 1usize] = F::new(13.0) * l * (u_p - un);
         luv[base + 2usize] = F::new(13.0) * l * (v_p - vn);
@@ -355,15 +355,15 @@ pub(crate) fn luv_to_xyz_kernel<F: lumen_core::element::ImageFloat>(
             xyz[base + 1usize] = F::new(0.0);
             xyz[base + 2usize] = F::new(0.0);
         } else {
-            let un = F::new(0.1978300066428368);
-            let vn = F::new(0.468319994938791);
+            let un = F::new(0.197_83);
+            let vn = F::new(0.468_319_98);
             let up = u / (F::new(13.0) * l) + un;
             let vp = v / (F::new(13.0) * l) + vn;
             let y = if l > F::new(8.0) {
                 let t = (l + F::new(16.0)) / F::new(116.0);
                 t * t * t
             } else {
-                l / F::new(903.2962962962963)
+                l / F::new(903.296_3)
             };
             let x = y * F::new(9.0) * up / F::max(F::new(4.0) * vp, F::new(1e-12));
             let z = y * (F::new(12.0) - F::new(3.0) * up - F::new(20.0) * vp)
@@ -393,7 +393,7 @@ pub(crate) fn lab_to_lch_kernel<F: lumen_core::element::ImageFloat>(
         let bf = f32::cast_from(b);
         let mut h = f32::atan2(bf, af);
         if h < 0.0f32 {
-            h += 6.283185307179586f32;
+            h += core::f32::consts::TAU;
         }
         lch[base] = l;
         lch[base + 1usize] = c;

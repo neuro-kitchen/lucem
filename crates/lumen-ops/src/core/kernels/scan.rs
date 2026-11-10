@@ -61,7 +61,7 @@ pub fn scan_u32_blocks_kernel(
         let prev = if u >= step { sh[(u - step) as usize] } else { 0u32 };
         sync_cube();
         if u >= step {
-            sh[u as usize] = sh[u as usize] + prev;
+            sh[u as usize] += prev;
         }
         sync_cube();
         offset.store(step * 2u32);
@@ -88,6 +88,6 @@ pub fn scan_u32_add_offsets_kernel(
     let u = UNIT_POS_X;
     let global_idx = block * block_size + u;
     if global_idx < len {
-        output[global_idx as usize] = output[global_idx as usize] + block_offsets[block as usize];
+        output[global_idx as usize] += block_offsets[block as usize];
     }
 }

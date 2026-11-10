@@ -53,11 +53,13 @@ pub fn shape_index_2d_kernel<F: lumen_core::element::ImageFloat>(
         let l2 = f32::cast_from(eig2[i]);
         let diff = l1 - l2;
         let sum = l1 + l2;
-        if f32::abs(diff) <= 1e-12f32 {
-            out[i] = F::new(0.0f32);
+        let scale = f32::abs(l1) + f32::abs(l2);
+        if f32::abs(diff) <= 1e-6f32 * scale || scale <= 1e-20f32 {
+            // Equal curvatures (an umbilic point): the limit of the formula, +1 for a dome (both
+            // negative), -1 for a cup, 0 for a flat surface (scikit-image reaches it through -0.0)
+            out[i] = if sum < 0.0f32 && scale > 1e-20f32 { F::new(1.0f32) } else if sum > 0.0f32 && scale > 1e-20f32 { F::new(-1.0f32) } else { F::new(0.0f32) };
         } else {
-            // Note: with l1 >= l2, -sum / diff maps domes (l1 <= l2 < 0 -> wait: l1 >= l2, so for a bright peak both < 0)
-            // Standard Koenderink convention with k1 >= k2: (2/pi) * atan((-k1 - k2) / (k1 - k2))
+            // Koenderink's shape index with l1 >= l2: (2/pi) * atan((-l1 - l2) / (l1 - l2))
             let ratio = (-sum) / diff;
             // Rational Padé / atan approximation accurate across R via atan(x) identity
             let ax = f32::abs(ratio);

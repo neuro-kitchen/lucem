@@ -150,12 +150,12 @@ pub fn hausdorff_pair<A: Numeric + CubeElement, B: Numeric + CubeElement>(
     let pts_a: Vec<(usize, Vec<usize>)> = flags_a
         .iter()
         .enumerate()
-        .filter_map(|(i, &f)| (f != 0).then(|| (i, to_coords(i))))
+        .filter(|&(_i, &f)| f != 0).map(|(i, &_f)| (i, to_coords(i)))
         .collect();
     let pts_b: Vec<(usize, Vec<usize>)> = flags_b
         .iter()
         .enumerate()
-        .filter_map(|(i, &f)| (f != 0).then(|| (i, to_coords(i))))
+        .filter(|&(_i, &f)| f != 0).map(|(i, &_f)| (i, to_coords(i)))
         .collect();
 
     if pts_a.is_empty() || pts_b.is_empty() {

@@ -1,6 +1,6 @@
 [package]
 name = "lumen-ml"
-description = "Models for lumen on Burn (nuclei and cell segmentation, classifiers)"
+description = "The contract of lumen's machine-learning plugins: model manifests, the request protocol, discovery of plugin programs and a client (no model code, no ML runtime)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,3 +9,5 @@ license.workspace = true
 publish = false
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true

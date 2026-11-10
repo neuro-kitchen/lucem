@@ -26,11 +26,13 @@ pub enum Tool {
     Wand,
     /// Rapid segmentation: a live threshold of a channel, turned into annotations.
     Threshold,
+    /// A model (Segment Anything, through its plugin) outlines the object clicked or boxed.
+    Segment,
 }
 
 impl Tool {
     /// Tool bar order; `None` marks a separator.
-    pub const BAR: [Option<Tool>; 18] = [
+    pub const BAR: [Option<Tool>; 19] = [
         Some(Tool::Select),
         Some(Tool::Hand),
         Some(Tool::Zoom),
@@ -45,6 +47,7 @@ impl Tool {
         Some(Tool::Eraser),
         Some(Tool::Wand),
         Some(Tool::Threshold),
+        Some(Tool::Segment),
         None,
         Some(Tool::Ruler),
         Some(Tool::Probe),
@@ -66,6 +69,7 @@ impl Tool {
             Tool::Ruler => "Ruler",
             Tool::Probe => "Pixel probe",
             Tool::Wand => "Wand",
+            Tool::Segment => "Segment (SAM)",
             Tool::Threshold => "Threshold",
         }
     }
@@ -86,6 +90,7 @@ impl Tool {
             Tool::Ruler => "r",
             Tool::Probe => "i",
             Tool::Wand => "w",
+            Tool::Segment => "s",
             Tool::Threshold => "t",
         }
     }
@@ -109,6 +114,7 @@ impl Tool {
             Tool::Ruler => IconName::Ruler,
             Tool::Probe => IconName::Pipette,
             Tool::Wand => IconName::WandSparkles,
+            Tool::Segment => IconName::Sparkles,
             Tool::Threshold => IconName::Contrast,
         }
     }
@@ -124,11 +130,12 @@ impl Tool {
             Tool::Polygon => "Click its corners; Enter or double-click closes it",
             Tool::Lasso => "Drag around a region",
             Tool::Point => "Click to place a point",
-            Tool::Brush => "Paint the class; [ and ] change the size",
-            Tool::Eraser => "Erase painted regions of the class; [ and ] change the size",
+            Tool::Brush => "Paint the class; Shift paints a straight line; [ and ] change the size",
+            Tool::Eraser => "Erase paint of every class; Shift erases along a straight line; [ and ] change the size",
             Tool::Ruler => "Drag to measure a distance",
-            Tool::Probe => "Shows the pixel values under the pointer",
+            Tool::Probe => "Shows the pixel values under the pointer; click to move the 3D cursor there",
             Tool::Wand => "Paint: the brush fills only pixels like the one under its centre (tolerance in the options bar)",
+            Tool::Segment => "Click an object (Alt+click: not this) or drag a box around it; a model outlines it in the drawing class",
             Tool::Threshold => "Live threshold of a channel; Create annotations segments the whole image",
         }
     }
@@ -169,11 +176,46 @@ pub struct ToolState {
     pub threshold_above: bool,
     pub threshold_sigma: f64,
     pub threshold_min_area: f64,
+    /// The 3D cursor drawn as a crosshair on the plane.
+    pub crosshair: bool,
+    /// Brush: a stroke that ends near where it started also fills what it encloses.
+    pub brush_fill: bool,
+    /// Overlays (the reference viewer's toggles): annotations drawn, their regions filled, their
+    /// names written, and how opaque they are (0–1).
+    pub show_annotations: bool,
+    pub fill_annotations: bool,
+    pub show_names: bool,
+    pub overlay_opacity: f32,
+    /// Segment (SAM) in a volume: carry the object through the planes above and below.
+    pub sam_through_z: bool,
 }
 
 impl Default for ToolState {
     fn default() -> Self {
-        Self { tool: Tool::Select, brush_px: 24.0, brush_in_image: false, brush_image_px: 40.0, class: "Region".into(), rulers: true, show_results: true, wand_tolerance: 0.15, threshold_channel: 0, threshold_value: 0.0, threshold_above: true, threshold_sigma: 2.0, threshold_min_area: 50.0 }
+        Self { tool: Tool::Select, brush_px: 24.0, brush_in_image: false, brush_image_px: 40.0, class: "Region".into(), rulers: true, show_results: true, wand_tolerance: 0.15, threshold_channel: 0, threshold_value: 0.0, threshold_above: true, threshold_sigma: 2.0, threshold_min_area: 50.0, crosshair: false, brush_fill: false, show_annotations: true, fill_annotations: true, show_names: false, overlay_opacity: 1.0, sam_through_z: false }
+    }
+}
+
+/// What is drawn over the image: the overlays of the Overlays popover. A view may keep its own
+/// (`ImageCanvas::overlays`), else it follows the tool state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Overlays {
+    pub annotations: bool,
+    pub fill: bool,
+    pub names: bool,
+    pub results: bool,
+    pub crosshair: bool,
+    pub rulers: bool,
+    pub opacity: f32,
+}
+
+impl ToolState {
+    pub fn overlays(&self) -> Overlays {
+        Overlays { annotations: self.show_annotations, fill: self.fill_annotations, names: self.show_names, results: self.show_results, crosshair: self.crosshair, rulers: self.rulers, opacity: self.overlay_opacity }
+    }
+
+    pub fn set_overlays(&mut self, o: Overlays) {
+        (self.show_annotations, self.fill_annotations, self.show_names, self.show_results, self.crosshair, self.rulers, self.overlay_opacity) = (o.annotations, o.fill, o.names, o.results, o.crosshair, o.rulers, o.opacity);
     }
 }
 

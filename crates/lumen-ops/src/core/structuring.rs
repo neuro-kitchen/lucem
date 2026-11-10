@@ -74,8 +74,8 @@ impl StructuringElement {
         let mut mask = vec![false; shape.len()];
         for (idx, active) in mask.iter_mut().enumerate() {
             let mut sq_dist = 0usize;
-            for d in 0..ndim {
-                let coord = (idx / strides[d]) % 3;
+            for &stride in strides.iter().take(ndim) {
+                let coord = (idx / stride) % 3;
                 let delta = coord.abs_diff(1);
                 sq_dist += delta * delta;
             }

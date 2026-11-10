@@ -21,6 +21,9 @@ actions!(
         GoAnalyze,
         ToggleSidebar,
         ToggleRulers,
+        OpenSettings,
+        ToggleLeftPanel,
+        ToggleRightPanel,
     ]
 );
 
@@ -44,6 +47,9 @@ pub fn bind_keys(cx: &mut App) {
         os_binding("secondary-2", GoPipeline, cx),
         os_binding("secondary-3", GoAnalyze, cx),
         os_binding("secondary-r", ToggleRulers, cx),
+        os_binding("secondary-,", OpenSettings, cx),
+        os_binding("secondary-[", ToggleLeftPanel, cx),
+        os_binding("secondary-]", ToggleRightPanel, cx),
     ];
     cx.bind_keys(global);
     cx.bind_keys([KeyBinding::new("f1", ShowHelp, None), KeyBinding::new("f3", CommandPalette, None), KeyBinding::new("tab", ToggleSidebar, Some("ImageCanvas"))]);
@@ -60,6 +66,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Z / Ctrl+Shift+Z", "Undo / redo any change"),
             ("Ctrl+1 / 2 / 3", "Explore · Pipeline · Analyze"),
             ("Ctrl+R", "Rulers on / off"),
+            ("Ctrl+,", "Settings (theme, accent, sizes)"),
+            ("Ctrl+[ / Ctrl+]", "Show / hide the left (Layers) / right (studio) panels"),
             ("F1", "This list"),
         ],
     ),
@@ -77,7 +85,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("R I", "Ruler · Pixel probe"),
             ("Enter · Esc · Backspace", "Close the polygon · cancel · remove its last point"),
             ("Delete", "Delete the selected annotations"),
-            ("Tab", "Hide / show the side panels"),
+            ("Tab", "Hide / show both side panels"),
+            ("Drag a number", "Any value with − and + (and every %) changes as you drag it left or right"),
         ],
     ),
 ];

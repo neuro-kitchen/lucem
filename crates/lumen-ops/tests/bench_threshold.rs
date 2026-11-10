@@ -1,7 +1,7 @@
 //! Kernel vs. end-to-end benchmarks for `lumen_ops::threshold`.
 
 use lumen_core::{
-    compute::time_device,
+    compute::bench::time_device,
     cubecl::prelude::Client,
     memory::DeviceArray,
     ComputeTarget, Shape,
@@ -24,10 +24,10 @@ fn bench_threshold_suite(client: &Client) {
         let _ = yen_device(client, &arr, 256).unwrap();
     });
     let nib_t = time_device(client, iters, || {
-        let _ = niblack(client, &arr, &[15, 15], &WindowThreshold::default()).unwrap();
+        let _ = niblack(client, &arr, &WindowThreshold::default()).unwrap();
     });
     let sauv_t = time_device(client, iters, || {
-        let _ = sauvola(client, &arr, &[15, 15], &WindowThreshold::default()).unwrap();
+        let _ = sauvola(client, &arr, &WindowThreshold::default()).unwrap();
     });
     let hyst_t = time_device(client, iters, || {
         let _ = hysteresis_threshold(client, &arr, 0.3, 0.7).unwrap();

@@ -98,7 +98,7 @@ pub(crate) fn clahe_tile_cdfs_kernel<F: lumen_core::element::ImageFloat>(
                     u32::cast_from(F::floor(norm * F::cast_from(num_bins - 1u32) + F::new(0.5))),
                     num_bins - 1u32,
                 );
-                tile_cdfs[(base + bin) as usize] = tile_cdfs[(base + bin) as usize] + F::new(1.0);
+                tile_cdfs[(base + bin) as usize] += F::new(1.0);
                 count += 1u32;
                 x += 1u32;
             }

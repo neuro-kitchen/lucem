@@ -31,6 +31,9 @@ use crate::ui::widgets::icon_button;
 
 use super::catalog::{describe, kind_color, port_color, Template};
 
+/// An edge as drawn: from, to, colour, whether it is selected, whether it is live.
+type EdgeLine = ((f32, f32), (f32, f32), Hsla, bool, bool);
+
 /// A node's size in canvas units.
 pub const NODE_W: f32 = 216.;
 pub const NODE_H: f32 = 184.;
@@ -112,7 +115,8 @@ impl GraphCanvas {
             space: false,
             hand: false,
             show_grid: true,
-            show_minimap: true,
+            // Off until asked for: it covers nodes in a small pane
+            show_minimap: false,
             bounds: Rc::new(Cell::new(Bounds::default())),
             fit_pending: true,
             _subs: subs,
@@ -286,11 +290,10 @@ impl GraphCanvas {
             if let NodeKind::View { name, .. } = &mut kind {
                 *name = format!("{name} (copy)");
             }
-            if self.exec(Command::AddNode { kind, x: n.x + 32.0, y: n.y + 32.0, id: None, after: None }, cx) {
-                if let Some(new) = self.graph(cx).nodes.iter().map(|n| n.id.clone()).find(|i| !before.contains(i)) {
+            if self.exec(Command::AddNode { kind, x: n.x + 32.0, y: n.y + 32.0, id: None, after: None }, cx)
+                && let Some(new) = self.graph(cx).nodes.iter().map(|n| n.id.clone()).find(|i| !before.contains(i)) {
                     map.insert(id.clone(), new);
                 }
-            }
         }
         for e in &g.edges {
             if let (Some(a), Some(b)) = (map.get(&e.from), map.get(&e.to)) {
@@ -649,7 +652,7 @@ impl GraphCanvas {
         let b = |name: &'static str, icon: IconName, tip: &'static str, f: fn(&mut GraphCanvas, &mut Context<GraphCanvas>)| {
             let me = me.clone();
             icon_button(SharedString::from(format!("canvas-{name}")), Icon::new(icon), tip).on_click(move |_, _, cx| {
-                let _ = me.update(cx, |c, cx| f(c, cx));
+                let _ = me.update(cx, f);
             })
         };
         h_flex()
@@ -665,7 +668,12 @@ impl GraphCanvas {
             .shadow_md()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(b("zoom-out", IconName::ZoomOut, "Zoom out (Ctrl −)", |c, cx| c.zoom_by(0.8, None, cx)))
-            .child(div().w(px(44.)).text_xs().text_center().child(format!("{:.0} %", self.zoom * 100.0)))
+            .child(div().w(px(48.)).text_xs().child({
+                let me = me.clone();
+                crate::ui::widgets::scrub_label("canvas-zoom", format!("{:.0} %", self.zoom * 100.0), move |d, _, cx| {
+                    let _ = me.update(cx, |c, cx| c.zoom_by(if d > 0.0 { 1.05 } else { 1.0 / 1.05 }, None, cx));
+                })
+            }))
             .child(b("zoom-in", IconName::ZoomIn, "Zoom in (Ctrl +)", |c, cx| c.zoom_by(1.25, None, cx)))
             .child(b("fit", IconName::Maximize, "Fit the graph (F)", |c, cx| c.fit(cx)))
             .child(b("grid", IconName::LayoutGrid, "Dot grid", |c, cx| {
@@ -768,7 +776,7 @@ impl Render for GraphCanvas {
         let faded = |id: &str| highlight.as_ref().is_some_and(|h| !h.contains(id));
 
         // Edges coloured by what they carry
-        let mut edges: Vec<((f32, f32), (f32, f32), Hsla, bool, bool)> = Vec::new();
+        let mut edges: Vec<EdgeLine> = Vec::new();
         for e in &g.edges {
             let (Some(a), Some(b)) = (g.node(&e.from), g.node(&e.to)) else { continue };
             let pa = self.pos(&a.id, a.x, a.y);
@@ -816,7 +824,7 @@ impl Render for GraphCanvas {
                     }
                 }
                 let at = |p: (f32, f32)| (p.0 + o.x.as_f32(), p.1 + o.y.as_f32());
-                let mut order: Vec<&((f32, f32), (f32, f32), Hsla, bool, bool)> = edges.iter().collect();
+                let mut order: Vec<&EdgeLine> = edges.iter().collect();
                 order.sort_by_key(|e| e.3);
                 for (a, b, c, lit, dim) in order {
                     let (col, width) = if *lit { (*c, 3.0) } else if *dim { (c.opacity(0.2), 1.5) } else { (c.opacity(0.75), 2.0) };
@@ -824,11 +832,10 @@ impl Render for GraphCanvas {
                         window.paint_path(p, col);
                     }
                 }
-                if let Some((a, b, c)) = pending {
-                    if let Some(p) = edge_path(at(a), at(b), 2.0) {
+                if let Some((a, b, c)) = pending
+                    && let Some(p) = edge_path(at(a), at(b), 2.0) {
                         window.paint_path(p, c);
                     }
-                }
                 if let Some((a, b)) = marquee {
                     let (a, b) = (at(a), at(b));
                     let r = Bounds { origin: point(px(a.0.min(b.0)), px(a.1.min(b.1))), size: size(px((a.0 - b.0).abs()), px((a.1 - b.1).abs())) };
@@ -871,7 +878,9 @@ impl Render for GraphCanvas {
                 .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("An empty pipeline"))
                 .child(div().text_sm().text_color(color::text_muted()).child("Drag a source and operations from the library on the left, or apply an operation in Explore."))
         });
-        let minimap = if self.show_minimap { self.minimap(&g, cx).map(IntoElement::into_any_element) } else { None };
+        // Never over a pane too small to work around it (the Pipeline docked under the views)
+        let roomy = { let b = self.bounds.get().size; b.height.as_f32() > 3.0 * MAP_H && b.width.as_f32() > 3.0 * MAP_W };
+        let minimap = if self.show_minimap && roomy { self.minimap(&g, cx).map(IntoElement::into_any_element) } else { None };
         if self.fit_pending && self.bounds.get().size.width.as_f32() > 10.0 {
             self.fit_pending = false;
             let me = cx.entity().downgrade();

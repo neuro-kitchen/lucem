@@ -195,7 +195,7 @@ mod tests {
         let split = shape.axis_split(axis);
         let left = (w.len() / 2) as isize + (origin as isize);
         let mut out = vec![0.0; x.len()];
-        for idx in 0..x.len() {
+        for (idx, o) in out.iter_mut().enumerate() {
             let i = (idx / split.inner) % split.len;
             let base = idx - i * split.inner;
             let start = (i as isize) - left;
@@ -203,7 +203,7 @@ mod tests {
             for (t, &wt) in w.iter().enumerate() {
                 sum += wt * host_read_padded(x, base, split.inner, start + (t as isize), split.len, cval, mode);
             }
-            out[idx] = sum;
+            *o = sum;
         }
         out
     }

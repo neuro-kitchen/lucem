@@ -1,0 +1,18 @@
+[package]
+name = "lumen-ml-sam"
+description = "lumen's Segment Anything plugin: a separate program the app runs (lumen-ml protocol over stdin / stdout)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "lumen-ml-sam"
+path = "src/main.rs"
+
+[dependencies]
+lumen-ml = { path = "../../../crates/lumen-ml" }
+lumen-model-sam.workspace = true
+serde_json.workspace = true

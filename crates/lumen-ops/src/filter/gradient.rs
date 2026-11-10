@@ -67,6 +67,7 @@ impl StencilKind {
 }
 
 /// Computes a single directional derivative along `deriv_axis` for `kind` into `output`.
+#[allow(clippy::too_many_arguments)]
 pub fn directional_stencil_into<F: ImageFloat>(
     client: &Client,
     input: &DeviceArray<F>,

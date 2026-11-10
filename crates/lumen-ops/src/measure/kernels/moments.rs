@@ -24,13 +24,13 @@ pub fn moment_monomial_2d_kernel<F: lumen_core::element::ImageFloat>(
         let mut yp = F::new(1.0f32);
         let mut k = 0u32;
         while k < p {
-            yp = yp * y;
+            yp *= y;
             k += 1u32;
         }
         let mut xq = F::new(1.0f32);
         let mut m = 0u32;
         while m < q {
-            xq = xq * x;
+            xq *= x;
             m += 1u32;
         }
         output[i] = input[i] * yp * xq;

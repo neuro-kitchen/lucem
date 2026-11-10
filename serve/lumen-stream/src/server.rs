@@ -218,7 +218,7 @@ fn describe(p: &Pyramid) -> ImageInfo {
 
 async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images: Arc<Images>) -> StreamResult<()> {
     let request: Request = read_message(&mut recv).await?;
-    let result = tokio::task::spawn_blocking(move || work(&images, request)).await.map_err(|e| StreamError::protocol(e))?;
+    let result = tokio::task::spawn_blocking(move || work(&images, request)).await.map_err(StreamError::protocol)?;
     match result {
         Ok((response, payload)) => {
             write_message(&mut send, &response).await?;

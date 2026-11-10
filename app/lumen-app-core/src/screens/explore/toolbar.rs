@@ -1,5 +1,5 @@
-//! The image tools: a floating tool bar over the canvas (Figma / Affinity style: no extra strip of
-//! chrome) and the options bar on top, whose controls follow the active tool (Photoshop).
+//! The image tools: a tool column docked at the left edge (Affinity), so it never covers the
+//! image, and the options bar on top, whose controls follow the active tool (Photoshop).
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -14,23 +14,20 @@ use crate::screens::explore::canvas::ImageCanvas;
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::{divider_v, format_area, format_length, stepper, swatch, MenuSelect};
 
-/// The tool bar floating at the canvas's left edge.
+/// The tool column at the left edge of Explore.
 pub fn tool_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> impl IntoElement + use<> {
     let current = store.read(cx).tool.tool;
     let mut bar = v_flex()
         .id("tool-bar")
-        .occlude()
-        .absolute()
-        .left(px(theme::MD))
-        .top(px(theme::MD + theme::RULER))
-        .p(px(theme::XS))
+        .flex_none()
+        .w(px(theme::TOOLBAR_W))
+        .h_full()
+        .py(px(theme::SM))
         .gap(px(2.))
         .items_center()
-        .rounded(px(8.))
-        .border_1()
-        .border_color(color::border())
-        .bg(color::raised().opacity(0.96))
-        .shadow_lg();
+        .bg(color::chrome())
+        .border_r_1()
+        .border_color(color::border());
     for slot in Tool::BAR {
         match slot {
             Some(t) => {
@@ -63,13 +60,14 @@ fn hint(text: impl Into<SharedString>) -> impl IntoElement {
 }
 
 /// The options bar of the active tool.
-pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> impl IntoElement + use<> {
+pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing: gpui_kit::AnyElement, cx: &App) -> impl IntoElement + use<> {
     let s = store.read(cx);
     let t = s.tool.clone();
     let classes: Vec<String> = s.doc.classes.iter().filter(|c| c.name != "Measurement").map(|c| c.name.clone()).collect();
     let class_color = s.doc.class(&t.class).map_or([255, 255, 255], |c| c.color);
     let selected = s.selection.len();
     let um = s.active_pyramid().and_then(|p| p.pixel_size_um);
+    let volume = s.active_pyramid().is_some_and(|p| p.is_volume());
     let zoom = canvas.read(cx).zoom;
     let img = s.doc.active().cloned();
     let hist = img.as_ref().and_then(|i| s.histograms.get(&i.id)).and_then(|h| h.get(t.threshold_channel).cloned());
@@ -126,7 +124,14 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App
                 }));
                 bar = bar.child(hint("Fills pixels like the one under the centre (visible channels)"));
             } else {
-                bar = bar.child(hint("[ ] resize"));
+                if t.tool == Tool::Brush {
+                    let st = store.clone();
+                    bar = bar.child(Checkbox::new("brush-fill").checked(t.brush_fill).label("Fill when closed").on_click(move |on: &bool, _, cx| {
+                        let on = *on;
+                        st.update(cx, |s, cx| s.update_tool(|t| t.brush_fill = on, cx));
+                    }));
+                }
+                bar = bar.child(hint("[ ] resize · Shift: straight line"));
             }
         }
         Tool::Threshold => {
@@ -172,6 +177,31 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App
                 .child(Button::new("thr-make").primary().small().icon(Icon::new(IconName::Shapes)).label("Create annotations").tooltip("Segment the whole image with these settings").on_click(move |_, _, cx| st_make.update(cx, |s, cx| s.threshold_to_annotations(cx))))
                 .child(Button::new("thr-pipe").ghost().small().icon(Icon::new(IconName::Workflow)).label("Add to pipeline").on_click(move |_, _, cx| st_pipe.update(cx, |s, cx| s.threshold_to_pipeline(cx))));
         }
+        Tool::Segment => {
+            // The model that will run, and whether it can
+            let model = s.ml.segmenter(s.prefs.ml_model.as_deref());
+            let state = match (&s.ml.busy, &model) {
+                (Some((what, f)), _) => format!("{what}{}", f.map_or(String::new(), |f| format!(" {:.0} %", f * 100.0))),
+                (None, Some((_, id, true))) => format!("Model: {id}"),
+                (None, Some((_, id, false))) => format!("{id} is not installed"),
+                (None, None) if !s.ml.scanned || s.ml.scanning => "Looking for model plugins…".to_string(),
+                (None, None) => "No model plugin found".to_string(),
+            };
+            let ready = matches!(model, Some((_, _, true)));
+            bar = bar
+                .child(class_picker())
+                .child(divider_v())
+                .child(div().text_sm().text_color(if ready || s.ml.busy.is_some() { color::text() } else { color::warning() }).child(state))
+                .child(Button::new("segment-models").ghost().small().icon(Icon::new(IconName::Settings)).label("Models…").on_click(|_, window, cx| window.dispatch_action(Box::new(crate::navigation::actions::OpenSettings), cx)));
+            if volume {
+                let st = store.clone();
+                bar = bar.child(divider_v()).child(Checkbox::new("segment-through-z").checked(t.sam_through_z).label("Through z").on_click(move |on: &bool, _, cx| {
+                    let on = *on;
+                    st.update(cx, |s, cx| s.update_tool(|t| t.sam_through_z = on, cx));
+                }));
+            }
+            bar = bar.child(hint(if volume && t.sam_through_z { "Click an object: it is followed plane by plane while the model is sure of it" } else { "Click an object · Alt+click: not this · drag a box" }));
+        }
         Tool::Rect | Tool::Ellipse | Tool::Lasso | Tool::Point => bar = bar.child(class_picker()),
         Tool::Polygon => bar = bar.child(class_picker()).child(hint("Click corners · Enter or double-click closes · Esc cancels")),
         Tool::Ruler => bar = bar.child(hint(if um.is_some() { "Drag to measure (µm from the image's pixel size)" } else { "Drag to measure (px: the image has no pixel size)" })),
@@ -186,14 +216,58 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App
     }
     let (c1, c2) = (canvas.clone(), canvas.clone());
     let (st_r, st_v) = (store.clone(), store.clone());
-    bar.child(div().flex_1())
-        .child(Button::new("options-results").ghost().small().icon(Icon::new(IconName::Layers)).label("Results").selected(t.show_results).tooltip("Draw the pipeline's results over the image").on_click(move |_, _, cx| {
-            st_v.update(cx, |s, cx| s.update_tool(|t| t.show_results = !t.show_results, cx))
-        }))
-        .child(Button::new("options-rulers").ghost().small().icon(Icon::new(IconName::Ruler)).selected(t.rulers).tooltip("Rulers (Ctrl+R)").on_click(move |_, _, cx| st_r.update(cx, |s, cx| s.update_tool(|t| t.rulers = !t.rulers, cx))))
+    // Each tool shows its own hint above; then what the caller puts on the right (Overlays)
+    let _ = (st_r, st_v, c1, c2);
+    bar.child(div().flex_1().min_w_0()).child(trailing)
+}
+
+/// The Overlays popover (the reference viewer's toggles, in one place): annotations, their fill
+/// and names, the pipeline's results, the crosshair, the rulers, and the annotations' opacity.
+/// The overlays as buttons on the options bar (what is drawn over the image, and how opaque),
+/// always in reach: the first one switches between the overlays shared by every view and the
+/// focused view's own.
+pub fn overlay_toggles(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> impl IntoElement + use<> {
+    let own = canvas.read(cx).overlays;
+    let shared = store.read(cx).tool.overlays();
+    let o = own.unwrap_or(shared);
+    let toggle = |id: &'static str, icon: IconName, tip: &'static str, on: bool, f: fn(&mut crate::domain::tool::Overlays)| {
+        let cv = canvas.clone();
+        Button::new(id).ghost().small().icon(Icon::new(icon)).selected(on).tooltip(tip).on_click(move |_, _, cx| cv.update(cx, |c, cx| c.toggle_overlay(f, cx)))
+    };
+    let scope = {
+        let cv = canvas.clone();
+        Button::new("ov-scope")
+            .ghost()
+            .small()
+            .icon(Icon::new(if own.is_some() { IconName::Unlink } else { IconName::Link }))
+            .selected(own.is_some())
+            .tooltip(if own.is_some() { "This view has its own overlays (click: follow the shared ones)" } else { "Overlays shared by every view (click: this view only)" })
+            .on_click(move |_, _, cx| {
+                cv.update(cx, |c, cx| {
+                    c.overlays = if c.overlays.is_some() { None } else { Some(shared) };
+                    cx.notify();
+                })
+            })
+    };
+    let cv = canvas.clone();
+    let opacity = crate::ui::widgets::scrub_label("ov-opacity", format!("{:.0} %", o.opacity * 100.0), move |d, _, cx| {
+        cv.update(cx, |c, cx| c.toggle_overlay(move |o| o.opacity = (o.opacity + d * 0.05).clamp(0.0, 1.0), cx))
+    });
+    h_flex()
+        .flex_none()
+        .gap(px(1.))
+        .items_center()
+        .child(scope)
         .child(divider_v())
-        .child(Button::new("options-fit").ghost().small().icon(Icon::new(IconName::Maximize)).tooltip("Fit (F · Ctrl+0)").on_click(move |_, _, cx| c1.update(cx, |c, cx| c.fit(cx))))
-        .child(Button::new("options-100").ghost().small().label("1:1").tooltip("Actual pixels (Ctrl+1)").on_click(move |_, _, cx| c2.update(cx, |c, cx| c.actual_size(cx))))
+        .child(toggle("ov-annotations", IconName::Shapes, "Annotations (A)", o.annotations, |o| o.annotations = !o.annotations))
+        .child(toggle("ov-fill", IconName::PaintBucket, "Fill regions (Shift+F)", o.fill, |o| o.fill = !o.fill))
+        .child(toggle("ov-names", IconName::Type, "Names (Shift+N)", o.names, |o| o.names = !o.names))
+        .child(toggle("ov-results", IconName::ChartColumn, "Pipeline results", o.results, |o| o.results = !o.results))
+        .child(toggle("ov-crosshair", IconName::Crosshair, "Crosshair (3D cursor)", o.crosshair, |o| o.crosshair = !o.crosshair))
+        .child(toggle("ov-rulers", IconName::Ruler, "Rulers (Ctrl+R)", o.rulers, |o| o.rulers = !o.rulers))
+        .child(divider_v())
+        .child(div().flex_none().text_xs().text_color(color::text_muted()).pr(px(2.)).child("Opacity"))
+        .child(div().flex_none().w(px(44.)).text_xs().font_family("monospace").child(opacity))
 }
 
 fn trim(v: f32) -> String {

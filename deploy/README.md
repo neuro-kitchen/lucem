@@ -45,11 +45,13 @@ podman run --rm -p 50051:50051/udp --device nvidia.com/gpu=all --security-opt=la
 ```
 
 A pipeline over a whole image (`spec.json` is described in `engine/lumen-pipeline/src/spec.rs`; it is
-written next to the output as a record):
+written next to the output as a record). When the server is running on the same folder, mount it
+with `:z` in both (shared SELinux label): `:Z` gives the folder to one container only, and each new
+container would take it from the others (the server then cannot read its client registry).
 
 ```bash
 podman run --rm --device nvidia.com/gpu=all --security-opt=label=disable --userns=keep-id:uid=10001,gid=10001 \
-  -v ~/lumen-data:/data:Z lumen-serve:nvidia run /data/spec.json /data/slide.ome.zarr /data/mask.ome.zarr
+  -v ~/lumen-data:/data:z lumen-serve:nvidia run /data/spec.json /data/slide.ome.zarr /data/mask.ome.zarr
 ```
 
 ## Who can connect

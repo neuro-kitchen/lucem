@@ -85,7 +85,7 @@ fn parse_bytes(text: &str) -> Option<u64> {
         "gib" => 1024.0 * 1024.0 * 1024.0,
         _ => return None,
     };
-    (value >= 0.0).then(|| (value * scale) as u64)
+    (value >= 0.0).then_some((value * scale) as u64)
 }
 
 #[cfg(test)]

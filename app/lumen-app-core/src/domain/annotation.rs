@@ -44,6 +44,16 @@ pub struct Annotation {
     pub class: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// The plane of a volume it was drawn on (level-0 planes); `None`: every plane (2D images).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<usize>,
+}
+
+impl Annotation {
+    /// Whether it shows on plane `z` (level-0 planes).
+    pub fn on_plane(&self, z: usize) -> bool {
+        self.z.is_none_or(|p| p == z)
+    }
 }
 
 /// A class of annotations: a name and a colour.
@@ -54,15 +64,26 @@ pub struct ClassDoc {
     pub color: [u8; 3],
     #[serde(default = "yes")]
     pub visible: bool,
+    /// How opaque its annotations are drawn (0–1), times the overlays' opacity.
+    #[serde(default = "opaque", skip_serializing_if = "is_opaque")]
+    pub opacity: f32,
 }
 
 fn yes() -> bool {
     true
 }
 
+fn opaque() -> f32 {
+    1.0
+}
+
+fn is_opaque(v: &f32) -> bool {
+    *v >= 1.0
+}
+
 /// The classes a new project starts with (histology first).
 pub fn default_classes() -> Vec<ClassDoc> {
-    let c = |name: &str, color: [u8; 3]| ClassDoc { name: name.into(), color, visible: true };
+    let c = |name: &str, color: [u8; 3]| ClassDoc { name: name.into(), color, visible: true, opacity: 1.0 };
     vec![
         c("Region", [255, 196, 0]),
         c("Tumor", [230, 70, 70]),
@@ -131,6 +152,8 @@ impl Shape {
             Shape::Rect { w, h, .. } => Some((w * h).abs()),
             Shape::Ellipse { rx, ry, .. } => Some(std::f64::consts::PI * rx.abs() * ry.abs()),
             Shape::Polygon { points } | Shape::Freehand { points } => Some(polygon_area(points)),
+            // A brush stroke covers what it painted (an eraser stroke covers nothing)
+            Shape::Stroke { points, radius, erase: false } => Some(stroke_area(points, *radius)),
             _ => None,
         }
     }
@@ -186,7 +209,7 @@ impl Shape {
         }
         match self {
             Shape::Polygon { points } | Shape::Freehand { points } if points.len() < 3 => Err("a region needs at least 3 points".into()),
-            Shape::Stroke { points, radius, .. } if points.is_empty() || !(*radius > 0.0) => Err("a stroke needs points and a radius".into()),
+            Shape::Stroke { points, radius, .. } if points.is_empty() || radius.is_nan() || *radius <= 0.0 => Err("a stroke needs points and a radius".into()),
             Shape::Rect { w, h, .. } if *w <= 0.0 || *h <= 0.0 => Err("a rectangle needs a size".into()),
             Shape::Ellipse { rx, ry, .. } if *rx <= 0.0 || *ry <= 0.0 => Err("an ellipse needs a size".into()),
             _ => Ok(()),
@@ -250,16 +273,32 @@ fn near_path(p: &[[f64; 2]], closed: bool, x: f64, y: f64, tol: f64) -> bool {
     segs.into_iter().any(|(a, b)| seg_dist(a, b, x, y) <= tol)
 }
 
+/// The area a brush stroke paints (level-0 px²): rasterized at about 4 px across the brush.
+fn stroke_area(points: &[[f64; 2]], radius: f64) -> f64 {
+    if points.is_empty() || radius <= 0.0 {
+        return 0.0;
+    }
+    let (x0, y0, x1, y1) = points.iter().fold((f64::MAX, f64::MAX, f64::MIN, f64::MIN), |b, p| (b.0.min(p[0]), b.1.min(p[1]), b.2.max(p[0]), b.3.max(p[1])));
+    let (bw, bh) = (x1 - x0 + 2.0 * radius + 2.0, y1 - y0 + 2.0 * radius + 2.0);
+    let ds = (radius / 4.0).max(bw.max(bh) / 2048.0).max(1e-3);
+    let (w, h) = (((bw / ds).ceil() as usize).max(1), ((bh / ds).ceil() as usize).max(1));
+    let moved: Vec<[f64; 2]> = points.iter().map(|p| [p[0] - x0 + radius + 1.0, p[1] - y0 + radius + 1.0]).collect();
+    let a = Annotation { id: String::new(), image: String::new(), shape: Shape::Stroke { points: moved, radius, erase: false }, class: String::new(), note: String::new(), z: None };
+    rasterize(&[&a], None, 0, 0, w, h, ds).iter().filter(|&&v| v != 0).count() as f64 * ds * ds
+}
+
 /// A mask (`width × height`, 0 / 1) of the annotations of `class` (all regions and strokes when
 /// `None`) over the region `(x0, y0)` of a level whose pixels are `downsample` level-0 px.
-/// Regions and brush strokes fill it in drawing order; eraser strokes clear it.
+/// Regions and brush strokes fill it in drawing order; eraser strokes (of any class) clear it.
 pub fn rasterize(annotations: &[&Annotation], class: Option<&str>, x0: usize, y0: usize, width: usize, height: usize, downsample: f64) -> Vec<u32> {
     let mut mask = vec![0u32; width * height];
     let ds = downsample.max(1e-9);
     // Level-0 point → region pixel (fractional)
     let to = |[x, y]: [f64; 2]| [x / ds - x0 as f64, y / ds - y0 as f64];
     for a in annotations {
-        if class.is_some_and(|c| c != a.class) {
+        // An eraser clears every class (as on the canvas), a region or brush stroke fills its own
+        let eraser = matches!(a.shape, Shape::Stroke { erase: true, .. });
+        if !eraser && class.is_some_and(|c| c != a.class) {
             continue;
         }
         match &a.shape {
@@ -326,7 +365,7 @@ fn fill_polygon(mask: &mut [u32], w: usize, h: usize, poly: &[[f64; 2]], v: u32)
             }
         }
         xs.sort_by(|a, b| a.total_cmp(b));
-        for pair in xs.chunks_exact(2) {
+        for pair in xs.as_chunks::<2>().0 {
             let xa = (pair[0] - 0.5).ceil().max(0.0) as usize;
             let xb = ((pair[1] - 0.5).floor() as isize).min(w as isize - 1);
             if xb < 0 {
@@ -344,7 +383,7 @@ mod tests {
     use super::*;
 
     fn ann(shape: Shape) -> Annotation {
-        Annotation { id: "a".into(), image: "img1".into(), shape, class: "Region".into(), note: String::new() }
+        Annotation { id: "a".into(), image: "img1".into(), shape, class: "Region".into(), note: String::new(), z: None }
     }
 
     #[test]
@@ -367,5 +406,9 @@ mod tests {
         // At a level of half the resolution, the same rectangle is 3 px wide
         let m2 = rasterize(&[&rect], None, 0, 0, 5, 5, 2.0);
         assert_eq!(m2.iter().filter(|&&v| v == 1).count(), 9);
+        // An eraser of another class clears too
+        let other = Annotation { class: "Other".into(), ..erase.clone() };
+        let m3 = rasterize(&[&rect, &other], Some("Region"), 0, 0, 10, 10, 1.0);
+        assert_eq!(m3[4 * 10 + 4], 0, "erased by another class's eraser");
     }
 }

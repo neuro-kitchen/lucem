@@ -113,7 +113,7 @@ pub(crate) fn add_poisson_noise_kernel<F: lumen_core::element::ImageFloat>(
             while k < 128u32 {
                 k += 1u32;
                 let u = f32::max(uniform_f32(seed, idx * 131u32 + k), 1e-7f32);
-                p = p * u;
+                p *= u;
                 if p <= l {
                     break;
                 }

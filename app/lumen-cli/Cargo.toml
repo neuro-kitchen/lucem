@@ -22,6 +22,7 @@ hip = ["lumen-core/hip", "lumen-ops/hip"]
 [dependencies]
 lumen-core = { workspace = true, features = ["compute"] }
 lumen-io.workspace = true
+lumen-hist = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
 lumen-ops.workspace = true
 lumen-pipeline.workspace = true
 lumen-stream.workspace = true

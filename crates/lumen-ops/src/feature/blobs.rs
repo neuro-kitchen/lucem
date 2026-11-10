@@ -135,6 +135,7 @@ fn circle_overlap_fraction(a: &Blob, b: &Blob) -> f64 {
 }
 
 /// Extracts 3-D `(scale, y, x)` local maxima from a stack of scale responses and prunes overlapping blobs.
+#[allow(clippy::needless_range_loop)] // neighbourhood / DP index arithmetic reads clearer with indices
 fn extract_scale_space_blobs(
     cube: &[Vec<f64>],
     sigmas: &[f64],

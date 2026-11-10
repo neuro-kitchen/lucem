@@ -71,7 +71,7 @@ impl LoadedImage {
     /// Uploads the `[height, width, 3]` RGB tensor to the active CubeCL [`Client`].
     pub fn to_device_rgb(&self, client: &Client) -> IoResult<DeviceArray<f32>> {
         let mut rgb = Vec::with_capacity(self.height * self.width * 3);
-        for px in self.rgba_f32.chunks_exact(4) {
+        for px in self.rgba_f32.as_chunks::<4>().0 {
             rgb.push(px[0]);
             rgb.push(px[1]);
             rgb.push(px[2]);
@@ -125,7 +125,7 @@ pub fn load_image_file(path: impl AsRef<Path>) -> IoResult<LoadedImage> {
     let mut luminance_f32 = Vec::with_capacity(n);
     let mut rgba_f32 = Vec::with_capacity(n * 4);
 
-    for px in raw.chunks_exact(4) {
+    for px in raw.as_chunks::<4>().0 {
         let r = px[0].clamp(0.0, 1.0);
         let g = px[1].clamp(0.0, 1.0);
         let b = px[2].clamp(0.0, 1.0);

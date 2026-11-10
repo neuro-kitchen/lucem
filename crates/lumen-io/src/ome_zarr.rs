@@ -14,6 +14,9 @@ use serde::Deserialize;
 use crate::error::{IoError, IoResult};
 use crate::image_io::LoadedImage;
 
+/// A decoded chunk: its position in the output (three indices) and its values.
+type DecodedChunk = (usize, usize, usize, Vec<f32>);
+
 /// Metadata for an opened `.ome.zarr` container attached to [`LoadedImage`].
 #[derive(Debug, Clone)]
 pub struct OmeZarrContainerInfo {
@@ -61,14 +64,13 @@ impl OmeZarrContainerInfo {
 
         // Hysteresis: if currently on a finer level `curr_idx > target_idx`, only step down if
         // `displayed_width < sorted[target_idx].width * 0.90`.
-        if let Some(curr_idx) = sorted.iter().position(|(l, _, _)| *l == self.active_level) {
-            if curr_idx > target_idx {
+        if let Some(curr_idx) = sorted.iter().position(|(l, _, _)| *l == self.active_level)
+            && curr_idx > target_idx {
                 let step_down_w = sorted[curr_idx - 1].1 as f32;
                 if displayed_width >= step_down_w * 0.90 {
                     return self.active_level.clone();
                 }
             }
-        }
 
         sorted[target_idx].0.clone()
     }
@@ -203,11 +205,9 @@ pub(crate) fn lz4_decompress_block(src: &[u8], uncompressed_len: usize) -> IoRes
             return Err(IoError::OmeZarr("LZ4 match overrun".to_string()));
         }
 
-        let mut match_pos = op - offset;
-        for _ in 0..match_len {
+        for match_pos in (op - offset..).take(match_len) {
             out[op] = out[match_pos];
             op += 1;
-            match_pos += 1;
         }
     }
 
@@ -247,7 +247,7 @@ pub(crate) fn blosc_decompress(bytes: &[u8]) -> IoResult<Vec<u8>> {
 
     let do_shuffle = (flags & 0x01) != 0;
     let bsize_default = blocksize.max(1);
-    let num_blocks = (nbytes + bsize_default - 1) / bsize_default;
+    let num_blocks = nbytes.div_ceil(bsize_default);
 
     if bytes.len() < 16 + 4 * num_blocks {
         return Err(IoError::OmeZarr("Blosc bstarts table truncated".to_string()));
@@ -333,20 +333,17 @@ pub(crate) fn blosc_decompress(bytes: &[u8]) -> IoResult<Vec<u8>> {
 /// Walks up `path` ancestors to find the root `.ome.zarr` container directory.
 pub fn find_ome_zarr_root(path: &Path) -> Option<PathBuf> {
     for ancestor in path.ancestors() {
-        if let Some(name) = ancestor.file_name().and_then(|n| n.to_str()) {
-            if name.ends_with(".ome.zarr") && ancestor.is_dir() {
+        if let Some(name) = ancestor.file_name().and_then(|n| n.to_str())
+            && name.ends_with(".ome.zarr") && ancestor.is_dir() {
                 return Some(ancestor.to_path_buf());
             }
-        }
     }
     for ancestor in path.ancestors() {
-        if ancestor.is_dir() && ancestor.join(".zattrs").is_file() && ancestor.join(".zgroup").is_file() {
-            if let Ok(txt) = fs::read_to_string(ancestor.join(".zattrs")) {
-                if txt.contains("multiscales") {
+        if ancestor.is_dir() && ancestor.join(".zattrs").is_file() && ancestor.join(".zgroup").is_file()
+            && let Ok(txt) = fs::read_to_string(ancestor.join(".zattrs"))
+                && txt.contains("multiscales") {
                     return Some(ancestor.to_path_buf());
                 }
-            }
-        }
     }
     None
 }
@@ -370,14 +367,13 @@ pub fn inspect_ome_zarr_container(root_dir: &Path) -> IoResult<OmeZarrContainerI
     let mut pyramid_levels = Vec::new();
     let mut channel_labels = Vec::new();
 
-    if let Ok(zattrs_str) = fs::read_to_string(root_dir.join(".zattrs")) {
-        if let Ok(parsed) = serde_json::from_str::<RootZAttrs>(&zattrs_str) {
+    if let Ok(zattrs_str) = fs::read_to_string(root_dir.join(".zattrs"))
+        && let Ok(parsed) = serde_json::from_str::<RootZAttrs>(&zattrs_str) {
             if let Some(ms) = parsed.multiscales.first() {
-                if let Some(ref n) = ms.name {
-                    if !n.is_empty() {
+                if let Some(ref n) = ms.name
+                    && !n.is_empty() {
                         container_name = n.clone();
                     }
-                }
                 for ds in ms.datasets.iter().filter(|d| is_safe_relative_path(&d.path)) {
                     if root_dir.join(&ds.path).join(".zarray").is_file() {
                         pyramid_levels.push(ds.path.clone());
@@ -394,7 +390,6 @@ pub fn inspect_ome_zarr_container(root_dir: &Path) -> IoResult<OmeZarrContainerI
                 }
             }
         }
-    }
 
     if pyramid_levels.is_empty() {
         for cand in ["s0", "s1", "s2", "s3", "0", "1", "2"] {
@@ -413,19 +408,18 @@ pub fn inspect_ome_zarr_container(root_dir: &Path) -> IoResult<OmeZarrContainerI
 
     let mut level_dimensions = Vec::new();
     for lvl in &pyramid_levels {
-        if let Ok(zstr) = fs::read_to_string(root_dir.join(lvl).join(".zarray")) {
-            if let Ok(zmeta) = serde_json::from_str::<ZArrayMeta>(&zstr) {
-                let (h, w) = match zmeta.shape.as_slice() {
-                    &[h, w] => (h, w),
-                    &[_, h, w] => (h, w),
-                    &[_, _, h, w] => (h, w),
+        if let Ok(zstr) = fs::read_to_string(root_dir.join(lvl).join(".zarray"))
+            && let Ok(zmeta) = serde_json::from_str::<ZArrayMeta>(&zstr) {
+                let (h, w) = match *zmeta.shape.as_slice() {
+                    [h, w] => (h, w),
+                    [_, h, w] => (h, w),
+                    [_, _, h, w] => (h, w),
                     _ => (0, 0),
                 };
                 if w > 0 && h > 0 {
                     level_dimensions.push((lvl.clone(), w, h));
                 }
             }
-        }
     }
 
     // Default to `s2` (or `s1`) when available for instantaneous startup, while allowing automatic
@@ -440,15 +434,14 @@ pub fn inspect_ome_zarr_container(root_dir: &Path) -> IoResult<OmeZarrContainerI
 
     let mut label_groups = Vec::new();
     let labels_dir = root_dir.join("labels");
-    if let Ok(lbl_str) = fs::read_to_string(labels_dir.join(".zattrs")) {
-        if let Ok(parsed_lbl) = serde_json::from_str::<LabelsZAttrs>(&lbl_str) {
+    if let Ok(lbl_str) = fs::read_to_string(labels_dir.join(".zattrs"))
+        && let Ok(parsed_lbl) = serde_json::from_str::<LabelsZAttrs>(&lbl_str) {
             for g in parsed_lbl.labels.into_iter().filter(|g| is_safe_relative_path(g)) {
                 if labels_dir.join(&g).is_dir() {
                     label_groups.push(g);
                 }
             }
         }
-    }
 
     Ok(OmeZarrContainerInfo {
         root_path: root_dir.to_path_buf(),
@@ -469,7 +462,7 @@ fn decode_elements_to_f32(raw: &[u8], dtype: &str) -> IoResult<Vec<f32>> {
     match dtype {
         "<u2" | "|u2" => {
             let mut out = Vec::with_capacity(raw.len() / 2);
-            for c in raw.chunks_exact(2) {
+            for c in raw.as_chunks::<2>().0 {
                 out.push(u16::from_le_bytes([c[0], c[1]]) as f32);
             }
             Ok(out)
@@ -477,21 +470,21 @@ fn decode_elements_to_f32(raw: &[u8], dtype: &str) -> IoResult<Vec<f32>> {
         "<u1" | "|u1" => Ok(raw.iter().map(|&b| b as f32).collect()),
         "<i4" | "|i4" => {
             let mut out = Vec::with_capacity(raw.len() / 4);
-            for c in raw.chunks_exact(4) {
+            for c in raw.as_chunks::<4>().0 {
                 out.push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]).max(0) as f32);
             }
             Ok(out)
         }
         "<u4" | "|u4" => {
             let mut out = Vec::with_capacity(raw.len() / 4);
-            for c in raw.chunks_exact(4) {
+            for c in raw.as_chunks::<4>().0 {
                 out.push(u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32);
             }
             Ok(out)
         }
         "<f4" | "|f4" => {
             let mut out = Vec::with_capacity(raw.len() / 4);
-            for c in raw.chunks_exact(4) {
+            for c in raw.as_chunks::<4>().0 {
                 out.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
             }
             Ok(out)
@@ -531,11 +524,10 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
     let meta: ZArrayMeta = serde_json::from_str(&zarray_str)?;
 
     // This whole-level reader is 2D: never take planes along z for channels
-    if let Ok(text) = fs::read_to_string(info.root_path.join(".zattrs")) {
-        if text.contains("\"z\"") {
+    if let Ok(text) = fs::read_to_string(info.root_path.join(".zattrs"))
+        && text.contains("\"z\"") {
             return Err(IoError::OmeZarr("this image has a z axis: open it through Pyramid, which reads 3D".to_string()));
         }
-    }
     if meta.chunks.contains(&0) {
         return Err(IoError::OmeZarr(format!("Zarr chunks {:?} have an empty axis", meta.chunks)));
     }
@@ -555,19 +547,18 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
     let num_c_load = channels.min(3);
     let mut channel_planes = vec![vec![0.0f32; n_pixels]; num_c_load];
 
-    let chunks_y = (height + chunk_y - 1) / chunk_y;
-    let chunks_x = (width + chunk_x - 1) / chunk_x;
+    let chunks_y = height.div_ceil(chunk_y);
+    let chunks_x = width.div_ceil(chunk_x);
     let sep = &meta.dimension_separator;
 
     // Collect all chunk tasks across channels and `(cy, cx)` tiles, then decode them in parallel
     // across CPU worker threads using `std::thread::scope`.
     let mut chunk_jobs: Vec<(usize, usize, usize, PathBuf)> = Vec::new();
     for c_idx in 0..num_c_load {
-        if let Some(only_c) = info.active_channel {
-            if c_idx != only_c && num_c_load > 1 {
+        if let Some(only_c) = info.active_channel
+            && c_idx != only_c && num_c_load > 1 {
                 continue;
             }
-        }
         let c_chunk = c_idx / chunk_c;
         for cy_idx in 0..chunks_y {
             for cx_idx in 0..chunks_x {
@@ -592,7 +583,7 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
         .clamp(1, 16);
     let jobs_per_thread = (chunk_jobs.len() + num_threads - 1).max(1) / num_threads;
 
-    let decoded_batches: Vec<IoResult<Vec<(usize, usize, usize, Vec<f32>)>>> =
+    let decoded_batches: Vec<IoResult<Vec<DecodedChunk>>> =
         std::thread::scope(|s| {
             let handles: Vec<_> = chunk_jobs
                 .chunks(jobs_per_thread.max(1))
@@ -762,8 +753,8 @@ pub fn discover_workspace_data_paths(workspace_dir: &Path) -> Vec<PathBuf> {
                 found.push(p);
             } else if p.is_file() {
                 found.push(p);
-            } else if p.is_dir() {
-                if let Ok(sub_entries) = fs::read_dir(&p) {
+            } else if p.is_dir()
+                && let Ok(sub_entries) = fs::read_dir(&p) {
                     let mut sub_paths: Vec<PathBuf> = sub_entries.flatten().map(|e| e.path()).collect();
                     sub_paths.sort();
                     for sp in sub_paths {
@@ -772,7 +763,6 @@ pub fn discover_workspace_data_paths(workspace_dir: &Path) -> Vec<PathBuf> {
                         }
                     }
                 }
-            }
         }
     }
     found

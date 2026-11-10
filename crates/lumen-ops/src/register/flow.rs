@@ -433,8 +433,8 @@ mod tests {
         let ref_dev = DeviceArray::from_host(client, shape.clone(), cast_all::<f32>(&img0)).unwrap();
         let mov_dev = DeviceArray::from_host(client, shape, cast_all::<f32>(&img1)).unwrap();
 
-        // Notice img1(y, x) = img0(y - 0.8, x - 1.2), so img1(y + (-0.8), x + (-1.2)) = img0(y, x):
-        // displacement (vy, vx) at center is (-0.8, -1.2)
+        // img1(y, x) = img0(y - 0.8, x - 1.2), so img1(y + 0.8, x + 1.2) = img0(y, x). The flow warps
+        // the moving image onto the reference (scikit-image's convention): (vy, vx) = (+0.8, +1.2)
         let ilk = ilk_flow(
             client,
             &ref_dev,
@@ -449,7 +449,7 @@ mod tests {
         let center = 10 * w + 10;
         let ilk_vy = ilk.vy.to_host(client)[center];
         let ilk_vx = ilk.vx.to_host(client)[center];
-        assert_close(&[ilk_vy, ilk_vx], &[-0.8, -1.2], 0.15, client.name());
+        assert_close(&[ilk_vy, ilk_vx], &[0.8, 1.2], 0.15, client.name());
 
         let tvl1 = tvl1_flow(
             client,
@@ -465,7 +465,7 @@ mod tests {
         .unwrap();
         let tv_vy = tvl1.vy.to_host(client)[center];
         let tv_vx = tvl1.vx.to_host(client)[center];
-        assert_close(&[tv_vy, tv_vx], &[-0.8, -1.2], 0.25, client.name());
+        assert_close(&[tv_vy, tv_vx], &[0.8, 1.2], 0.25, client.name());
     }
     runtime_test!(test_optical_flow, ilk_and_tvl1_track_gaussian_blob_translation);
 }

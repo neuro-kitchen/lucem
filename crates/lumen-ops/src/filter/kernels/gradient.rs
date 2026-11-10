@@ -27,7 +27,7 @@ pub fn laplace_axis_add_kernel<F: lumen_core::element::ImageFloat>(
         let center = input[idx];
         let right = read_padded::<F>(input, base, inner, p + 1i32, len as i32, cval, mode);
         let d2 = left - F::new(2.0f32) * center + right;
-        accum[idx] = accum[idx] + d2;
+        accum[idx] += d2;
     }
 }
 
@@ -37,7 +37,7 @@ pub fn add_sq_kernel<F: lumen_core::element::ImageFloat>(grad: &[F], accum_sq: &
     let i = element_position();
     if (i as u32) < len {
         let g = grad[i];
-        accum_sq[i] = accum_sq[i] + g * g;
+        accum_sq[i] += g * g;
     }
 }
 

@@ -7,6 +7,13 @@ members = [
     "crates/lumen-io",
     "crates/lumen-ops",
     "crates/lumen-ml",
+    # Histology workflows (stains, tissue, cells, classifiers, densities, export)
+    "crates/lumen-hist",
+    # Verified downloads of published artifacts (model weights); all network access of the models
+    "hub/lumen-hub",
+    # Models, one crate per upstream family, each under its upstream's licence (as dsp-kitchen's
+    # sorters); the app never links them: plugins/ml programs run them
+    "models/sam",
     # Pipeline engine
     "engine/lumen-pipeline",
     # Serving
@@ -16,6 +23,9 @@ members = [
     "app/lumen-cli",
     "app/lumen-app-core",
     "app/lumen-app",
+    # Plugins: ml/ programs the app and the command line run (one per model family, never
+    # linked, so ONNX Runtime and model licences stay out of lumen itself)
+    "plugins/ml/lumen-ml-sam",
     # Bindings
     "bindings/python/lumen-py",
 ]
@@ -33,6 +43,7 @@ lumen-core = { path = "crates/lumen-core", version = "0.1.0", default-features =
 lumen-io = { path = "crates/lumen-io", version = "0.1.0" }
 lumen-ops = { path = "crates/lumen-ops", version = "0.1.0", default-features = false }
 lumen-ml = { path = "crates/lumen-ml", version = "0.1.0" }
+lumen-hist = { path = "crates/lumen-hist", version = "0.1.0", default-features = false }
 lumen-pipeline = { path = "engine/lumen-pipeline", version = "0.1.0" }
 lumen-view = { path = "serve/lumen-view", version = "0.1.0" }
 lumen-stream = { path = "serve/lumen-stream", version = "0.1.0" }
@@ -68,6 +79,14 @@ rcgen = "0.14.10"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1.15.1"
 sha2 = "0.11.1"
+# Machine learning plugins: ONNX Runtime loaded at run time (no download at build, nothing in the
+# app); HTTP for verified weight downloads (lumen-hub)
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std", "api-31", "cuda"] }
+ureq = "3.5.1"
+flate2 = "1.1.11"
+tar = "0.4.46"
+lumen-hub = { path = "hub/lumen-hub", version = "0.1.0" }
+lumen-model-sam = { path = "models/sam", version = "0.1.0" }
 tokio = { version = "1.54.1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"

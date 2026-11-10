@@ -221,13 +221,17 @@ pub fn bilateral_2d_kernel<F: lumen_core::element::ImageFloat>(
 
         let mut num = F::new(0.0f32);
         let mut den = F::new(0.0f32);
-        let mut dy = -radius;
-        while dy <= radius {
+        // From a literal: a variable seeded from a #[comptime] value stays comptime (CPU MLIR rejects it)
+        let mut dy_i = 0i32;
+        while dy_i <= radius + radius {
+            let dy = dy_i - radius;
             let py = pad_index(y + dy, height, mode);
             let sy = i32::max(py, 0i32) as u32;
             let wy_base = ((dy + radius) * win) as u32;
-            let mut dx = -radius;
-            while dx <= radius {
+            // From a literal: a variable seeded from a #[comptime] value stays comptime (CPU MLIR rejects it)
+        let mut dx_i = 0i32;
+            while dx_i <= radius + radius {
+                let dx = dx_i - radius;
                 let px = pad_index(x + dx, width, mode);
                 let sx = i32::max(px, 0i32) as u32;
                 let raw = input[(sy * w_u + sx) as usize];
@@ -238,9 +242,9 @@ pub fn bilateral_2d_kernel<F: lumen_core::element::ImageFloat>(
                 let w = w_spatial * w_range;
                 num += w * sample;
                 den += w;
-                dx += 1i32;
+                dx_i += 1i32;
             }
-            dy += 1i32;
+            dy_i += 1i32;
         }
         output[idx] = if den > F::new(0.0f32) { num / den } else { center };
     }
@@ -274,29 +278,37 @@ pub fn nlm_2d_kernel<F: lumen_core::element::ImageFloat>(
         let mut num = F::new(0.0f32);
         let mut den = F::new(0.0f32);
 
-        let mut sy = -search_radius;
-        while sy <= search_radius {
+        // From a literal: a variable seeded from a #[comptime] value stays comptime (CPU MLIR rejects it)
+        let mut sy_i = 0i32;
+        while sy_i <= search_radius + search_radius {
+            let sy = sy_i - search_radius;
             let qy_center = y + sy;
-            let mut sx = -search_radius;
-            while sx <= search_radius {
+            // From a literal: a variable seeded from a #[comptime] value stays comptime (CPU MLIR rejects it)
+        let mut sx_i = 0i32;
+            while sx_i <= search_radius + search_radius {
+                let sx = sx_i - search_radius;
                 let qx_center = x + sx;
 
                 let mut dist_sq = F::new(0.0f32);
-                let mut py = -patch_radius;
-                while py <= patch_radius {
+                // From a literal: a variable seeded from a #[comptime] value stays comptime (CPU MLIR rejects it)
+        let mut py_i = 0i32;
+                while py_i <= patch_radius + patch_radius {
+                    let py = py_i - patch_radius;
                     let p_ry = i32::max(pad_index(y + py, height, mode), 0i32) as u32;
                     let q_ry = i32::max(pad_index(qy_center + py, height, mode), 0i32) as u32;
-                    let mut px = -patch_radius;
-                    while px <= patch_radius {
+                    // From a literal: a variable seeded from a #[comptime] value stays comptime (CPU MLIR rejects it)
+        let mut px_i = 0i32;
+                    while px_i <= patch_radius + patch_radius {
+                        let px = px_i - patch_radius;
                         let p_rx = i32::max(pad_index(x + px, width, mode), 0i32) as u32;
                         let q_rx = i32::max(pad_index(qx_center + px, width, mode), 0i32) as u32;
                         let vp = input[(p_ry * w_u + p_rx) as usize];
                         let vq = input[(q_ry * w_u + q_rx) as usize];
                         let d = vp - vq;
                         dist_sq += d * d;
-                        px += 1i32;
+                        px_i += 1i32;
                     }
-                    py += 1i32;
+                    py_i += 1i32;
                 }
 
                 let mean_dist = F::max(dist_sq * inv_patch_area - F::new(2.0f32) * sigma_sq, F::new(0.0f32));
@@ -307,9 +319,9 @@ pub fn nlm_2d_kernel<F: lumen_core::element::ImageFloat>(
 
                 num += w * q_val;
                 den += w;
-                sx += 1i32;
+                sx_i += 1i32;
             }
-            sy += 1i32;
+            sy_i += 1i32;
         }
         output[idx] = if den > F::new(0.0f32) { num / den } else { input[idx] };
     }

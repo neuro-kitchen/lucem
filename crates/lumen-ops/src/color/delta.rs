@@ -40,6 +40,7 @@ pub fn cie76<F: ImageFloat>(
 }
 
 /// Compute pixel-wise CIE94 perceptual color difference between two CIE L*a*b* images `[H, W, 3]`.
+#[allow(clippy::too_many_arguments)]
 pub fn ciede94<F: ImageFloat>(
     client: &Client,
     lab1: &DeviceArray<F>,

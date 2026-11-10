@@ -16,10 +16,9 @@ pub fn flag_nonzero_kernel<E: Numeric>(input: &[E], flags: &mut [u32], len: u32)
 #[cube(launch)]
 pub fn scatter_indices_kernel(flags: &[u32], offsets: &[u32], indices: &mut [u32], len: u32) {
     let i = element_position();
-    if (i as u32) < len {
-        if flags[i] != 0u32 {
+    if (i as u32) < len
+        && flags[i] != 0u32 {
             let dst = offsets[i] as usize;
             indices[dst] = i as u32;
         }
-    }
 }

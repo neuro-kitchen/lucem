@@ -251,6 +251,7 @@ pub fn gaussian_blur<F: ImageFloat>(
 
 /// Laplacian of Gaussian ($\nabla^2 G_\sigma * I$) into `output`: sums the second-derivative
 /// Gaussian responses along each axis on the device without host round-trips.
+#[allow(clippy::too_many_arguments)]
 pub fn gaussian_laplace_into<F: ImageFloat>(
     client: &Client,
     input: &DeviceArray<F>,
@@ -302,6 +303,7 @@ pub fn gaussian_laplace<F: ImageFloat>(
 }
 
 /// Euclidean magnitude of the Gaussian gradient ($\|\nabla(G_\sigma * I)\|_2$) into `output`.
+#[allow(clippy::too_many_arguments)]
 pub fn gaussian_grad_mag_into<F: ImageFloat>(
     client: &Client,
     input: &DeviceArray<F>,

@@ -104,6 +104,14 @@ pub fn describe(kind: &NodeKind, doc: &ProjectDoc) -> (String, String, IconName)
         }
         NodeKind::Op { op, .. } => (op.title().into(), summary(op), family_icon(op.family())),
         NodeKind::View { name, .. } => (name.clone(), "result · shown in Explore".into(), IconName::Eye),
+        NodeKind::Script { path, output, params, .. } => {
+            let p = std::path::Path::new(path);
+            let name = p.file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+            let lang = crate::data::script::Language::of(p).map_or("script", |l| l.title());
+            let nums: Vec<String> = params.iter().map(|q| format!("{} {}", q.name, crate::ui::param_editor::trim_number(q.value))).collect();
+            let sub = if nums.is_empty() { format!("{lang} → {}", output.name()) } else { format!("{lang} · {}", nums.join(" · ")) };
+            (name, sub, IconName::SquareTerminal)
+        }
     }
 }
 
@@ -138,5 +146,6 @@ pub fn kind_color(kind: &NodeKind) -> Hsla {
         NodeKind::Source { .. } | NodeKind::Annotations { .. } => gpui_kit::hsla(152. / 360., 0.55, 0.45, 1.0),
         NodeKind::Op { op, .. } => port_color(Some(op.output())),
         NodeKind::View { .. } => gpui_kit::hsla(271. / 360., 0.60, 0.65, 1.0),
+        NodeKind::Script { .. } => gpui_kit::hsla(38. / 360., 0.80, 0.55, 1.0),
     }
 }

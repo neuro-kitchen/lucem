@@ -123,46 +123,86 @@ pub fn nearest_background_indices<E: Numeric + CubeElement>(
     let strides = input.shape().strides();
     let n = flags.len();
 
-    let mut bg_indices = Vec::new();
-    let mut bg_coords = Vec::new();
-    for (idx, &f) in flags.iter().enumerate() {
-        if f == 0 {
-            bg_indices.push(idx as u32);
-            let pt: Vec<f64> = (0..ndim)
-                .map(|d| ((idx / strides[d]) % dims[d]) as f64 * spacings[d])
-                .collect();
-            bg_coords.push(pt);
-        }
-    }
-
-    let mut nearest = vec![0u32; n];
-    if bg_indices.is_empty() {
-        return Ok(DeviceArray::from_host(client, input.shape().clone(), nearest)?);
-    }
-
-    for (idx, &f) in flags.iter().enumerate() {
-        if f == 0 {
-            nearest[idx] = idx as u32;
-            continue;
-        }
-        let mut best_d2 = f64::INFINITY;
-        let mut best_bg = bg_indices[0];
-        for (bg_i, bg_pt) in bg_indices.iter().zip(bg_coords.iter()) {
-            let mut d2 = 0.0;
-            for d in 0..ndim {
-                let c = ((idx / strides[d]) % dims[d]) as f64 * spacings[d];
-                let diff = c - bg_pt[d];
-                d2 += diff * diff;
-            }
-            if d2 < best_d2 {
-                best_d2 = d2;
-                best_bg = *bg_i;
-            }
-        }
-        nearest[idx] = best_bg;
-    }
-
+    let flags: Vec<bool> = flags.iter().map(|&f| f != 0).collect();
+    let nearest = feature_transform(&flags, dims, &strides, &spacings, n);
     Ok(DeviceArray::from_host(client, input.shape().clone(), nearest)?)
+}
+
+/// The exact Euclidean feature transform on the host: for every pixel, the flat index of its
+/// nearest background (`false`) pixel. Separable (Felzenszwalb & Huttenlocher, 2012): one pass
+/// per axis takes, along each line, the lower envelope of the parabolas `f(q) + w·(p − q)²`
+/// (`f`: the squared distance so far, `w`: the axis' squared spacing) and carries the site of the
+/// parabola that wins — linear in the number of pixels (the brute-force search it replaces
+/// compared every pixel with every background pixel). No background at all: index 0.
+fn feature_transform(foreground: &[bool], dims: &[usize], strides: &[usize], spacings: &[f64], n: usize) -> Vec<u32> {
+    if !foreground.iter().any(|&f| !f) {
+        return vec![0; n];
+    }
+    let mut dist: Vec<f64> = foreground.iter().map(|&f| if f { f64::INFINITY } else { 0.0 }).collect();
+    let mut site: Vec<u32> = (0..n).map(|i| if foreground[i] { u32::MAX } else { i as u32 }).collect();
+    let max_len = dims.iter().copied().max().unwrap_or(1);
+    let (mut f, mut s) = (vec![0f64; max_len], vec![0u32; max_len]);
+    let (mut v, mut z) = (vec![0usize; max_len], vec![0f64; max_len + 1]);
+    for (d, (&len, &stride)) in dims.iter().zip(strides).enumerate() {
+        let w = spacings[d] * spacings[d];
+        for base in 0..n {
+            if (base / stride) % len != 0 {
+                continue;
+            }
+            for q in 0..len {
+                f[q] = dist[base + q * stride];
+                s[q] = site[base + q * stride];
+            }
+            // Lower envelope of the finite parabolas
+            let mut k = 0usize;
+            let mut any = false;
+            for q in 0..len {
+                if !f[q].is_finite() {
+                    continue;
+                }
+                if !any {
+                    v[0] = q;
+                    z[0] = f64::NEG_INFINITY;
+                    z[1] = f64::INFINITY;
+                    any = true;
+                    continue;
+                }
+                loop {
+                    let r = v[k];
+                    let x = ((f[q] + w * (q * q) as f64) - (f[r] + w * (r * r) as f64)) / (2.0 * w * (q as f64 - r as f64));
+                    if x <= z[k] && k > 0 {
+                        k -= 1;
+                        continue;
+                    }
+                    if x <= z[k] {
+                        // k == 0: the new parabola is lowest everywhere
+                        v[0] = q;
+                        z[1] = f64::INFINITY;
+                    } else {
+                        k += 1;
+                        v[k] = q;
+                        z[k] = x;
+                        z[k + 1] = f64::INFINITY;
+                    }
+                    break;
+                }
+            }
+            if !any {
+                continue;
+            }
+            let mut k = 0usize;
+            for p in 0..len {
+                while z[k + 1] < p as f64 {
+                    k += 1;
+                }
+                let r = v[k];
+                let i = base + p * stride;
+                dist[i] = f[r] + w * (p as f64 - r as f64).powi(2);
+                site[i] = s[r];
+            }
+        }
+    }
+    site
 }
 
 /// Computes the exact chamfer (`Taxicab` or `Chessboard`) integer distance transform.
@@ -266,4 +306,24 @@ mod tests {
         assert_eq!(taxicab, vec![0, 1, 2, 1, 2, 1, 2, 1, 0], "{}", client.name());
     }
     runtime_test!(test_distance_transforms, edt_and_chamfer_match_analytic);
+
+    /// The separable feature transform finds a nearest background pixel (by distance: ties may
+    /// pick another of the same distance) on random masks, 2-D and 3-D, anisotropic spacing.
+    #[test]
+    fn feature_transform_matches_brute_force() {
+        for (dims, spacing) in [(vec![23usize, 31], vec![1.0, 1.0]), (vec![9usize, 14, 11], vec![2.0, 1.0, 0.5])] {
+            let n: usize = dims.iter().product();
+            let shape = Shape::new(dims.clone());
+            let strides = shape.strides();
+            let fg: Vec<bool> = (0..n).map(|i| ((i * 2_654_435_761usize) >> 7) % 10 < 8).collect();
+            let got = feature_transform(&fg, &dims, &strides, &spacing, n);
+            let coord = |i: usize| -> Vec<f64> { (0..dims.len()).map(|d| ((i / strides[d]) % dims[d]) as f64 * spacing[d]).collect() };
+            let d2 = |a: usize, b: usize| coord(a).iter().zip(coord(b)).map(|(x, y)| (x - y).powi(2)).sum::<f64>();
+            for i in 0..n {
+                let best = (0..n).filter(|&j| !fg[j]).map(|j| d2(i, j)).fold(f64::INFINITY, f64::min);
+                assert!(!fg[got[i] as usize], "pixel {i}: its site {} is not background", got[i]);
+                assert!((d2(i, got[i] as usize) - best).abs() < 1e-9, "pixel {i} of {dims:?}: {} vs {best}", d2(i, got[i] as usize));
+            }
+        }
+    }
 }

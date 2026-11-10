@@ -20,8 +20,8 @@ pub fn spectral_scale_axis_kernel<F: lumen_core::element::ImageFloat>(
         let e = idx as u32;
         let freq = (e / inner) % len;
         let w = transfer[freq as usize];
-        re[idx] = re[idx] * w;
-        im[idx] = im[idx] * w;
+        re[idx] *= w;
+        im[idx] *= w;
     }
 }
 

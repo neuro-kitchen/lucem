@@ -82,7 +82,7 @@ pub fn row_share(cols: u32, #[comptime] units: u32) -> RowShare {
     let unit = UNIT_POS_X;
     // Field by field: a CubeCL `if` cannot yield a struct
     let contiguous = PLANE_DIM == 1u32;
-    let chunk = (cols + units - 1u32) / units;
+    let chunk = cols.div_ceil(units);
     let start = if contiguous { u32::min(unit * chunk, cols) } else { unit };
     let end = if contiguous { u32::min(start + chunk, cols) } else { cols };
     let step = if contiguous { 1u32 } else { units };

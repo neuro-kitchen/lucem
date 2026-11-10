@@ -97,6 +97,12 @@ pub fn analysis_key(doc: &ProjectDoc, image: &str) -> u64 {
     for a in doc.annotations_of(image) {
         serde_json::to_string(a).unwrap_or_default().hash(&mut h);
     }
+    // A script saved again runs again
+    for n in &doc.graph.nodes {
+        if let NodeKind::Script { path, .. } = &n.kind {
+            std::fs::metadata(path).and_then(|m| m.modified()).ok().hash(&mut h);
+        }
+    }
     h.finish()
 }
 
@@ -108,6 +114,47 @@ fn nodes_of(doc: &ProjectDoc, image: &str) -> Vec<String> {
 /// The finest level whose longer side is ≤ `side` (else the coarsest).
 fn level_under(py: &Pyramid, side: usize) -> usize {
     (0..py.levels.len()).find(|&l| py.levels[l].width.max(py.levels[l].height) <= side).unwrap_or(py.coarsest())
+}
+
+/// A node the evaluator asks the app for: a script node (run on its inputs, Python or Rust) or a
+/// source node.
+#[allow(clippy::too_many_arguments)]
+fn node_value(client: &Client, doc: &ProjectDoc, plan: &Plan, py: &Pyramid, image: &str, id: &str, level: usize, z: usize, region: (usize, usize, usize, usize)) -> Result<Value, String> {
+    let Some(NodeKind::Script { path, inputs, output, params, enabled }) = doc.graph.node(id).map(|n| &n.kind) else {
+        return source_value(client, doc, py, image, id, level, z, region);
+    };
+    let name = std::path::Path::new(path).file_name().map_or_else(|| id.to_string(), |n| n.to_string_lossy().into_owned());
+    let feeds = doc.graph.inputs(id);
+    let mut host = Vec::with_capacity(inputs.len());
+    for (i, port) in inputs.iter().enumerate() {
+        let from = feeds.get(i).cloned().flatten().ok_or_else(|| format!("{name} ({id}): its {} input is not connected", port.name))?;
+        let v = evaluate(client, plan, &from, &mut |sid: &str| node_value(client, doc, plan, py, image, sid, level, z, region))?;
+        if v.port() != port.port {
+            return Err(format!("{name} ({id}): its {} input takes {}, {from} gives {}", port.name, port.port.name(), v.port().name()));
+        }
+        // Off: the first input passes through when it is what the script gives
+        if !enabled && i == 0 && v.port() == *output {
+            return Ok(v);
+        }
+        let (h, w) = v.dims().ok_or_else(|| format!("{name}: a table cannot go into a script"))?;
+        let data = v.to_host(client).unwrap_or_default();
+        host.push((port.name.clone(), port.port, crate::data::script::HostArray { width: w, height: h, data }));
+    }
+    if !enabled {
+        return Err(format!("{name} ({id}) is off, and its first input is not a {}", output.name()));
+    }
+    let out = crate::data::script::run_node(std::path::Path::new(path), &host, params, *output)?;
+    let (rw, rh) = host.first().map_or((region.2, region.3), |a| (a.2.width, a.2.height));
+    if (out.width, out.height) != (rw, rh) {
+        return Err(format!("{name} returned {} × {} px; it must keep the size of its input ({rw} × {rh})", out.width, out.height));
+    }
+    let shape = Shape::new([out.height, out.width]);
+    match output {
+        PortType::Image => DeviceArray::from_host(client, shape, out.data).map(Value::Image),
+        PortType::Mask => DeviceArray::from_host(client, shape, out.data.iter().map(|&v| u32::from(v != 0.0)).collect()).map(Value::Mask),
+        _ => DeviceArray::from_host(client, shape, out.data.iter().map(|&v| v.max(0.0) as u32).collect()).map(Value::Labels),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// A source node's raster over a region of `level`.
@@ -136,7 +183,8 @@ fn source_value(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, id
             if img != image {
                 return Err(format!("{id} reads another image ({img})"));
             }
-            let anns: Vec<_> = doc.annotations_of(image).collect();
+            // The annotations of the plane shown (and those of every plane)
+            let anns: Vec<_> = doc.annotations_of(image).filter(|a| a.on_plane(z)).collect();
             let mask = rasterize(&anns, class.as_deref(), x0, y0, w, h, ds);
             DeviceArray::from_host(client, Shape::new([h, w]), mask).map(Value::Mask).map_err(|e| e.to_string())
         }
@@ -144,13 +192,14 @@ fn source_value(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, id
     }
 }
 
-/// The whole-image pass for `image`.
-pub fn analyze(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str) -> Analysis {
+/// The whole-image pass for `image`, on level-0 plane `z` of a volume.
+pub fn analyze(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, z: usize) -> Analysis {
     let t0 = Instant::now();
     let level = level_under(py, ANALYSIS_SIDE);
     let l = py.levels[level].clone();
     let ds = l.downsample;
-    let mut out = Analysis { key: analysis_key(doc, image), image: image.to_string(), level, downsample: ds, ..Analysis::default() };
+    let key = analysis_key(doc, image) ^ (z as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut out = Analysis { key, image: image.to_string(), level, downsample: ds, ..Analysis::default() };
     let ids = nodes_of(doc, image);
     if ids.is_empty() {
         return out;
@@ -158,7 +207,8 @@ pub fn analyze(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str) -> 
     let plan = at_downsample(&doc.graph.plan(), ds);
     // Views are evaluated through what feeds them
     let targets: Vec<String> = ids.iter().filter(|id| !matches!(doc.graph.node(id).map(|n| &n.kind), Some(NodeKind::View { .. }))).cloned().collect();
-    let mut source = |id: &str| source_value(client, doc, py, image, id, level, py.depth() / 2, (0, 0, l.width, l.height));
+    let zz = z.min(py.depth() - 1);
+    let mut source = |id: &str| node_value(client, doc, &plan, py, image, id, level, zz, (0, 0, l.width, l.height));
     let values = evaluate_all(client, &plan, &targets, &mut source);
     for (id, v) in &values {
         match v {
@@ -174,13 +224,11 @@ pub fn analyze(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str) -> 
     }
     // Whole-image values: the threshold of each Otsu node, from its input
     for id in &targets {
-        if let Some(PlanNodeOp { op: Op::OtsuThreshold { bins }, input: Some(input) }) = op_of(&plan, id) {
-            if let Some(Ok(Value::Image(a))) = values.get(&input) {
-                if let Ok(t) = lumen_ops::threshold::global::otsu(client, a, bins) {
+        if let Some(PlanNodeOp { op: Op::OtsuThreshold { bins }, input: Some(input) }) = op_of(&plan, id)
+            && let Some(Ok(Value::Image(a))) = values.get(&input)
+                && let Ok(t) = lumen_ops::threshold::global::otsu(client, a, bins) {
                     out.thresholds.insert(id.clone(), t);
                 }
-            }
-        }
     }
     // Tables of the views fed by a Measure
     for v in doc.graph.views() {
@@ -312,7 +360,7 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
         let (x0, y0) = (vx0.saturating_sub(margin), vy0.saturating_sub(margin));
         let (x1, y1) = ((vx1 + margin).min(l.width), (vy1 + margin).min(l.height));
         let (w, h) = (x1 - x0, y1 - y0);
-        let mut source = |id: &str| source_value(client, doc, pyramid, &req.image, id, level, req.z, (x0, y0, w, h));
+        let mut source = |id: &str| node_value(client, doc, &plan, pyramid, &req.image, id, level, req.z, (x0, y0, w, h));
         let value = match evaluate(client, &plan, &target, &mut source) {
             Ok(v) => v,
             Err(e) => {

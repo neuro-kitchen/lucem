@@ -51,6 +51,7 @@ pub fn otsu<F: ImageFloat>(client: &Client, input: &DeviceArray<F>, nbins: usize
 
 /// Multi-class Otsu thresholding for `classes` classes (`classes >= 2`), returning `classes - 1`
 /// sorted thresholds maximizing between-class variance via dynamic programming over the histogram.
+#[allow(clippy::needless_range_loop)] // neighbourhood / DP index arithmetic reads clearer with indices
 pub fn multi_otsu<F: ImageFloat>(
     client: &Client,
     input: &DeviceArray<F>,
@@ -397,24 +398,27 @@ mod tests {
     use crate::test_support::runtime_test;
 
     fn global_thresholds_separate_bimodal_signal(client: &Client) {
-        let mut data = Vec::with_capacity(200);
-        for i in 0..100 {
-            data.push(10.0f32 + (i % 5) as f32 * 0.2);
+        // Two peaks with width (a degenerate two-spike histogram makes every split tie, and the
+        // first bin wins, as in scikit-image)
+        let mut data = Vec::with_capacity(400);
+        for i in 0..200 {
+            data.push(10.0f32 + (i % 40) as f32 * 0.5 * ((i % 7) as f32 / 6.0));
         }
-        for i in 0..100 {
-            data.push(90.0f32 + (i % 5) as f32 * 0.2);
+        for i in 0..200 {
+            data.push(90.0f32 - (i % 40) as f32 * 0.5 * ((i % 7) as f32 / 6.0));
         }
         let arr = DeviceArray::from_host(client, Shape::vector(data.len()), data).unwrap();
-        for t in [
-            otsu(client, &arr, 64).unwrap(),
-            isodata(client, &arr, 64).unwrap(),
-            li(client, &arr, 64).unwrap(),
-            yen(client, &arr, 64).unwrap(),
-            mean_threshold(client, &arr).unwrap(),
-            minimum_threshold(client, &arr, 64, 1000).unwrap(),
+        for (name, t) in [
+            ("otsu", otsu(client, &arr, 64).unwrap()),
+            ("isodata", isodata(client, &arr, 64).unwrap()),
+            ("li", li(client, &arr, 64).unwrap()),
+            ("yen", yen(client, &arr, 64).unwrap()),
+            ("mean", mean_threshold(client, &arr).unwrap()),
+            ("minimum", minimum_threshold(client, &arr, 64, 1000).unwrap()),
         ] {
-            assert!(t > 15.0 && t < 85.0, "{} threshold {t} failed to separate bimodal peaks", client.name());
+            assert!(t > 15.0 && t < 85.0, "{} {name} threshold {t} failed to separate bimodal peaks", client.name());
         }
     }
     runtime_test!(test_global_thresholds, global_thresholds_separate_bimodal_signal);
 }
+

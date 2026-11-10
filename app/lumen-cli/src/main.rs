@@ -29,7 +29,11 @@ USAGE
                                          Who may connect to `serve`
   lumen fetch <host:port> --identity FILE --server-name NAME [--open PATH]
                                          List a server's images, or read a tile of one
+  lumen hist stains | tissue | cells <image> …
+                                         Histology: stain vectors, tissue, cells (lumen hist)
 ";
+
+mod hist;
 
 fn main() -> ExitCode {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_writer(std::io::stderr).try_init();
@@ -45,12 +49,12 @@ fn main() -> ExitCode {
 }
 
 /// Arguments: flags with values, on/off flags, and what remains in order.
-struct Args {
-    rest: Vec<String>,
+pub(crate) struct Args {
+    pub(crate) rest: Vec<String>,
 }
 
 impl Args {
-    fn take_value(&mut self, name: &str) -> Result<Option<String>, String> {
+    pub(crate) fn take_value(&mut self, name: &str) -> Result<Option<String>, String> {
         let Some(i) = self.rest.iter().position(|a| a == name) else { return Ok(None) };
         if i + 1 >= self.rest.len() {
             return Err(format!("{name} needs a value"));
@@ -67,7 +71,7 @@ impl Args {
         Ok(out)
     }
 
-    fn take_flag(&mut self, name: &str) -> bool {
+    pub(crate) fn take_flag(&mut self, name: &str) -> bool {
         match self.rest.iter().position(|a| a == name) {
             Some(i) => {
                 self.rest.remove(i);
@@ -82,7 +86,7 @@ impl Args {
     }
 
     /// Nothing but `n` positional arguments may remain.
-    fn positional(self, n: usize) -> Result<Vec<String>, String> {
+    pub(crate) fn positional(self, n: usize) -> Result<Vec<String>, String> {
         if let Some(flag) = self.rest.iter().find(|a| a.starts_with("--")) {
             return Err(format!("unknown option {flag}"));
         }
@@ -112,6 +116,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "serve" => serve(args),
         "clients" => clients(args),
         "fetch" => fetch(args),
+        "hist" => hist::hist(args),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     }
 }
@@ -182,7 +187,7 @@ impl ComputeTask for RunTask<'_> {
     type Output = Result<(), String>;
     fn run(self, client: Client) -> Self::Output {
         let progress = Arc::new(|done: usize, total: usize| {
-            if done == total || done % 16 == 0 {
+            if done == total || done.is_multiple_of(16) {
                 eprintln!("{done} / {total} blocks");
             }
         });

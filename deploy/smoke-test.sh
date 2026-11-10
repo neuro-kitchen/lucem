@@ -53,7 +53,10 @@ if [ "$BUILD" = 1 ]; then
 fi
 rm -rf "$WORK"
 mkdir -p "$WORK"
-RUN=(podman run --rm --userns=keep-id:uid=10001,gid=10001 "${DEVICE[@]}" -v "$WORK:/data:Z" -v lumen-smoke-cache:/home/lumen/.cache "$IMAGE")
+# The data folder is shared by several containers (the server, its clients): `:z`, a label they
+# all may use. `:Z` (private) would relabel it for each new container and lock the server out of
+# its own client registry.
+RUN=(podman run --rm --userns=keep-id:uid=10001,gid=10001 "${DEVICE[@]}" -v "$WORK:/data:z" -v lumen-smoke-cache:/home/lumen/.cache "$IMAGE")
 
 step "doctor"
 "${RUN[@]}" doctor && pass "doctor" || fail "doctor found no usable runtime"
@@ -65,7 +68,7 @@ pass "synthetic image"
 step "serve (hardened)"
 podman run -d --name "$NAME" -p "$PORT:50051/udp" --userns=keep-id:uid=10001,gid=10001 "${DEVICE[@]}" \
     --read-only --cap-drop=all --security-opt=no-new-privileges --pids-limit=1024 \
-    -v "$WORK:/data:Z" -v lumen-smoke-cache:/home/lumen/.cache "$IMAGE" serve --bind 0.0.0.0:50051 >/dev/null
+    -v "$WORK:/data:z" -v lumen-smoke-cache:/home/lumen/.cache "$IMAGE" serve --bind 0.0.0.0:50051 >/dev/null
 sleep 3
 podman ps --filter "name=$NAME" --format '{{.Status}}' | grep -q Up || { podman logs "$NAME"; fail "the server did not start"; }
 pass "serving"
@@ -75,7 +78,7 @@ step "enroll"
 [ -s "$WORK/alice.pem" ] || fail "enroll"
 pass "enrolled"
 
-FETCH=(podman run --rm --network=host --userns=keep-id:uid=10001,gid=10001 -v "$WORK:/data:Z" "$IMAGE" fetch "127.0.0.1:$PORT" --server-name localhost --identity /data/alice.pem)
+FETCH=(podman run --rm --network=host --userns=keep-id:uid=10001,gid=10001 -v "$WORK:/data:z" "$IMAGE" fetch "127.0.0.1:$PORT" --server-name localhost --identity /data/alice.pem)
 step "fetch"
 "${FETCH[@]}" | grep -q image.ome.zarr && pass "listed" || fail "the image is not listed"
 "${FETCH[@]}" --open image.ome.zarr | grep -q "tile 0,0" && pass "read a tile" || fail "tile"

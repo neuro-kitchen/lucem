@@ -24,7 +24,7 @@ pub fn panel(store: &Entity<Store>, cx: &App) -> AnyElement {
     let toggle = Button::new("results-toggle").ghost().xsmall().label(if s.tool.show_results { "Hide all" } else { "Show all" }).on_click(move |_, _, cx| st.update(cx, |s, cx| s.update_tool(|t| t.show_results = !t.show_results, cx)));
     let mut sec = Section::new("Results").extra(h_flex().child(toggle).child(open));
     if views.is_empty() {
-        sec = sec.child(div().text_xs().text_color(color::text_muted()).child("Apply an operation (Operations menu or Ctrl+K): its result shows here and over the image. Measure results go to Analyze."));
+        sec = sec.child(div().text_xs().text_color(color::text_muted()).child("No results yet (Process menu or Ctrl+K)."));
     }
     let analysis = s.analysis.clone();
     for v in views {

@@ -111,10 +111,7 @@ mod tests {
                     }
                 }
             }
-            for a in 0..3 {
-                assert!(b.read_origin[a] + b.read_size[a] <= dims[a]);
-                assert!(b.read_origin[a] <= b.origin[a]);
-            }
+            assert!((0..3).all(|a| b.read_origin[a] + b.read_size[a] <= dims[a] && b.read_origin[a] <= b.origin[a]));
         }
         assert!(hits.iter().all(|&h| h == 1));
         assert_eq!(blocks.iter().map(|b| b.index).collect::<Vec<_>>(), (0..blocks.len()).collect::<Vec<_>>());

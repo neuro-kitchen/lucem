@@ -15,7 +15,7 @@ pub(crate) fn unmix_stains_kernel<F: lumen_core::element::ImageFloat>(
     if idx < num_pixels {
         let base = (idx * 3u32) as usize;
         let eps = F::new(1e-6);
-        let ln10 = F::new(2.302585092994046);
+        let ln10 = F::new(core::f32::consts::LN_10);
         let od_r = -F::ln(F::max(rgb[base], eps)) / ln10;
         let od_g = -F::ln(F::max(rgb[base + 1usize], eps)) / ln10;
         let od_b = -F::ln(F::max(rgb[base + 2usize], eps)) / ln10;

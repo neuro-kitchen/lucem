@@ -66,6 +66,8 @@ pub enum Command {
     SetView { id: String, name: String, style: ViewStyle },
     /// Points a source node at another channel.
     SetSourceChannel { id: String, channel: usize },
+    /// Replaces a script node's file, ports and numbers (edges past its inputs are dropped).
+    SetScript { id: String, kind: NodeKind },
     /// Applies `op` to the result shown by `view` (inserted just before it); without a view, a
     /// new chain from channel `channel` of `image` into a new view.
     ApplyOp {
@@ -89,9 +91,81 @@ pub enum Command {
     /// Adds a note (an empty id gets one) or replaces the one with its id.
     SetNote { note: NoteDoc },
     RemoveNote { id: String },
+    /// Deletes a class. Its annotations move to `move_to` when given, else they are deleted too;
+    /// the pipeline's annotation sources of the class follow them (or go). The rulers' class
+    /// (Measurement) and the last class stay.
+    RemoveClass {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        move_to: Option<String>,
+    },
+    /// Renames a class, with its annotations and the pipeline's sources of it.
+    RenameClass { from: String, to: String },
+    /// Puts annotations in another class.
+    SetAnnotationsClass { ids: Vec<String>, class: String },
     Rename { name: String },
     /// Several commands as one step: all of them apply, or none.
     Batch { commands: Vec<Command> },
+}
+
+impl Command {
+    /// A short name for the History panel.
+    pub fn label(&self) -> String {
+        use Command as C;
+        match self {
+            C::AddImage { name, .. } => format!("Add image {name}"),
+            C::RemoveImage { .. } => "Remove image".into(),
+            C::SelectImage { .. } => "Show image".into(),
+            C::SetChannel { display, .. } => format!("Display {}", display.label),
+            C::AddNode { kind, .. } => match kind {
+                NodeKind::Source { .. } => "Add source".into(),
+                NodeKind::Annotations { .. } => "Add annotations source".into(),
+                NodeKind::Op { op, .. } => format!("Add {}", op.title()),
+                NodeKind::View { .. } => "Add view".into(),
+                NodeKind::Script { path, .. } => format!("Add script {}", std::path::Path::new(path).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())),
+            },
+            C::RemoveNodes { nodes } => format!("Remove {} node(s)", nodes.len()),
+            C::RemoveBridging { .. } => "Remove node".into(),
+            C::MoveNodes { .. } => "Move nodes".into(),
+            C::Connect { .. } => "Connect".into(),
+            C::Disconnect { .. } => "Disconnect".into(),
+            C::SetOp { op, .. } => format!("Edit {}", op.title()),
+            C::EnableNode { enabled, .. } => if *enabled { "Enable node".into() } else { "Bypass node".into() },
+            C::SetView { name, .. } => format!("Edit view {name}"),
+            C::SetSourceChannel { .. } => "Source channel".into(),
+            C::SetScript { .. } => "Edit script".into(),
+            C::ApplyOp { op, .. } => format!("Apply {}", op.title()),
+            C::AddAnnotation { annotation } => format!("{} {}", shape_verb(&annotation.shape), annotation.class),
+            C::AddAnnotations { annotations } => format!("Add {} annotation(s)", annotations.len()),
+            C::SetAnnotation { .. } => "Edit annotation".into(),
+            C::RemoveAnnotations { ids } => format!("Delete {} annotation(s)", ids.len()),
+            C::MoveAnnotations { ids, .. } => format!("Move {} annotation(s)", ids.len()),
+            C::SetClass { class } => format!("Class {}", class.name),
+            C::SetNote { .. } => "Note".into(),
+            C::RemoveNote { .. } => "Delete note".into(),
+            C::RemoveClass { name, move_to: Some(to) } => format!("Delete class {name} (annotations to {to})"),
+            C::RemoveClass { name, move_to: None } => format!("Delete class {name}"),
+            C::RenameClass { from, to } => format!("Rename class {from} to {to}"),
+            C::SetAnnotationsClass { ids, class } => format!("Move {} annotation(s) to {class}", ids.len()),
+            C::Rename { name } => format!("Rename to {name}"),
+            C::Batch { commands } => match commands.first() {
+                Some(c) if commands.len() == 1 => c.label(),
+                _ => format!("{} changes", commands.len()),
+            },
+        }
+    }
+}
+
+/// What drawing an annotation of this shape is called.
+fn shape_verb(shape: &super::annotation::Shape) -> &'static str {
+    use super::annotation::Shape as S;
+    match shape {
+        S::Stroke { erase: true, .. } => "Erase",
+        S::Stroke { .. } => "Paint",
+        S::Point { .. } => "Point",
+        S::Line { .. } => "Measure",
+        _ => "Region",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -270,6 +344,17 @@ fn apply_inner(doc: &mut ProjectDoc, cmd: Command) -> Result<Changed, CommandErr
             }
             Ok(Changed::Layout)
         }
+        C::SetScript { id, kind } => {
+            if !matches!(kind, NodeKind::Script { .. }) || !matches!(node(doc, &id)?.kind, NodeKind::Script { .. }) {
+                return Err(invalid(format!("{id} is not a script node")));
+            }
+            let n = kind.inputs().len();
+            if let Some(g) = doc.graph.node_mut(&id) {
+                g.kind = kind;
+            }
+            doc.graph.edges.retain(|e| !(e.to == id && e.port >= n));
+            Ok(Changed::Graph)
+        }
         C::SetSourceChannel { id, channel } => {
             let img = match &node(doc, &id)?.kind {
                 NodeKind::Source { image, .. } => image.clone(),
@@ -394,6 +479,71 @@ fn apply_inner(doc: &mut ProjectDoc, cmd: Command) -> Result<Changed, CommandErr
             }
             Ok(Changed::Notes)
         }
+        C::RemoveClass { name, move_to } => {
+            if doc.class(&name).is_none() {
+                return Err(invalid(format!("no class {name:?}")));
+            }
+            if name == MEASUREMENT {
+                return Err(invalid("the Measurement class holds the rulers; it stays"));
+            }
+            if doc.classes.iter().filter(|c| c.name != MEASUREMENT).count() <= 1 {
+                return Err(invalid("a project keeps at least one class"));
+            }
+            match &move_to {
+                Some(to) if to == &name => return Err(invalid("annotations cannot move to the class being deleted")),
+                Some(to) if doc.class(to).is_none() => return Err(invalid(format!("no class {to:?}"))),
+                _ => {}
+            }
+            match &move_to {
+                Some(to) => doc.annotations.iter_mut().filter(|a| a.class == name).for_each(|a| a.class = to.clone()),
+                None => doc.annotations.retain(|a| a.class != name),
+            }
+            let sources: Vec<String> = doc.graph.nodes.iter().filter(|n| matches!(&n.kind, NodeKind::Annotations { class: Some(c), .. } if c == &name)).map(|n| n.id.clone()).collect();
+            for id in sources {
+                match &move_to {
+                    Some(to) => {
+                        if let Some(NodeKind::Annotations { class, .. }) = doc.graph.nodes.iter_mut().find(|n| n.id == id).map(|n| &mut n.kind) {
+                            *class = Some(to.clone());
+                        }
+                    }
+                    None => doc.graph.remove(&id),
+                }
+            }
+            doc.classes.retain(|c| c.name != name);
+            Ok(Changed::Annotations)
+        }
+        C::RenameClass { from, to } => {
+            let to = to.trim().to_string();
+            if to.is_empty() {
+                return Err(invalid("a class needs a name"));
+            }
+            if from == MEASUREMENT {
+                return Err(invalid("the Measurement class holds the rulers; it keeps its name"));
+            }
+            if to != from && doc.class(&to).is_some() {
+                return Err(invalid(format!("there is already a class {to:?}")));
+            }
+            let c = doc.classes.iter_mut().find(|c| c.name == from).ok_or_else(|| invalid(format!("no class {from:?}")))?;
+            c.name = to.clone();
+            doc.annotations.iter_mut().filter(|a| a.class == from).for_each(|a| a.class = to.clone());
+            for n in doc.graph.nodes.iter_mut() {
+                if let NodeKind::Annotations { class: Some(c), .. } = &mut n.kind
+                    && *c == from {
+                        *c = to.clone();
+                    }
+            }
+            Ok(Changed::Annotations)
+        }
+        C::SetAnnotationsClass { ids, class } => {
+            if doc.class(&class).is_none() {
+                return Err(invalid(format!("no class {class:?}")));
+            }
+            for id in &ids {
+                let a = doc.annotations.iter_mut().find(|a| &a.id == id).ok_or_else(|| CommandError::NoAnnotation(id.clone()))?;
+                a.class = class.clone();
+            }
+            Ok(Changed::Annotations)
+        }
         C::Batch { commands } => {
             let before = doc.clone();
             let mut changed = Changed::Graph;
@@ -438,8 +588,20 @@ fn check_kind(doc: &ProjectDoc, kind: &NodeKind) -> Result<(), CommandError> {
         NodeKind::Annotations { image: i, .. } => image(doc, i).map(|_| ()),
         NodeKind::Op { op, .. } => op.validate().map_err(invalid),
         NodeKind::View { .. } => Ok(()),
+        NodeKind::Script { path, output, .. } => {
+            if crate::data::script::Language::of(std::path::Path::new(path)).is_none() {
+                return Err(invalid(format!("{path}: a script is a .py or .rs file")));
+            }
+            if *output == lumen_pipeline::PortType::Table {
+                return Err(invalid("a script gives an image, a mask or labels"));
+            }
+            Ok(())
+        }
     }
 }
+
+/// The rulers' class.
+pub const MEASUREMENT: &str = "Measurement";
 
 fn check_annotation(doc: &ProjectDoc, a: &Annotation) -> Result<(), CommandError> {
     image(doc, &a.image)?;
@@ -457,6 +619,7 @@ fn base_id(kind: &NodeKind) -> String {
         NodeKind::Annotations { .. } => "annotations".into(),
         NodeKind::Op { op, .. } => op.tag().into(),
         NodeKind::View { .. } => "view".into(),
+        NodeKind::Script { .. } => "script".into(),
     }
 }
 
@@ -490,7 +653,7 @@ mod tests {
     #[test]
     fn annotations_are_checked_and_numbered() {
         let mut d = opened();
-        let a = Annotation { id: String::new(), image: "img1".into(), shape: Shape::Rect { x: 0.0, y: 0.0, w: 5.0, h: 5.0 }, class: "Tumor".into(), note: String::new() };
+        let a = Annotation { id: String::new(), image: "img1".into(), shape: Shape::Rect { x: 0.0, y: 0.0, w: 5.0, h: 5.0 }, class: "Tumor".into(), note: String::new(), z: None };
         apply(&mut d, Command::AddAnnotation { annotation: a.clone() }).unwrap();
         assert_eq!(d.annotations[0].id, "a1");
         assert!(apply(&mut d, Command::AddAnnotation { annotation: Annotation { class: "Nope".into(), ..a.clone() } }).is_err());
@@ -498,6 +661,28 @@ mod tests {
         assert_eq!(d.annotations[0].shape, Shape::Rect { x: 2.0, y: 0.0, w: 5.0, h: 5.0 });
         apply(&mut d, Command::RemoveImage { id: "img1".into() }).unwrap();
         assert!(d.annotations.is_empty() && d.active_image.is_none());
+    }
+
+    #[test]
+    fn a_class_goes_with_or_without_its_annotations() {
+        let mut d = opened();
+        let ann = |class: &str| Annotation { id: String::new(), image: "img1".into(), class: class.into(), shape: super::super::annotation::Shape::Rect { x: 0.0, y: 0.0, w: 4.0, h: 4.0 }, note: String::new(), z: None };
+        let first = d.classes[0].name.clone();
+        let second = d.classes[1].name.clone();
+        apply(&mut d, Command::AddAnnotations { annotations: vec![ann(&first), ann(&first), ann(&second)] }).unwrap();
+        apply(&mut d, Command::RemoveClass { name: first.clone(), move_to: Some(second.clone()) }).unwrap();
+        assert!(d.class(&first).is_none() && d.annotations.iter().all(|a| a.class == second) && d.annotations.len() == 3);
+        apply(&mut d, Command::RenameClass { from: second.clone(), to: "Nuclei".into() }).unwrap();
+        assert!(d.annotations.iter().all(|a| a.class == "Nuclei"));
+        apply(&mut d, Command::RemoveClass { name: "Nuclei".into(), move_to: None }).unwrap();
+        assert!(d.annotations.is_empty());
+        assert!(apply(&mut d, Command::RemoveClass { name: MEASUREMENT.into(), move_to: None }).is_err());
+        while d.classes.iter().filter(|c| c.name != MEASUREMENT).count() > 1 {
+            let n = d.classes.iter().find(|c| c.name != MEASUREMENT).unwrap().name.clone();
+            apply(&mut d, Command::RemoveClass { name: n, move_to: None }).unwrap();
+        }
+        let last = d.classes.iter().find(|c| c.name != MEASUREMENT).unwrap().name.clone();
+        assert!(apply(&mut d, Command::RemoveClass { name: last, move_to: None }).is_err());
     }
 
     #[test]

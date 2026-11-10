@@ -31,10 +31,10 @@ impl Stats {
 
     fn add(&mut self, at: Zyx, value: Option<f32>) {
         self.area += 1;
-        for a in 0..3 {
-            self.sum[a] += at[a] as f64;
-            self.low[a] = self.low[a].min(at[a]);
-            self.high[a] = self.high[a].max(at[a] + 1);
+        for (a, &v) in at.iter().enumerate() {
+            self.sum[a] += v as f64;
+            self.low[a] = self.low[a].min(v);
+            self.high[a] = self.high[a].max(v + 1);
         }
         if let Some(v) = value {
             self.intensity_sum += v as f64;

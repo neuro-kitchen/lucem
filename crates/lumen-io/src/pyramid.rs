@@ -25,6 +25,9 @@ use crate::error::{IoError, IoResult};
 use crate::image_io::{load_image_file, LoadedImage};
 use crate::ome_zarr::{blosc_decompress, find_ome_zarr_root, is_safe_relative_path};
 
+/// A cached chunk and when it was last used.
+type CachedChunk = (Arc<Vec<f32>>, u64);
+
 /// Edge of the tiles of an in-memory pyramid (logical tile; Zarr levels use their chunk size).
 pub const MEMORY_TILE: usize = 512;
 /// An in-memory volume's levels halve until they fit this many voxels a side.
@@ -140,7 +143,7 @@ struct ChunkCache(Mutex<ChunkCacheState>);
 
 #[derive(Debug, Default)]
 struct ChunkCacheState {
-    map: HashMap<(usize, Vec<usize>), (Arc<Vec<f32>>, u64)>,
+    map: HashMap<(usize, Vec<usize>), CachedChunk>,
     bytes: usize,
     clock: u64,
 }
@@ -464,11 +467,10 @@ impl Pyramid {
             .collect();
 
         let mut label_groups = Vec::new();
-        if let Ok(text) = fs::read_to_string(root.join("labels").join(".zattrs")) {
-            if let Ok(l) = serde_json::from_str::<LabelsAttrs>(&text) {
+        if let Ok(text) = fs::read_to_string(root.join("labels").join(".zattrs"))
+            && let Ok(l) = serde_json::from_str::<LabelsAttrs>(&text) {
                 label_groups = l.labels.into_iter().filter(|g| is_safe_relative_path(g) && root.join("labels").join(g).is_dir()).collect();
             }
-        }
         let name = ms.name.filter(|n| !n.is_empty()).unwrap_or_else(|| root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into()));
         Ok(Self { name, path: Some(root.to_path_buf()), levels, channels, pixel_size_um, z_spacing_um, dtype: a0.dtype.label(), label_groups, backend: Backend::Zarr(arrays), chunks: ChunkCache::default() })
     }
@@ -622,6 +624,7 @@ impl Pyramid {
 
     /// A region of plane `z` of one channel at `level` (`x0, y0, w, h` in that level's pixels,
     /// clipped to it), assembled from its tiles.
+    #[allow(clippy::too_many_arguments)]
     pub fn read_region_at(&self, level: usize, channel: usize, z: usize, x0: usize, y0: usize, w: usize, h: usize) -> IoResult<Vec<f32>> {
         let l = self.levels.get(level).ok_or_else(|| IoError::OmeZarr(format!("no level {level}")))?.clone();
         let (x1, y1) = ((x0 + w).min(l.width), (y0 + h).min(l.height));
@@ -1051,7 +1054,7 @@ mod tests {
     fn memory_pyramid_halves_until_one_tile() {
         let img = crate::phantoms::generate_phantom(crate::phantoms::PhantomKind::FluorescenceNuclei, 1500, 1100);
         let py = Pyramid::from_loaded(img);
-        assert_eq!(py.levels.last().unwrap().width.max(py.levels.last().unwrap().height) <= MEMORY_TILE, true);
+        assert!(py.levels.last().unwrap().width.max(py.levels.last().unwrap().height) <= MEMORY_TILE);
         let r = py.read_region(0, 0, 500, 500, 600, 30).unwrap();
         assert_eq!(r.len(), 600 * 30);
     }

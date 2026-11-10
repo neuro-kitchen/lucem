@@ -1,5 +1,9 @@
 //! GPU kernels for CIE76, CIE94, CIEDE2000, and CMC perceptual color difference metrics.
 
+// CubeCL kernels: `contains`, `clamp` and `abs_diff` do not lower to device code, so the
+// comparisons stay written out
+#![allow(clippy::manual_range_contains, clippy::manual_clamp, clippy::manual_abs_diff)]
+
 use cubecl::prelude::*;
 use lumen_core::compute::element_position;
 
@@ -96,8 +100,8 @@ pub(crate) fn ciede2000_kernel<F: lumen_core::element::ImageFloat>(
         let c1p = f32::sqrt(a1p * a1p + b1 * b1);
         let c2p = f32::sqrt(a2p * a2p + b2 * b2);
 
-        let deg_per_rad = 57.29577951308232f32;
-        let rad_per_deg = 0.017453292519943295f32;
+        let deg_per_rad = 57.295_78_f32;
+        let rad_per_deg = 0.017_453_292_f32;
 
         let mut h1p = f32::atan2(b1, a1p) * deg_per_rad;
         if h1p < 0.0f32 {
@@ -185,11 +189,11 @@ pub(crate) fn cmc_kernel<F: lumen_core::element::ImageFloat>(
         let db = b1 - b2;
         let dh_sq = f32::max(da * da + db * db - dc * dc, 0.0f32);
 
-        let mut h1 = f32::atan2(b1, a1) * 57.29577951308232f32;
+        let mut h1 = f32::atan2(b1, a1) * 57.295_78_f32;
         if h1 < 0.0f32 {
             h1 += 360.0f32;
         }
-        let rad_per_deg = 0.017453292519943295f32;
+        let rad_per_deg = 0.017_453_292_f32;
         let t = if h1 >= 164.0f32 && h1 <= 345.0f32 {
             0.56f32 + f32::abs(0.2f32 * f32::cos((h1 + 168.0f32) * rad_per_deg))
         } else {

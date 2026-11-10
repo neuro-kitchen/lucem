@@ -240,6 +240,7 @@ pub fn block_reduce<F: ImageFloat>(
 
 /// Samples a 1-D intensity profile along the line segment from `src = (y0, x0)` to `dst = (y1, x1)`
 /// of a 2-D image using B-spline interpolation of `order` (`0..=5`).
+#[allow(clippy::too_many_arguments)]
 pub fn profile_line<F: ImageFloat>(
     client: &Client,
     image: &DeviceArray<F>,

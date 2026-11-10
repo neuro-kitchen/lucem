@@ -177,7 +177,7 @@ mod tests {
             .unwrap()
             .to_host(client);
         let count: u32 = edges.iter().sum();
-        assert!(count >= 28 && count <= 60, "unexpected edge count {count} ({})", client.name());
+        assert!((28..=60).contains(&count), "unexpected edge count {count} ({})", client.name());
         assert_eq!(edges[10 * w + 10], 0, "interior of square should not be an edge");
         assert_eq!(edges[0], 0, "exterior corner should not be an edge");
     }

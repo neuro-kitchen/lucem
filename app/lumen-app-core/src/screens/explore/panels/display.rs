@@ -6,6 +6,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::{h_flex, v_flex, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -36,6 +37,8 @@ pub struct DisplayPanel {
     bounds: Vec<Rc<Cell<Bounds<Pixels>>>>,
     drag: Option<(usize, Marker)>,
     wheel: Option<(usize, Entity<ColorWheel>, Subscription)>,
+    /// Channels whose card is folded to its header.
+    folded: std::collections::HashSet<usize>,
     _subs: Vec<Subscription>,
 }
 
@@ -46,7 +49,7 @@ impl DisplayPanel {
                 cx.notify();
             }
         })];
-        Self { store, bounds: Vec::new(), drag: None, wheel: None, _subs: subs }
+        Self { store, bounds: Vec::new(), drag: None, wheel: None, folded: Default::default(), _subs: subs }
     }
 
     fn channel(&self, c: usize, cx: &Context<Self>) -> Option<(String, ChannelDoc)> {
@@ -215,7 +218,7 @@ impl Render for DisplayPanel {
         while self.bounds.len() < img.channels.len() {
             self.bounds.push(Rc::new(Cell::new(Bounds::default())));
         }
-        let mut list = v_flex().w_full().gap(px(theme::XL));
+        let mut list = v_flex().w_full().gap(px(theme::SM));
         // The image
         if let Some(py) = &py {
             list = list.child(
@@ -266,13 +269,16 @@ impl Render for DisplayPanel {
                 w.update(cx, |w, cx| w.set(rgb, cx));
             }
             let hist = hists.as_ref().and_then(|h| h.get(c).cloned());
-            list = list.child(
-                v_flex()
-                    .w_full()
-                    .gap(px(theme::SM))
-                    .child(
-                        h_flex()
+            let folded = self.folded.contains(&c);
+            let fold = Button::new(SharedString::from(format!("ch-fold-{c}"))).ghost().xsmall().icon(gpui_kit::component::Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown })).on_click(cx.listener(move |this, _, _, cx| {
+                if !this.folded.remove(&c) {
+                    this.folded.insert(c);
+                }
+                cx.notify();
+            }));
+            let header = h_flex()
                             .gap(px(theme::SM))
+                            .child(fold)
                             .child(Checkbox::new(SharedString::from(format!("ch-visible-{c}"))).checked(ch.visible).on_click(move |on: &bool, _, cx| {
                                 let on = *on;
                                 s1(&move |d: &mut ChannelDoc| d.visible = on, cx)
@@ -287,8 +293,20 @@ impl Render for DisplayPanel {
                                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_wheel(c, cx))),
                             )
                             .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(ch.label.clone()))
-                            .child(Button::new(SharedString::from(format!("ch-auto-{c}"))).ghost().xsmall().label("Auto").tooltip("Window from the 0.1–99.8 % percentiles").on_click(auto)),
-                    )
+                            .child(Button::new(SharedString::from(format!("ch-auto-{c}"))).ghost().xsmall().label("Auto").tooltip("Window from the 0.1–99.8 % percentiles").on_click(auto));
+            // A card per channel; folded, only its header
+            if folded {
+                list = list.child(v_flex().w_full().p(px(theme::SM)).rounded(px(6.)).bg(color::raised()).child(header));
+                continue;
+            }
+            list = list.child(
+                v_flex()
+                    .w_full()
+                    .gap(px(theme::SM))
+                    .p(px(theme::SM))
+                    .rounded(px(6.))
+                    .bg(color::raised())
+                    .child(header)
                     .children(wheel_open.map(|w| div().pl(px(theme::LG)).child(w)))
                     .child(self.histogram(c, hist, ch, range, cx))
                     .child(

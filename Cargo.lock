@@ -5424,7 +5424,9 @@ dependencies = [
  "async-channel",
  "gpui-kit",
  "lumen-core",
+ "lumen-hist",
  "lumen-io",
+ "lumen-ml",
  "lumen-ops",
  "lumen-pipeline",
  "lumen-view",
@@ -5440,6 +5442,7 @@ name = "lumen-cli"
 version = "0.1.0"
 dependencies = [
  "lumen-core",
+ "lumen-hist",
  "lumen-io",
  "lumen-ops",
  "lumen-pipeline",
@@ -5461,6 +5464,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-hist"
+version = "0.1.0"
+dependencies = [
+ "cubecl",
+ "lumen-core",
+ "lumen-ml",
+ "lumen-ops",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "lumen-hub"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "sha2 0.11.1",
+ "tar",
+ "ureq",
+]
+
+[[package]]
 name = "lumen-io"
 version = "0.1.0"
 dependencies = [
@@ -5475,6 +5501,28 @@ dependencies = [
 [[package]]
 name = "lumen-ml"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lumen-ml-sam"
+version = "0.1.0"
+dependencies = [
+ "lumen-ml",
+ "lumen-model-sam",
+ "serde_json",
+]
+
+[[package]]
+name = "lumen-model-sam"
+version = "0.1.0"
+dependencies = [
+ "lumen-hub",
+ "lumen-ml",
+ "ort",
+]
 
 [[package]]
 name = "lumen-ops"
@@ -6698,6 +6746,25 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "ort"
+version = "2.0.0-rc.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37c87aa7a90b7ff3e0fe36cccd475df8d67f15f07f4d6c370c4b38464232813c"
+dependencies = [
+ "libloading 0.9.0",
+ "ndarray",
+ "ort-sys",
+ "smallvec",
+ "tracing",
+]
+
+[[package]]
+name = "ort-sys"
+version = "2.0.0-rc.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d22b0417f1838db5a3ac0b3f98dfe39f6fb73624aa0a27c6bbb5040b9c7db2b"
 
 [[package]]
 name = "owo-colors"
@@ -10418,6 +10485,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7be76686bdf7198002062423ca0d8cf9b75a27c8e1de804513b97e97b555d9d"
 dependencies = [
  "base64 0.23.1",
+ "flate2",
  "log",
  "percent-encoding",
  "rustls",
