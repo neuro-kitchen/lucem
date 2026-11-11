@@ -132,7 +132,6 @@ pub struct DisplayPanel {
 enum ChannelPage {
     Colour,
     Levels,
-    Processing,
 }
 
 /// A row of page tabs (Affinity's panel tabs): the chosen one bold and underlined.
@@ -413,7 +412,7 @@ impl DisplayPanel {
         let me = cx.entity().downgrade();
         let tabs = page_tabs(
             "ch-page",
-            vec![(ChannelPage::Colour, "Colour".into()), (ChannelPage::Levels, "Levels".into()), (ChannelPage::Processing, if step_rows.is_empty() { "Processing".into() } else { format!("Processing · {}", step_rows.len()) })],
+            vec![(ChannelPage::Colour, "Colour".into()), (ChannelPage::Levels, "Levels".into())],
             page,
             move |p, cx| {
                 let _ = me.update(cx, |this, cx| {
@@ -422,21 +421,8 @@ impl DisplayPanel {
                 });
             },
         );
-        // Colour: the presets, the wheel
-        let colour = v_flex()
-            .gap(px(theme::SM))
-            .child({
-                let (store, id, ch) = (store.clone(), id.clone(), ch.clone());
-                preset_row(&format!("ch-preset-{c}"), &CHANNEL_COLORS, ch.color, move |rgb, cx| {
-                    let d = ChannelDoc { color: rgb, ..ch.clone() };
-                    let id = id.clone();
-                    store.update(cx, |s, cx| {
-                        let _ = s.execute(Command::SetChannel { image: id, channel: c, display: d }, cx);
-                    });
-                })
-            })
-            // The wheel centred under them
-            .children(wheel_open.map(|w| h_flex().w_full().justify_center().child(w)));
+        // Colour: the wheel
+        let colour = v_flex().gap(px(theme::SM)).children(wheel_open.map(|w| h_flex().w_full().justify_center().child(w)));
         // Levels: the histogram with its black and white points, gamma
         let levels = v_flex()
             .gap(px(theme::SM))
@@ -553,9 +539,16 @@ impl DisplayPanel {
         let body = match page {
             ChannelPage::Colour => colour.into_any_element(),
             ChannelPage::Levels => levels.into_any_element(),
-            ChannelPage::Processing => processing.into_any_element(),
         };
-        v_flex().gap(px(theme::MD)).child(head).child(tabs).child(body).into_any_element()
+        // Processing is always there (first-class, not a tab), under the display pages
+        v_flex()
+            .gap(px(theme::MD))
+            .child(head)
+            .child(tabs)
+            .child(body)
+            .child(div().h(px(1.)).w_full().bg(color::border()))
+            .child(processing)
+            .into_any_element()
     }
 
     fn class_editor(&mut self, name: &str, cx: &mut Context<Self>) -> AnyElement {
