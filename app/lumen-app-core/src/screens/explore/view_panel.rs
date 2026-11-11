@@ -9,9 +9,8 @@ use std::rc::Rc;
 use gpui_kit::base::dock::{Panel as BasePanel, PanelEvent};
 use gpui_kit::component::dock::{Panel, PanelControl};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     div, px, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, WeakEntity, Window,
@@ -186,32 +185,23 @@ impl Panel for ViewPanel {
 
     /// In the view's tab: what it shows (Plane, 2D, 3D, Channels) and "Add view…".
     fn toolbar_buttons(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<Vec<Button>> {
-        let s = self.store.read(cx);
-        let me = cx.entity().downgrade();
-        let mut out: Vec<Button> = ViewKind::ALL
-            .into_iter()
-            .map(|kind| {
-                let (me, allowed) = (me.clone(), Self::allowed(s, kind));
-                Button::new(SharedString::from(format!("view-kind-{}", kind.title())))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(kind.icon()))
-                    .tooltip(if allowed { format!("{}: {}", kind.title(), kind.hint()) } else { format!("{}: needs an image with depth (a z axis)", kind.title()) })
-                    .selected(self.kind == kind)
-                    .disabled(!allowed)
-                    .on_click(move |_, _, cx| {
-                        let _ = me.update(cx, |p, cx| {
-                            p.set_kind(kind, cx);
-                            p.focus_me(cx);
-                        });
-                    })
-            })
-            .collect();
-        let ex = self.explore.clone();
-        out.push(Button::new("view-add").ghost().xsmall().icon(Icon::new(IconName::Plus)).tooltip("Add a view, or arrange the views").on_click(move |_, window, cx| {
-            let _ = ex.update(cx, |e, cx| e.open_dialog(window, cx));
-        }));
-        Some(out)
+        let options = ExploreView::view_options(self.store.read(cx));
+        let current = ViewKind::ALL.iter().position(|k| *k == self.kind);
+        let (me, ex) = (cx.entity().downgrade(), self.explore.clone());
+        Some(crate::ui::container::tab_buttons(
+            "view",
+            &options,
+            current,
+            move |i, _, cx| {
+                let _ = me.update(cx, |p, cx| {
+                    p.set_kind(ViewKind::ALL[i], cx);
+                    p.focus_me(cx);
+                });
+            },
+            move |window, cx| {
+                let _ = ex.update(cx, |e, cx| e.open_dialog(window, cx));
+            },
+        ))
     }
 
     /// Switch what it shows, pin an image, add or close a view.
