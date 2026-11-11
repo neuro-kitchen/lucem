@@ -19,6 +19,12 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::base::dock::{DockArea, DockLayout, Panel as BasePanel, PanelEvent};
+use gpui_kit::base::Placement;
+use gpui_kit::component::dock::{panel_handle, Panel};
+
+use crate::ui::container::{self, AddViewDialog, DialogEvent, ViewOption};
+use gpui_kit::EventEmitter;
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -315,9 +321,21 @@ pub struct AnalyzeView {
     previews: HashMap<String, Arc<RenderImage>>,
     pending: HashSet<String>,
     preview_task: Option<Task<()>>,
-    /// The plot views under the table, left to right.
+    /// The plot views (each a panel of the dock).
     plots: Vec<PlotView>,
     next_plot: usize,
+    /// Explore's container: the table and the plots are views in this dock, dragged into tabs
+    /// and splits; the table's panel (when shown) and each plot's.
+    dock: Entity<DockArea>,
+    table_panel: Option<Entity<AnalyzePanel>>,
+    plot_panels: Vec<(usize, Entity<AnalyzePanel>)>,
+    /// The hierarchy (left) and the side pane (right) shown.
+    show_hierarchy: bool,
+    show_side: bool,
+    /// What the table view shows above its rows (set by `render`).
+    note: String,
+    /// "Add view or container" open.
+    dialog: Option<(Entity<AddViewDialog>, Subscription)>,
     // Code on the table
     code_open: bool,
     lang: Language,
@@ -343,7 +361,18 @@ impl AnalyzeView {
             }),
             cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
         ];
+        let me = cx.weak_entity();
+        let dock = container::new_dock("analyze", window, cx);
+        let table_panel = cx.new(|cx| AnalyzePanel::new(me, PanelKind::Table, cx));
+        dock.update(cx, |d, cx| d.set_center(DockLayout::tabs().panel_view(panel_handle(table_panel.clone()), cx), window, cx));
         Self {
+            dock,
+            table_panel: Some(table_panel),
+            plot_panels: Vec::new(),
+            show_hierarchy: true,
+            show_side: true,
+            note: String::new(),
+            dialog: None,
             store,
             tab: None,
             scope: None,
@@ -910,11 +939,207 @@ impl AnalyzeView {
 
     /// A histogram of a column, or two columns against each other, over the rows shown.
     /// Adds a plot view of `kind`, its columns chosen from the table.
-    fn add_plot(&mut self, kind: Plot, cx: &mut Context<Self>) {
+    /// A new plot view: under the table for the first, then to the right of the last plot.
+    fn add_plot(&mut self, kind: Plot, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_plot;
         self.next_plot += 1;
         self.plots.push(PlotView { id, kind, x: None, y: None, group: None });
+        let me = cx.weak_entity();
+        let panel = cx.new(|cx| AnalyzePanel::new(me, PanelKind::Plot(id), cx));
+        let next_to = self.plot_panels.last().map(|(_, p)| (p.entity_id(), Placement::Right)).or_else(|| self.table_panel.as_ref().map(|p| (p.entity_id(), Placement::Bottom)));
+        self.plot_panels.push((id, panel.clone()));
+        self.place(panel, next_to, window, cx);
+    }
+
+    /// The table view back (after it was closed), to the left of the plots.
+    fn add_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.table_panel.is_some() {
+            return;
+        }
+        let me = cx.weak_entity();
+        let panel = cx.new(|cx| AnalyzePanel::new(me, PanelKind::Table, cx));
+        let next_to = self.plot_panels.first().map(|(_, p)| (p.entity_id(), Placement::Left));
+        self.table_panel = Some(panel.clone());
+        self.place(panel, next_to, window, cx);
+    }
+
+    fn place(&mut self, panel: Entity<AnalyzePanel>, next_to: Option<(gpui_kit::EntityId, Placement)>, window: &mut Window, cx: &mut Context<Self>) {
+        container::add_beside(&self.dock, panel, next_to, window, cx);
         cx.notify();
+    }
+
+    /// Analyze's views for the dialog: the table (once), then the plots.
+    fn view_options(&self) -> Vec<ViewOption> {
+        let table = ViewOption::new("Table", IconName::Table2, "The rows, filtered, searched and sorted");
+        let mut out = vec![if self.table_panel.is_some() { table.unavailable("Already shown") } else { table }];
+        out.extend(Plot::ALL.iter().map(|k| ViewOption::new(k.title(), k.icon(), k.hint())));
+        out
+    }
+
+    /// The shared "Add view or container" dialog.
+    pub fn open_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let options = self.view_options();
+        let dialog = cx.new(|cx| AddViewDialog::new(options, true, window, cx));
+        let sub = cx.subscribe_in(&dialog, window, |this, _, e: &DialogEvent, window, cx| {
+            this.dialog = None;
+            match *e {
+                DialogEvent::Arrange(how) => this.arrange(how, window, cx),
+                DialogEvent::Add(0) => this.add_table(window, cx),
+                DialogEvent::Add(i) => this.add_plot(Plot::ALL[i - 1], window, cx),
+                DialogEvent::Close => {}
+            }
+            cx.notify();
+        });
+        self.dialog = Some((dialog, sub));
+        cx.notify();
+    }
+
+    /// Lays the views out as `how`: the table, then the plots.
+    fn arrange(&mut self, how: crate::data::store::Arrangement, window: &mut Window, cx: &mut Context<Self>) {
+        let panels: Vec<Entity<AnalyzePanel>> = self.table_panel.iter().cloned().chain(self.plot_panels.iter().map(|(_, p)| p.clone())).collect();
+        if panels.is_empty() {
+            return;
+        }
+        let layout = container::arranged(&panels, how, cx);
+        self.dock.update(cx, |d, cx| d.set_center(layout, window, cx));
+        cx.notify();
+    }
+
+    /// A view left the dock (closed from its tab).
+    fn removed(&mut self, kind: PanelKind, cx: &mut Context<Self>) {
+        match kind {
+            PanelKind::Table => self.table_panel = None,
+            PanelKind::Plot(id) => {
+                self.plots.retain(|p| p.id != id);
+                self.plot_panels.retain(|(i, _)| *i != id);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The table view's content: the note, then the table.
+    fn table_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some((m, order, previews)) = self.shown.clone() else {
+            return div().size_full().p(px(theme::MD)).text_sm().text_color(color::text_muted()).child("Making the table…").into_any_element();
+        };
+        let note = self.note.clone();
+        let table = self.table(&m, &order, previews, window, cx).into_any_element();
+        v_flex().size_full().bg(color::panel()).child(div().flex_none().px(px(theme::MD)).py(px(theme::SM)).text_xs().text_color(color::text_muted()).child(note)).child(table).into_any_element()
+    }
+
+    /// A plot view's content.
+    fn plot_view(&mut self, id: usize, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let (Some((m, order, _)), Some(v)) = (self.shown.clone(), self.plots.iter().find(|p| p.id == id).cloned()) else {
+            return div().into_any_element();
+        };
+        self.plot_card(&v, &m, &order, cx)
+    }
+
+    /// Analyze's menus (in the app's menu row while Analyze is shown): Edit, Table (what it
+    /// shows, export, code), View (add a view, the side panels).
+    pub fn menus(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let me = cx.entity().downgrade();
+        let store = self.store.clone();
+        let (can_undo, can_redo) = (self.store.read(cx).can_undo(), self.store.read(cx).can_redo());
+        let img = self.store.read(cx).doc.active_image.clone().unwrap_or_default();
+        let (n_cells, n_tiles) = (self.store.read(cx).hist.cells.get(&img).map_or(0, Vec::len), self.store.read(cx).hist.tiles.get(&img).map_or(0, Vec::len));
+        let tab = self.tab.clone();
+        let item = |label: &str, icon: IconName| PopupMenuItem::new(label.to_string()).icon(Icon::new(icon));
+        let edit = {
+            let (a, b) = (store.clone(), store.clone());
+            Button::new("analyze-menu-edit").ghost().small().label("Edit").dropdown_menu(move |m: PopupMenu, _, _| {
+                let (a, b) = (a.clone(), b.clone());
+                m.item(item("Undo  Ctrl+Z", IconName::Undo2).disabled(!can_undo).on_click(move |_, _, cx| a.update(cx, |s, cx| s.undo(false, cx))))
+                    .item(item("Redo  Ctrl+Shift+Z", IconName::Redo2).disabled(!can_redo).on_click(move |_, _, cx| b.update(cx, |s, cx| s.undo(true, cx))))
+            })
+        };
+        let table = {
+            let me = me.clone();
+            Button::new("analyze-menu-table").ghost().small().label("Table").dropdown_menu(move |m: PopupMenu, _, _| {
+                let pick = |label: String, icon: IconName, to: Option<String>, on: bool, enabled: bool| {
+                    let me = me.clone();
+                    PopupMenuItem::new(label).icon(Icon::new(icon)).checked(on).disabled(!enabled).on_click(move |_, _, cx| {
+                        let to = to.clone();
+                        let _ = me.update(cx, |a, cx| {
+                            a.tab = to;
+                            a.show_result = false;
+                            a.sort = None;
+                            cx.notify();
+                        });
+                    })
+                };
+                let (e, c) = (me.clone(), me.clone());
+                m.label("Show")
+                    .item(pick("Regions and shapes".into(), IconName::Shapes, None, tab.is_none(), true))
+                    .item(pick(format!("Cells · {}", group_digits(n_cells)), IconName::Sparkles, Some(CELLS.into()), tab.as_deref() == Some(CELLS), n_cells > 0))
+                    .item(pick(format!("Tiles · {}", group_digits(n_tiles)), IconName::Grid3x3, Some(TILES.into()), tab.as_deref() == Some(TILES), n_tiles > 0))
+                    .separator()
+                    .item(item("Export CSV…", IconName::Download).on_click(move |_, _, cx| {
+                        let _ = e.update(cx, |a, cx| {
+                            if let Some((m, order, _)) = a.shown.clone() {
+                                let csv = m.csv(&order);
+                                a.export(csv, "table", order.len(), cx);
+                            }
+                        });
+                    }))
+                    .item(item("Code on the table (Python, Rust)", IconName::SquareTerminal).on_click(move |_, _, cx| {
+                        let _ = c.update(cx, |a, cx| {
+                            a.code_open = !a.code_open;
+                            cx.notify();
+                        });
+                    }))
+            })
+        };
+        let (table_shown, hier, side) = (self.table_panel.is_some(), self.show_hierarchy, self.show_side);
+        let view = {
+            let me = me.clone();
+            Button::new("analyze-menu-view").ghost().small().label("View").dropdown_menu(move |m: PopupMenu, _, _| {
+                let (t, d) = (me.clone(), me.clone());
+                let mut m = m
+                    .item(item("Add view or container…", IconName::Plus).on_click(move |_, window, cx| {
+                        let _ = d.update(cx, |a, cx| a.open_dialog(window, cx));
+                    }))
+                    .separator()
+                    .label("Add a view")
+                    .item(item("Table", IconName::Table2).disabled(table_shown).on_click(move |_, window, cx| {
+                        let _ = t.update(cx, |a, cx| a.add_table(window, cx));
+                    }));
+                for k in Plot::ALL {
+                    let me = me.clone();
+                    m = m.item(PopupMenuItem::new(format!("{}   {}", k.title(), k.hint())).icon(Icon::new(k.icon())).on_click(move |_, window, cx| {
+                        let _ = me.update(cx, |a, cx| a.add_plot(k, window, cx));
+                    }));
+                }
+                let (h, s) = (me.clone(), me.clone());
+                m.separator()
+                    .item(item("Hierarchy", IconName::PanelLeft).checked(hier).on_click(move |_, _, cx| {
+                        let _ = h.update(cx, |a, cx| {
+                            a.show_hierarchy = !a.show_hierarchy;
+                            cx.notify();
+                        });
+                    }))
+                    .item(item("Selection, summary and steps", IconName::PanelRight).checked(side).on_click(move |_, _, cx| {
+                        let _ = s.update(cx, |a, cx| {
+                            a.show_side = !a.show_side;
+                            cx.notify();
+                        });
+                    }))
+            })
+        };
+        h_flex().gap(px(2.)).child(edit).child(table).child(view).into_any_element()
+    }
+
+    /// A plot's tab title: its kind and columns.
+    fn plot_title(&self, id: usize) -> String {
+        match self.plots.iter().find(|p| p.id == id) {
+            Some(p) => match (p.kind, &p.x, &p.y) {
+                (Plot::Scatter, Some(x), Some(y)) => format!("Scatter · {y} by {x}"),
+                (Plot::Histogram, Some(x), _) => format!("Histogram · {x}"),
+                (Plot::Box, _, Some(y)) => format!("Box plot · {y}"),
+                (k, _, _) => k.title().to_string(),
+            },
+            None => "Plot".into(),
+        }
     }
 
     fn edit_plot(&mut self, id: usize, f: impl FnOnce(&mut PlotView), cx: &mut Context<Self>) {
@@ -937,20 +1162,6 @@ impl AnalyzeView {
                 gpui_kit::Hsla::from(gpui_kit::rgb((rgb[0] as u32) << 16 | (rgb[1] as u32) << 8 | rgb[2] as u32))
             })
             .collect()
-    }
-
-    /// The plot views, side by side under the table (scrolling sideways when they don't fit).
-    fn plots_strip(&self, m: &Model, order: &[usize], cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let cards: Vec<gpui_kit::AnyElement> = self.plots.clone().iter().map(|v| self.plot_card(v, m, order, cx)).collect();
-        div()
-            .id("analyze-plots")
-            .flex_none()
-            .h(px(320.))
-            .w_full()
-            .border_t_1()
-            .border_color(color::border())
-            .overflow_x_scroll()
-            .child(h_flex().h_full().gap(px(theme::MD)).p(px(theme::MD)).children(cards))
     }
 
     /// One plot view: its kind, its columns, the picture, a legend when split by groups.
@@ -1143,21 +1354,6 @@ impl AnalyzeView {
             })
         };
         let field = |label: &'static str, el: MenuSelect| h_flex().gap(px(theme::XS)).child(div().flex_none().text_xs().text_color(color::text_muted()).child(label)).child(div().w(px(120.)).child(el));
-        let kind_pick = {
-            let me = me.clone();
-            MenuSelect::new(("plot-kind", id), Plot::ALL.iter().map(|k| SharedString::from(k.title())).collect(), Plot::ALL.iter().position(|k| *k == v.kind), move |i, _, cx| {
-                let _ = me.update(cx, |a, cx| a.edit_plot(id, |p| p.kind = Plot::ALL[i], cx));
-            })
-        };
-        let close = {
-            let me = me.clone();
-            Button::new(("plot-close", id)).ghost().xsmall().icon(IconName::X).tooltip("Remove this plot").on_click(move |_, _, cx| {
-                let _ = me.update(cx, |a, cx| {
-                    a.plots.retain(|p| p.id != id);
-                    cx.notify();
-                });
-            })
-        };
         let mut fields = h_flex().flex_wrap().gap_x(px(theme::MD)).gap_y(px(theme::XS));
         match v.kind {
             Plot::Histogram => {
@@ -1183,16 +1379,10 @@ impl AnalyzeView {
             }))
         });
         v_flex()
-            .flex_none()
-            .w(px(400.))
-            .h_full()
-            .p(px(theme::SM))
+            .size_full()
+            .p(px(theme::MD))
             .gap(px(theme::XS))
-            .rounded(px(6.))
-            .border_1()
-            .border_color(color::border())
             .bg(color::panel())
-            .child(h_flex().gap(px(theme::SM)).child(Icon::new(v.kind.icon())).child(div().w(px(120.)).child(kind_pick)).child(div().flex_1()).child(close))
             .child(fields)
             .child(picture)
             .child(div().text_xs().text_color(color::text_muted()).truncate().child(axis))
@@ -1377,21 +1567,19 @@ impl Render for AnalyzeView {
         let total = model.as_ref().map_or(0, |m| m.rows());
         let with_previews = !self.show_result && model.as_ref().is_some_and(|m| m.ids.is_some() || m.objects.is_some());
         self.shown = model.as_ref().map(|m| (m.clone(), order_arc.clone(), with_previews));
-        let table = model.as_ref().map(|m| self.table(m, order, with_previews, window, cx).into_any_element());
-        let plots = (!self.plots.is_empty()).then(|| model.as_ref().map(|m| self.plots_strip(m, order, cx))).flatten();
-        let add_plot = model.is_some().then(|| {
+        self.note = note;
+        let _ = (order, window);
+        let toggle = |id: &'static str, icon: IconName, tip: &'static str, on: bool, f: fn(&mut AnalyzeView)| {
             let me = me.clone();
-            Button::new("analyze-add-plot").outline().small().icon(IconName::ChartColumn).label("Add plot").dropdown_menu(move |menu: PopupMenu, _, _| {
-                let mut m = menu;
-                for k in Plot::ALL {
-                    let me = me.clone();
-                    m = m.item(PopupMenuItem::new(format!("{}   {}", k.title(), k.hint())).icon(Icon::new(k.icon())).on_click(move |_, _, cx| {
-                        let _ = me.update(cx, |a, cx| a.add_plot(k, cx));
-                    }));
-                }
-                m
+            Button::new(id).ghost().small().icon(icon).tooltip(tip).selected(on).on_click(move |_, _, cx| {
+                let _ = me.update(cx, |a, cx| {
+                    f(a);
+                    cx.notify();
+                });
             })
-        });
+        };
+        let left_toggle = toggle("analyze-toggle-hierarchy", IconName::PanelLeft, "Hierarchy", self.show_hierarchy, |a| a.show_hierarchy = !a.show_hierarchy);
+        let right_toggle = toggle("analyze-toggle-side", IconName::PanelRight, "Selection, summary and steps", self.show_side, |a| a.show_side = !a.show_side);
         // Summary per class (annotations)
         let summary = (self.tab.is_none() && !self.show_result).then(|| {
             let s = self.store.read(cx);
@@ -1479,30 +1667,23 @@ impl Render for AnalyzeView {
                     .gap(px(theme::MD))
                     .border_b_1()
                     .border_color(color::border())
+                    .child(left_toggle)
                     .child(tabs)
                     .child(div().flex_1())
                     .child(div().w(px(220.)).child(Input::new(&self.search).small()))
                     .child(div().text_xs().text_color(color::text_muted()).child(count))
-                    .children(add_plot)
                     .child(code_toggle)
-                    .children(export),
+                    .children(export)
+                    .child(right_toggle),
             )
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(v_flex().id("analyze-hierarchy").flex_none().w(px(240.)).h_full().overflow_y_scroll().p(px(theme::MD)).border_r_1().border_color(color::border()).child(hierarchy))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(div().px(px(theme::MD)).py(px(theme::SM)).text_xs().text_color(color::text_muted()).child(note))
-                            .children(table)
-                            .children(plots)
-                            .when(self.code_open, |d| d.child(self.code_pane(cx))),
-                    )
-                    .child(v_flex().id("analyze-side").flex_none().w(px(300.)).h_full().overflow_y_scroll().p(px(theme::MD)).gap(px(theme::XL)).border_l_1().border_color(color::border()).children(has_selection.then(|| crate::screens::explore::panels::selection::summary(&self.store, cx))).children(summary).children(steps)),
+                    .when(self.show_hierarchy, |d| d.child(v_flex().id("analyze-hierarchy").flex_none().w(px(240.)).h_full().overflow_y_scroll().p(px(theme::MD)).border_r_1().border_color(color::border()).child(hierarchy)))
+                    // The views (table, plots) in Explore's container
+                    .child(v_flex().flex_1().min_w_0().h_full().child(div().relative().flex_1().min_h_0().child(self.dock.clone()).children(self.dialog.as_ref().map(|(d, _)| d.clone()))).when(self.code_open, |d| d.child(self.code_pane(cx))))
+                    .when(self.show_side, |d| d.child(v_flex().id("analyze-side").flex_none().w(px(300.)).h_full().overflow_y_scroll().p(px(theme::MD)).gap(px(theme::XL)).border_l_1().border_color(color::border()).children(has_selection.then(|| crate::screens::explore::panels::selection::summary(&self.store, cx))).children(summary).children(steps))),
             )
             .into_any_element()
     }
@@ -1522,5 +1703,110 @@ mod tests {
         assert_eq!(m.order(&[(1, "= stroma".into())], "", None), vec![1]);
         assert_eq!(m.order(&[], "tum", Some((2, true))), vec![2, 0]);
         assert_eq!(split_csv("a,\"b,c\",\"d\"\"e\""), vec!["a", "b,c", "d\"e"]);
+    }
+}
+
+/// What a panel of Analyze's dock shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PanelKind {
+    Table,
+    Plot(usize),
+}
+
+/// A view of Analyze's dock (the table, or one plot): its content is drawn by the Analyze view,
+/// which holds the table and the plots' settings.
+pub struct AnalyzePanel {
+    analyze: gpui_kit::WeakEntity<AnalyzeView>,
+    kind: PanelKind,
+    focus: gpui_kit::FocusHandle,
+    watching: Option<Subscription>,
+}
+
+impl AnalyzePanel {
+    fn new(analyze: gpui_kit::WeakEntity<AnalyzeView>, kind: PanelKind, cx: &mut Context<Self>) -> Self {
+        Self { analyze, kind, focus: cx.focus_handle(), watching: None }
+    }
+}
+
+impl Render for AnalyzePanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(a) = self.analyze.upgrade() else { return div().into_any_element() };
+        // Drawn again whenever the table or the plots' settings change
+        if self.watching.is_none() {
+            self.watching = Some(cx.observe(&a, |_, _, cx| cx.notify()));
+        }
+        let kind = self.kind;
+        let body = a.update(cx, |a, cx| match kind {
+            PanelKind::Table => a.table_view(window, cx),
+            PanelKind::Plot(id) => a.plot_view(id, cx),
+        });
+        div().id("analyze-panel").track_focus(&self.focus).size_full().bg(color::panel()).child(body).into_any_element()
+    }
+}
+
+impl EventEmitter<PanelEvent> for AnalyzePanel {}
+
+impl gpui_kit::Focusable for AnalyzePanel {
+    fn focus_handle(&self, _: &gpui_kit::App) -> gpui_kit::FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl BasePanel for AnalyzePanel {
+    fn panel_name(&self) -> &'static str {
+        "lumen-app.analyze"
+    }
+
+    /// Plots close; the table only while a plot is left (a view always stays).
+    fn closable(&self, cx: &gpui_kit::App) -> bool {
+        match self.kind {
+            PanelKind::Plot(_) => true,
+            PanelKind::Table => self.analyze.upgrade().is_some_and(|a| !a.read(cx).plot_panels.is_empty()),
+        }
+    }
+
+    fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let (a, kind) = (self.analyze.clone(), self.kind);
+        cx.defer(move |cx| {
+            let _ = a.update(cx, |a, cx| a.removed(kind, cx));
+        });
+    }
+}
+
+impl Panel for AnalyzePanel {
+    fn zoom_control(&self, _: &gpui_kit::App) -> Option<gpui_kit::component::dock::PanelControl> {
+        Some(gpui_kit::component::dock::PanelControl::Toolbar)
+    }
+
+    /// The shared tab buttons: a plot's kinds (a click switches this plot), the table's icon;
+    /// then "+" (add a view or arrange them).
+    fn toolbar_buttons(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<Vec<Button>> {
+        let a = self.analyze.clone();
+        let add = {
+            let a = a.clone();
+            move |window: &mut Window, cx: &mut gpui_kit::App| {
+                let _ = a.update(cx, |a, cx| a.open_dialog(window, cx));
+            }
+        };
+        let _ = cx;
+        Some(match self.kind {
+            PanelKind::Table => container::tab_buttons("analyze-table", &[ViewOption::new("Table", IconName::Table2, "The rows, filtered, searched and sorted")], Some(0), |_, _, _| {}, add),
+            PanelKind::Plot(id) => {
+                let current = a.upgrade().and_then(|a| a.read(cx).plots.iter().find(|p| p.id == id).map(|p| p.kind)).and_then(|k| Plot::ALL.iter().position(|x| *x == k));
+                let options: Vec<ViewOption> = Plot::ALL.iter().map(|k| ViewOption::new(k.title(), k.icon(), k.hint())).collect();
+                container::tab_buttons(&format!("analyze-plot-{id}"), &options, current, move |i, _, cx| {
+                    let _ = a.update(cx, |a, cx| a.edit_plot(id, |p| p.kind = Plot::ALL[i], cx));
+                }, add)
+            }
+        })
+    }
+
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let text = match (self.kind, self.analyze.upgrade()) {
+            (PanelKind::Table, _) => "Table".to_string(),
+            (PanelKind::Plot(id), Some(a)) => a.read(cx).plot_title(id),
+            _ => String::new(),
+        };
+        div().max_w(px(240.)).truncate().child(text)
     }
 }
