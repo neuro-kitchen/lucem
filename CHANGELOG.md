@@ -19,6 +19,8 @@ No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
 ### Supply chain (2026-11-11)
 
+- CI's Rust job frees the runner's disk (unused preinstalled toolchains) and builds without debug
+  info, so the workspace's test build no longer runs out of space.
 - RUSTSEC-2026-0194 and -0195 (quick-xml, reached only through polars' `object_store`) are
   recorded as accepted advisories in `deny.toml` until polars moves to `object_store` 0.14.
 
