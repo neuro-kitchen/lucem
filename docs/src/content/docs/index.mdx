@@ -1,0 +1,22 @@
+---
+title: lumen
+description: GPU image analysis for histology and microscopy, from a slide to a headless pipeline.
+template: splash
+editUrl: false
+lastUpdated: false
+hero:
+  title: GPU image analysis for slides and volumes
+  tagline: Look at whole-slide and 3D images, find tissue and cells, build pipelines, and run the same analysis on a server over a folder of slides.
+  actions:
+    - text: Get started
+      link: learn/
+    - text: View on GitHub
+      link: https://github.com/neuro-kitchen/lumen
+      variant: minimal
+---
+
+import EntryPoints from '../../components/EntryPoints.astro';
+
+<p class="install">Built from source with Rust: <code>cargo run -p lumen-app</code> for the app, <code>cargo build -p lumen-cli</code> for the <code>lumen</code> command.</p>
+
+<EntryPoints />

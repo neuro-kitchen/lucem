@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.astro/
+# Written from ../CHANGELOG.md before every build (scripts/changelog.mjs)
+src/content/docs/changelog/
+# Written before every build and dev run (scripts/fields.mjs)
+src/data/fields.json
