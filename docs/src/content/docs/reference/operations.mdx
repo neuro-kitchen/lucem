@@ -1,0 +1,79 @@
+---
+title: Operations
+description: Every pipeline operation, with its inputs, output and parameters.
+sidebar:
+  order: 1
+---
+
+{/* Written by docs/scripts/operations.mjs from `lumen ops --json`: don't edit by hand. */}
+
+Every operation the Pipeline, the **Process** menu, the search and `lumen run` can use, by
+family. Inputs and outputs are typed (`image`, `mask`, `labels`, `table`); a
+connection between different types is refused. In a pipeline file an operation is written as
+`{"op": "<name>", …parameters}`.
+
+## Filter
+
+| Operation | Does | In → out | Parameters (default) |
+|---|---|---|---|
+| **Gaussian blur** `gaussian_blur` | Gaussian smoothing. | `image` → `image` | `sigma` 2 |
+| **Median** `median` | Median in a disk of `radius` px. | `image` → `image` | `radius` 2 |
+| **Unsharp mask** `unsharp_mask` | Sharpening: `x + amount · (x − blur(x))`. | `image` → `image` | `amount` 1, `sigma` 2 |
+| **Difference of Gaussians** `difference_of_gaussians` | Band-pass: `blur(low) − blur(high)` (blob enhancement). | `image` → `image` | `high_sigma` 4, `low_sigma` 1 |
+| **Sobel** `sobel` | Gradient magnitude. | `image` → `image` | — |
+| **Laplace** `laplace` | Second derivative (edges, spots). | `image` → `image` | — |
+
+## Intensity
+
+| Operation | Does | In → out | Parameters (default) |
+|---|---|---|---|
+| **Gamma** `gamma` | `gain · x^gamma` (values in 0–1). | `image` → `image` | `gain` 1, `gamma` 0.7 |
+| **Rescale** `rescale` | Maps `[min, max]` to `[0, 1]`, clipped. | `image` → `image` | `max` 0.25, `min` 0 |
+| **CLAHE** `clahe` | Contrast-limited adaptive histogram equalization. | `image` → `image` | `clip_limit` 0.01, `tiles` 8 |
+| **Combine** `combine` | `a · A + b · B`. | A: `image` + B: `image` → `image` | `a` 1, `b` -1 |
+| **Mask image** `mask_image` | The image where the mask is on, 0 elsewhere. | image: `image` + mask: `mask` → `image` | — |
+
+## Restore
+
+| Operation | Does | In → out | Parameters (default) |
+|---|---|---|---|
+| **Rolling ball** `rolling_ball` | Subtracts the rolling-ball background. | `image` → `image` | `radius` 25 |
+| **TV denoise** `tv_denoise` | Total-variation denoising. | `image` → `image` | `iterations` 50, `weight` 0.1 |
+| **White top-hat** `white_tophat` | Bright details smaller than the disk (background removal). | `image` → `image` | `radius` 8 |
+| **Morph. gradient** `morph_gradient` | Dilation − erosion (outlines). | `image` → `image` | `radius` 2 |
+
+## Threshold
+
+| Operation | Does | In → out | Parameters (default) |
+|---|---|---|---|
+| **Otsu threshold** `otsu_threshold` | Pixels above the Otsu threshold. | `image` → `mask` | `bins` 256 |
+| **Threshold** `threshold` | Pixels at or above `value`. | `image` → `mask` | `value` 0.1 |
+| **Canny edges** `canny` | Edges as a mask. | `image` → `mask` | `sigma` 1.5 |
+
+## Mask
+
+| Operation | Does | In → out | Parameters (default) |
+|---|---|---|---|
+| **Open** `open` | Mask opening (removes specks). | `mask` → `mask` | `radius` 2 |
+| **Close** `close` | Mask closing (fills gaps). | `mask` → `mask` | `radius` 2 |
+| **Erode** `erode` |  | `mask` → `mask` | `radius` 1 |
+| **Dilate** `dilate` |  | `mask` → `mask` | `radius` 1 |
+| **Remove small** `remove_small` | Drops objects smaller than `min_size` px. | `mask` → `mask` | `min_size` 30 |
+| **Mask union** `mask_union` | On where A or B is on. | A: `mask` + B: `mask` → `mask` | — |
+| **Mask intersect** `mask_intersect` | On where A and B are on. | A: `mask` + B: `mask` → `mask` | — |
+| **Mask subtract** `mask_subtract` | On where A is on and B is off. | A: `mask` + B: `mask` → `mask` | — |
+| **Mask invert** `mask_invert` | On where the mask is off. | `mask` → `mask` | — |
+
+## Segment
+
+| Operation | Does | In → out | Parameters (default) |
+|---|---|---|---|
+| **Label objects** `label` | Connected objects of a mask, numbered. | `mask` → `labels` | — |
+| **Watershed** `watershed` | Grows the marker labels over the relief image (splits touching objects). | relief: `image` + markers: `labels` → `labels` | `compactness` 0 |
+
+## Measure
+
+| Operation | Does | In → out | Parameters (default) |
+|---|---|---|---|
+| **Measure** `measure` | One row per labelled object: area, shape, intensity. | labels: `labels` + intensity: `image` → `table` | — |
+
