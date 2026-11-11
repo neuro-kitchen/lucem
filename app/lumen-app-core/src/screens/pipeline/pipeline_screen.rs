@@ -57,7 +57,24 @@ impl PipelineView {
     }
 
     /// The menu bar: Sources, Edit, one menu per family of operators, Output, View.
+    /// The Pipeline's own bar: shown above the canvas when the Pipeline is docked in Explore;
+    /// in its workspace its menus sit in the app's menu row instead ([`Self::menus`]).
     fn menu_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        h_flex()
+            .id("pipeline-menu-bar")
+            .flex_none()
+            .h(px(theme::OPTIONS_BAR_H))
+            .px(px(theme::SM))
+            .items_center()
+            .bg(color::panel())
+            .border_b_1()
+            .border_color(color::border())
+            .child(self.menus(cx))
+    }
+
+    /// The Pipeline's menus: Sources, Edit, Process (Find an operation, then a submenu per
+    /// family, as Explore's Process), Output, Script, Model, View; the port colours at the end.
+    pub fn menus(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let canvas = self.canvas.downgrade();
         let selected = !self.canvas.read(cx).selected.is_empty();
         let menu = |id: &'static str, title: &'static str, icon: IconName, items: Vec<(String, String, Template)>| {
@@ -76,15 +93,9 @@ impl PipelineView {
         };
         let src = sources(&self.store.read(cx).doc);
         let mut bar = h_flex()
-            .id("pipeline-menu-bar")
-            .flex_none()
-            .h(px(theme::OPTIONS_BAR_H))
-            .px(px(theme::SM))
+            .flex_1()
             .gap(px(2.))
             .items_center()
-            .bg(color::panel())
-            .border_b_1()
-            .border_color(color::border())
             .child(menu("pipeline-menu-sources", "Sources", IconName::Image, src.items.into_iter().map(|i| (i.label, i.hint, i.template)).collect()));
         let edit = {
             let canvas = canvas.clone();
@@ -101,19 +112,28 @@ impl PipelineView {
             })
         };
         bar = bar.child(edit).child(divider_v());
-        for c in operations() {
-            let id: &'static str = match c.name {
-                "Filter" => "pipeline-menu-filter",
-                "Intensity" => "pipeline-menu-intensity",
-                "Restore" => "pipeline-menu-restore",
-                "Threshold" => "pipeline-menu-threshold",
-                "Mask" => "pipeline-menu-mask",
-                "Segment" => "pipeline-menu-segment",
-                _ => "pipeline-menu-measure",
-            };
-            bar = bar.child(menu(id, c.name, c.icon, c.items.into_iter().map(|i| (i.label, i.hint, i.template)).collect()));
-        }
-        bar = bar.child(divider_v()).child(menu("pipeline-menu-output", "Output", IconName::Eye, vec![("Result view".into(), "shown in Explore / Analyze".into(), Template::View)]));
+        // Process: every operation, a submenu per family (as Explore's Process menu)
+        let process = {
+            let canvas = canvas.clone();
+            Button::new("pipeline-menu-process").ghost().small().label("Process").dropdown_menu(move |m: PopupMenu, window, cx| {
+                let mut m = m
+                    .item(PopupMenuItem::new("Find an operation…  Ctrl+K").icon(Icon::new(IconName::Search)).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::navigation::actions::FindOperation), cx)))
+                    .separator()
+                    .label("A node on the canvas");
+                for c in operations() {
+                    let (canvas, icon, items) = (canvas.clone(), c.icon, c.items);
+                    m = m.submenu_with_icon(Some(Icon::new(icon)), c.name, window, cx, move |mut sub, _, _| {
+                        for it in &items {
+                            let (canvas, template) = (canvas.clone(), it.template.clone());
+                            sub = sub.item(PopupMenuItem::new(format!("{}   {}", it.label, it.hint)).icon(Icon::new(icon)).on_click(move |_, _, cx| Self::canvas_do(&canvas, cx, |c, cx| c.add(&template, None, cx))));
+                        }
+                        sub
+                    });
+                }
+                m
+            })
+        };
+        bar = bar.child(process).child(divider_v()).child(menu("pipeline-menu-output", "Output", IconName::Eye, vec![("Result view".into(), "shown in Explore / Analyze".into(), Template::View)]));
         // Blender's Script node: a Python or Rust file as a step
         let scripts = {
             let store = self.store.clone();
@@ -187,6 +207,7 @@ impl PipelineView {
             .children([("image", lumen_pipeline::PortType::Image), ("mask", lumen_pipeline::PortType::Mask), ("labels", lumen_pipeline::PortType::Labels), ("table", lumen_pipeline::PortType::Table)].into_iter().map(|(n, t)| {
                 h_flex().gap(px(theme::XS)).px(px(theme::XS)).child(div().size(px(8.)).rounded_full().bg(port_color(Some(t)))).child(div().text_xs().text_color(color::text_muted()).child(n))
             }))
+            .into_any_element()
     }
 
     /// The tool bar floating at the bottom of the canvas.
@@ -242,7 +263,9 @@ impl PipelineView {
 
 impl Render for PipelineView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().id("pipeline-workspace").size_full().child(self.menu_bar(cx)).child(
+        // In its own workspace the menus are in the app's menu row; docked in Explore, here
+        let own_bar = (self.store.read(cx).workspace != crate::navigation::route::Workspace::Pipeline).then(|| self.menu_bar(cx));
+        v_flex().id("pipeline-workspace").size_full().children(own_bar).child(
             h_flex()
             .flex_1()
             .min_h_0()

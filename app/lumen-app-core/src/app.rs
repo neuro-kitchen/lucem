@@ -667,7 +667,13 @@ impl LumenApp {
         let s = self.store.read(cx);
         let saved = s.project_file.is_some();
         let name = s.doc.name.clone();
-        let (lumen, help, row) = self.menus(cx);
+        let (lumen, help, explore_row) = self.menus(cx);
+        // Each workspace has its own menus in the row under the bar
+        let row = match self.store.read(cx).workspace {
+            Workspace::Pipeline => self.pipeline.update(cx, |p, cx| p.menus(cx)),
+            Workspace::Analyze => self.analyze.update(cx, |a, cx| a.menus(cx)),
+            Workspace::Explore => explore_row,
+        };
         // Affinity's layout: the app's menu (Lumen: files, Settings) and Help at the top left,
         // the workspaces next to them; the menus of what to do sit in a row under the bar
         let bar = TitleBar::new().when(rounded, |t| t.rounded_t(px(WINDOW_RADIUS - 1.0))).child(
@@ -817,6 +823,7 @@ impl Render for LumenApp {
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.store.update(cx, |s, cx| s.undo(false, cx))))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.store.update(cx, |s, cx| s.undo(true, cx))))
             .on_action(cx.listener(|this, _: &CommandPalette, w, cx| this.toggle_palette(w, cx)))
+            .on_action(cx.listener(|this, _: &FindOperation, w, cx| this.open_search(true, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
             .on_action(cx.listener(|this, _: &ToggleLeftPanel, _, cx| this.store.update(cx, |s, cx| s.request_view(ViewRequest::ToggleLeft, cx))))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.store.update(cx, |s, cx| s.request_view(ViewRequest::ToggleRight, cx))))

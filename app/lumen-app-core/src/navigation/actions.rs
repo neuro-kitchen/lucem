@@ -14,6 +14,8 @@ actions!(
         Undo,
         Redo,
         CommandPalette,
+        /// The search, listing the operations only.
+        FindOperation,
         ShowHelp,
         Quit,
         GoExplore,
