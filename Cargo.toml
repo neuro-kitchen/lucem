@@ -56,13 +56,13 @@ lumen-app-core = { path = "app/lumen-app-core", version = "0.1.0" }
 # Compute (as in dsp-kitchen)
 # `persistence`: autotune decisions survive the process; with the compiled-kernel cache turned on
 # in the runtime setup (.knowledge/gpu/01-compute-layer.md), start-up drops from minutes to seconds
-cubecl = { version = "0.11.3", default-features = false, features = ["std", "stdlib", "persistence"] }
+cubecl = { version = "0.11.4", default-features = false, features = ["std", "stdlib", "persistence"] }
 burn = { version = "0.22.1", default-features = false }
 # Python bindings (built by maturin, see pyproject.toml)
 pyo3 = { version = "0.30.1" }
 numpy = "0.30.0"
 # UI: GPUI through gpui-kit (re-exports gpui, gpui-base, gpui-component)
-gpui-kit = "0.9.0"
+gpui-kit = "0.9.1"
 # Analytics & columnar data (Arrow + Polars)
 arrow = { version = "60.1.0", default-features = false }
 polars = { version = "0.55.2", default-features = false, features = ["lazy", "fmt", "parquet"] }
@@ -79,7 +79,7 @@ smallvec = "1.16.5"
 quinn = "0.11.12"
 rcgen = "0.14.10"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
-rustls-pki-types = "1.15.1"
+rustls-pki-types = "1.16.0"
 sha2 = "0.11.1"
 # Machine learning plugins: ONNX Runtime loaded at run time (no download at build, nothing in the
 # app); HTTP for verified weight downloads (lumen-hub)
