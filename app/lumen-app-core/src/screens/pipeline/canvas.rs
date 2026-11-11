@@ -179,7 +179,7 @@ impl GraphCanvas {
     pub fn select(&mut self, ids: impl IntoIterator<Item = String>, cx: &mut Context<Self>) {
         self.selected = ids.into_iter().collect();
         let single = self.single().cloned();
-        self.store.update(cx, |s, _| s.selected_node = single);
+        self.store.update(cx, |s, _| s.sel.node = single);
         cx.emit(CanvasEvent::SelectionChanged);
         cx.notify();
     }

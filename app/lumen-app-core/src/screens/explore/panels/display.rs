@@ -85,7 +85,7 @@ enum Target {
 
 /// The selected layer: the last row picked in the tree, else the class of the one selected shape.
 fn target(s: &Store) -> Target {
-    if let Some(k) = s.layers_selected.last() {
+    if let Some(k) = s.sel.layers.last() {
         let (kind, rest) = k.split_once(':').unwrap_or((k.as_str(), ""));
         match kind {
             "channel" => {
@@ -99,8 +99,8 @@ fn target(s: &Store) -> Target {
             _ => {}
         }
     }
-    if s.selection.len() == 1
-        && let Some(a) = s.doc.annotations.iter().find(|a| s.selection.contains(&a.id))
+    if s.sel.shapes.len() == 1
+        && let Some(a) = s.doc.annotations.iter().find(|a| s.sel.shapes.contains(&a.id))
     {
         return Target::Class(a.class.clone());
     }
@@ -347,7 +347,7 @@ impl DisplayPanel {
                 })
             })
             .collect();
-        let selected_steps: Vec<String> = s.layers_selected.clone();
+        let selected_steps: Vec<String> = s.sel.layers.clone();
         while self.bounds.len() <= c {
             self.bounds.push(Rc::new(Cell::new(Bounds::default())));
         }

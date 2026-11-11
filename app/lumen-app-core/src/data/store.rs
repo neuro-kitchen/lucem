@@ -4,7 +4,7 @@
 //! what is on screen. Slow work (opening an image, starting the GPU, computing results) runs off
 //! the UI thread and comes back as events.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use gpui_kit::{AppContext as _, Context, EventEmitter};
 use lumen_io::{generate_phantom, PhantomKind, Pyramid};
 use lumen_pipeline::{Op, PortType};
 
-use crate::domain::command::{apply, Changed, Command, CommandError};
+use crate::domain::command::{Changed, Command};
 use crate::domain::graph::{NodeKind, ViewStyle};
 use crate::domain::annotation::{Annotation, Shape};
 use crate::domain::geometry;
@@ -26,7 +26,7 @@ use super::prefs::Prefs;
 use super::results::{analysis_key, analyze, compute, Analysis, ResultRequest, Results};
 
 /// Undo steps kept.
-const UNDO_DEPTH: usize = 200;
+pub(crate) const UNDO_DEPTH: usize = 200;
 
 /// What changed, for the screens that follow it.
 #[derive(Debug, Clone, PartialEq)]
@@ -161,11 +161,8 @@ pub struct Store {
     pub doc: ProjectDoc,
     /// The project file (`<folder>/project.lumen.json`); `None` until saved somewhere.
     pub project_file: Option<PathBuf>,
-    history: Vec<ProjectDoc>,
-    future: Vec<ProjectDoc>,
-    /// What each step of `history` and `future` did (the History panel), in the same order.
-    history_labels: Vec<String>,
-    future_labels: Vec<String>,
+    /// The changes made to `doc`, to undo and redo (see `super::document`).
+    pub(crate) undo: super::document::History,
     pub prefs: Prefs,
     prefs_path: Option<PathBuf>,
     pub workspace: Workspace,
@@ -176,8 +173,6 @@ pub struct Store {
     pub pyramids: HashMap<String, Arc<Pyramid>>,
     opening_ids: HashSet<String>,
     pub tool: ToolState,
-    /// Selected annotations (ids).
-    pub selection: BTreeSet<String>,
     pub results: Results,
     /// The whole-image pass of the shown image (previews, Otsu thresholds, tables).
     pub analysis: Option<Arc<Analysis>>,
@@ -190,7 +185,7 @@ pub struct Store {
     pub computing: bool,
     last_request: Option<ResultRequest>,
     /// The request the results on show answer (asked again: nothing to do).
-    results_for: Option<ResultRequest>,
+    pub(crate) results_for: Option<ResultRequest>,
     /// Asked while computing: run once more when the computation ends (one at a time, so slow
     /// steps such as model nodes are never started over and over, nor thrown away).
     results_pending: bool,
@@ -201,11 +196,6 @@ pub struct Store {
     pub device_generation: u64,
     /// Machine-learning plugins and their jobs.
     pub ml: super::ml::MlState,
-    /// The selected node in the Pipeline (shared so Explore can show it).
-    pub selected_node: Option<String>,
-    /// Selected rows of the Layers panel (`view:<id>`, `class:<name>`, `channel:<n>`), in the order
-    /// they were picked.
-    pub layers_selected: Vec<String>,
     /// Pixels a mask grows or shrinks by.
     pub mask_radius: usize,
     /// Rows of the Layers tree folded shut (view state).
@@ -218,10 +208,14 @@ pub struct Store {
     cursors: HashMap<String, [usize; 3]>,
     /// Bumped whenever annotations or classes change (views that rasterize them follow it).
     pub annotations_rev: u64,
+    /// The views of each workspace (`layout.json`), and a counter bumped when a project brings
+    /// its own (the workspaces restore their views when it moves).
+    pub layout: super::layout::Layout,
+    pub layout_rev: u64,
     /// Histology: cells by image, the stains, detection and classifier settings.
     pub hist: super::hist::HistState,
-    /// Detected objects selected on the shown image (`c12`: cell 12, `t5`: tile 5).
-    pub selected_objects: Vec<String>,
+    /// What is selected: shapes, detected objects, Layers rows, the Pipeline node.
+    pub sel: super::selection::Selection,
     /// The object hierarchy of the shown image, kept until its shapes or cells change (built
     /// once per change, never per frame).
     hierarchy: std::cell::RefCell<Option<(String, u64, u64, Arc<crate::domain::hierarchy::Hierarchy>)>>,
@@ -235,10 +229,7 @@ impl Store {
         Self {
             doc: ProjectDoc::default(),
             project_file: None,
-            history: Vec::new(),
-            future: Vec::new(),
-            history_labels: Vec::new(),
-            future_labels: Vec::new(),
+            undo: Default::default(),
             prefs,
             prefs_path,
             workspace: Workspace::Explore,
@@ -247,7 +238,6 @@ impl Store {
             pyramids: HashMap::new(),
             opening_ids: HashSet::new(),
             tool,
-            selection: BTreeSet::new(),
             results: Results::new(),
             analysis: None,
             histograms: HashMap::new(),
@@ -261,160 +251,30 @@ impl Store {
             device_pending: false,
             device_generation: 0,
             ml: Default::default(),
-            selected_node: None,
-            layers_selected: Vec::new(),
             mask_radius: 2,
             layers_collapsed: HashSet::new(),
             script_seen: HashMap::new(),
             script_watch: false,
             cursors: HashMap::new(),
             annotations_rev: 0,
+            layout: Default::default(),
+            layout_rev: 0,
             hist: Default::default(),
             hierarchy: Default::default(),
-            selected_objects: Vec::new(),
+            sel: Default::default(),
         }
     }
 
-    // ------------------------------------------------------------------------
-    // The document
-    // ------------------------------------------------------------------------
-
-    /// Runs a command on the document, saves it and says what changed.
-    pub fn execute(&mut self, cmd: Command, cx: &mut Context<Self>) -> Result<Changed, CommandError> {
-        let before = self.doc.clone();
-        let label = cmd.label();
-        let result = apply(&mut self.doc, cmd);
-        match &result {
-            Ok(change) => {
-                if before != self.doc {
-                    self.history.push(before);
-                    self.history_labels.push(label);
-                    if self.history.len() > UNDO_DEPTH {
-                        self.history.remove(0);
-                        self.history_labels.remove(0);
-                    }
-                    self.future.clear();
-                    self.future_labels.clear();
-                    self.save();
-                }
-                self.after_change(change.clone(), cx);
-            }
-            Err(e) => self.set_status(e.to_string(), cx),
+    /// Changes the saved views (`layout.json`, written when the project has a folder). View state:
+    /// no event, no redraw.
+    pub fn set_layout(&mut self, f: impl FnOnce(&mut super::layout::Layout)) {
+        let before = self.layout.clone();
+        f(&mut self.layout);
+        if self.layout != before
+            && let Some(folder) = self.folder()
+        {
+            let _ = self.layout.save(&folder);
         }
-        result
-    }
-
-    /// Back to the document before the last change (`redo`: forward again).
-    pub fn undo(&mut self, redo: bool, cx: &mut Context<Self>) {
-        let next = if redo { self.future.pop() } else { self.history.pop() };
-        let Some(doc) = next else {
-            self.set_status(if redo { "Nothing to redo" } else { "Nothing to undo" }, cx);
-            return;
-        };
-        let before = std::mem::replace(&mut self.doc, doc);
-        if redo {
-            self.history.push(before);
-            let label = self.future_labels.pop().unwrap_or_default();
-            self.history_labels.push(label);
-        } else {
-            self.future.push(before);
-            let label = self.history_labels.pop().unwrap_or_default();
-            self.future_labels.push(label);
-        }
-        self.save();
-        self.selection.retain(|id| self.doc.annotations.iter().any(|a| &a.id == id));
-        self.annotations_rev += 1;
-        self.ensure_pyramids(cx);
-        self.after_change(Changed::Graph, cx);
-        cx.emit(AppEvent::Document(Changed::Images));
-        cx.emit(AppEvent::Document(Changed::Annotations));
-        self.set_status(if redo { "Redone" } else { "Undone" }, cx);
-    }
-
-    /// The History panel's rows: what each step did, done ones first (oldest first), then the
-    /// undone ones (the next redo first).
-    pub fn history(&self) -> (&[String], Vec<&String>) {
-        (&self.history_labels, self.future_labels.iter().rev().collect())
-    }
-
-    /// Undoes or redoes until `done` steps of the history are applied (a click in History).
-    pub fn undo_to(&mut self, done: usize, cx: &mut Context<Self>) {
-        while self.history.len() > done && !self.history.is_empty() {
-            self.undo(false, cx);
-        }
-        while self.history.len() < done && !self.future.is_empty() {
-            self.undo(true, cx);
-        }
-    }
-
-    pub fn can_undo(&self) -> bool {
-        !self.history.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.future.is_empty()
-    }
-
-    fn after_change(&mut self, change: Changed, cx: &mut Context<Self>) {
-        match &change {
-            Changed::Images => {
-                // Selected layers and objects belong to the image shown before
-                self.layers_selected.clear();
-                self.selected_objects.clear();
-                self.ensure_pyramids(cx);
-                self.results.retain(|_, r| self.doc.image(&r.image).is_some());
-            }
-            Changed::Graph => {
-                self.watch_scripts(cx);
-                self.results.retain(|v, _| self.doc.graph.contains(v));
-                self.recompute(cx);
-            }
-            Changed::Layout => {
-                // A view's style changes how its layer is drawn
-                self.recompute(cx);
-            }
-            Changed::Annotations => {
-                self.annotations_rev += 1;
-                self.selection.retain(|id| self.doc.annotations.iter().any(|a| &a.id == id));
-                // A deleted or renamed class: draw with one that exists, unselect its layer
-                if self.doc.class(&self.tool.class).is_none()
-                    && let Some(c) = self.doc.classes.iter().find(|c| c.name != crate::domain::command::MEASUREMENT) {
-                        self.tool.class = c.name.clone();
-                    }
-                let classes: Vec<String> = self.doc.classes.iter().map(|c| format!("class:{}", c.name)).collect();
-                self.layers_selected.retain(|k| !k.starts_with("class:") || classes.contains(k));
-                self.results.retain(|v, _| self.doc.graph.contains(v));
-                let reads_annotations = self.doc.graph.nodes.iter().any(|n| matches!(n.kind, NodeKind::Annotations { .. }));
-                if reads_annotations {
-                    self.recompute(cx);
-                }
-            }
-            // A channel with processing draws through its result (its colour, window and eye):
-            // that layer is made again
-            Changed::Display(image) => {
-                let n = self.doc.image(image).map_or(0, |i| i.channels.len());
-                if (0..n).any(|c| self.doc.graph.channel_chain(image, c).1.is_some()) {
-                    self.results_for = None;
-                    self.recompute(cx);
-                }
-            }
-            _ => {}
-        }
-        cx.emit(AppEvent::Document(change));
-        cx.notify();
-    }
-
-    /// Writes the project file when the project has a folder.
-    fn save(&mut self) {
-        if let Some(path) = &self.project_file
-            && let Err(e) = self.doc.save(path) {
-                self.status = format!("Project not saved: {e}");
-            }
-    }
-
-    /// The project's folder.
-    pub fn folder(&self) -> Option<PathBuf> {
-        self.project_file.as_ref().and_then(|p| p.parent().map(Path::to_path_buf))
     }
 
     pub fn set_status(&mut self, s: impl Into<String>, cx: &mut Context<Self>) {
@@ -441,17 +301,14 @@ impl Store {
 
     /// A new, empty project (not saved anywhere yet).
     pub fn new_project(&mut self, cx: &mut Context<Self>) {
-        self.history.push(std::mem::take(&mut self.doc));
-        self.history_labels.push("New project".into());
-        self.doc = ProjectDoc::default();
-        self.future.clear();
-        self.future_labels.clear();
-        self.layers_selected.clear();
+        let before = std::mem::take(&mut self.doc);
+        self.undo.record(before, "New project".into());
+        self.sel.layers.clear();
         self.project_file = None;
         self.hist = Default::default();
         self.pyramids.clear();
         self.results.clear();
-        self.selection.clear();
+        self.sel.shapes.clear();
         self.after_change(Changed::Images, cx);
         self.set_status("New project", cx);
     }
@@ -475,6 +332,7 @@ impl Store {
                 self.prefs.push_recent(&file);
                 self.save_prefs();
                 self.hist_persist_all(cx);
+                let _ = self.layout.save(&folder);
                 self.set_status(format!("Project saved in {}", folder.display()), cx);
             }
             Err(e) => self.set_status(format!("Project not saved: {e}"), cx),
@@ -485,21 +343,22 @@ impl Store {
     fn open_project(&mut self, file: PathBuf, cx: &mut Context<Self>) {
         match ProjectDoc::load(&file) {
             Ok(doc) => {
-                self.history.clear();
-                self.future.clear();
-                self.history_labels.clear();
-                self.future_labels.clear();
-                self.layers_selected.clear();
+                self.undo = Default::default();
+                self.sel.layers.clear();
                 self.doc = doc;
                 self.project_file = Some(file.clone());
                 self.pyramids.clear();
                 self.results.clear();
-                self.selection.clear();
+                self.sel.shapes.clear();
                 self.prefs.push_recent(&file);
                 self.save_prefs();
                 self.after_change(Changed::Images, cx);
                 self.watch_scripts(cx);
                 self.hist_load(cx);
+                if let Some(folder) = file.parent() {
+                    self.layout = super::layout::Layout::load(folder);
+                    self.layout_rev += 1;
+                }
                 self.set_workspace(Workspace::Explore, cx);
                 self.set_status(format!("Opened project {}", self.doc.name), cx);
             }
@@ -571,7 +430,7 @@ impl Store {
     }
 
     /// Opens the images of the document that are not open yet (after opening a project, undo).
-    fn ensure_pyramids(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_pyramids(&mut self, cx: &mut Context<Self>) {
         let folder = self.folder();
         let missing: Vec<(String, PathBuf)> = self
             .doc
@@ -693,22 +552,6 @@ impl Store {
     // Results
     // ------------------------------------------------------------------------
 
-    /// Selects a row of the Layers panel, or adds it to (or takes it out of) the selection.
-    pub fn select_layer(&mut self, key: String, additive: bool, cx: &mut Context<Self>) {
-        if additive {
-            match self.layers_selected.iter().position(|k| *k == key) {
-                Some(i) => {
-                    self.layers_selected.remove(i);
-                }
-                None => self.layers_selected.push(key),
-            }
-        } else {
-            self.layers_selected = vec![key];
-        }
-        cx.emit(AppEvent::Selection);
-        cx.notify();
-    }
-
     /// Switches the compute backend (`None`: automatic) while running: what lives on the old
     /// device is dropped and the results are computed again on the new one.
     pub fn set_runtime(&mut self, runtime: Option<String>, cx: &mut Context<Self>) {
@@ -742,52 +585,6 @@ impl Store {
         if self.execute(cmd, cx).is_ok() {
             self.set_status("Step removed (Ctrl+Z brings it back)", cx);
         }
-    }
-
-    /// The detected object `key` (`c12`, `t5`) of the shown image.
-    pub fn object(&self, key: &str) -> Option<&lumen_hist::HistObject> {
-        let img = self.doc.active_image.as_deref()?;
-        let (list, n) = match key.split_at(1) {
-            ("c", n) => (self.hist.cells.get(img)?, n),
-            ("t", n) => (self.hist.tiles.get(img)?, n),
-            _ => return None,
-        };
-        let id: u32 = n.parse().ok()?;
-        list.iter().find(|o| o.id == id)
-    }
-
-    /// Selects a detected object (Shift / Ctrl add or take it out) and shows it in Explore's view.
-    pub fn select_object(&mut self, key: String, additive: bool, cx: &mut Context<Self>) {
-        let at = self.object(&key).map(|o| o.centroid);
-        if additive {
-            match self.selected_objects.iter().position(|k| *k == key) {
-                Some(i) => {
-                    self.selected_objects.remove(i);
-                }
-                None => self.selected_objects.push(key),
-            }
-        } else {
-            self.selected_objects = vec![key];
-            self.selection.clear();
-        }
-        if let Some(p) = at {
-            cx.emit(AppEvent::Reveal(p));
-        }
-        cx.emit(AppEvent::Selection);
-        cx.notify();
-    }
-
-    /// The detected object under `p` (level-0) on the shown image: a cell holding it, else a tile.
-    pub fn object_at(&self, p: [f64; 2]) -> Option<String> {
-        let img = self.doc.active_image.as_deref()?;
-        let hit = |o: &&lumen_hist::HistObject| {
-            let (x0, y0, x1, y1) = lumen_hist::polygon::bounds(&o.roi);
-            p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1 && lumen_hist::polygon::contains(&o.roi, p)
-        };
-        if let Some(c) = self.hist.cells.get(img).and_then(|l| l.iter().find(hit)) {
-            return Some(format!("c{}", c.id));
-        }
-        self.hist.tiles.get(img).and_then(|l| l.iter().find(hit)).map(|t| format!("t{}", t.id))
     }
 
     /// The object hierarchy of `image` (regions and cells), from the cache when nothing changed.
@@ -1075,7 +872,7 @@ impl Store {
         };
         let kind = NodeKind::Script { path: path.to_string_lossy().into_owned(), inputs: h.inputs, output: h.output, params: h.params, enabled: true };
         let y = self.doc.graph.next_row();
-        if self.execute(Command::AddNode { kind, x: 0.0, y, id: None, after: self.selected_node.clone() }, cx).is_ok() {
+        if self.execute(Command::AddNode { kind, x: 0.0, y, id: None, after: self.sel.node.clone() }, cx).is_ok() {
             self.set_status(format!("Script {} added; edit it, save, and the node runs again", path.display()), cx);
         }
     }
@@ -1088,7 +885,7 @@ impl Store {
         };
         let prompts = interactive.then(|| self.tool.class.clone());
         // One selected region annotation: the model runs inside it
-        let picked: Vec<&crate::domain::annotation::Annotation> = self.doc.annotations_of(&image).filter(|a| self.selection.contains(&a.id) && a.shape.is_region()).collect();
+        let picked: Vec<&crate::domain::annotation::Annotation> = self.doc.annotations_of(&image).filter(|a| self.sel.shapes.contains(&a.id) && a.shape.is_region()).collect();
         let roi = (picked.len() == 1).then(|| crate::domain::graph::Roi::Annotation { id: picked[0].id.clone() });
         let kind = NodeKind::Model { image, channels: Vec::new(), model: model.clone(), roi, prompts, enabled: true };
         let y = self.doc.graph.next_row();
@@ -1115,7 +912,7 @@ impl Store {
     }
 
     /// Watches the files of script nodes (once a second): a saved file is read again and runs.
-    fn watch_scripts(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn watch_scripts(&mut self, cx: &mut Context<Self>) {
         let any = self.doc.graph.nodes.iter().any(|n| matches!(n.kind, NodeKind::Script { .. }));
         if self.script_watch || !any {
             return;
@@ -1156,7 +953,7 @@ impl Store {
 
     /// The selected layers that are masks, in selection order: mask results and annotation classes.
     pub fn selected_masks(&self) -> Vec<String> {
-        self.layers_selected
+        self.sel.layers
             .iter()
             .filter(|k| match k.split_once(':') {
                 Some(("class", _)) => true,
@@ -1245,7 +1042,7 @@ impl Store {
         commands.push(Command::AddNode { kind: NodeKind::View { name: title, style: ViewStyle::default() }, x, y, id: Some(view.clone()), after: None });
         commands.push(Command::Connect { from: last, to: view.clone(), port: 0 });
         if self.execute(Command::Batch { commands }, cx).is_ok() {
-            self.layers_selected = vec![format!("view:{view}")];
+            self.sel.layers = vec![format!("view:{view}")];
             cx.emit(AppEvent::Selection);
         }
     }
@@ -1562,12 +1359,6 @@ impl Store {
         cx.notify();
     }
 
-    pub fn select(&mut self, ids: impl IntoIterator<Item = String>, cx: &mut Context<Self>) {
-        self.selection = ids.into_iter().collect();
-        cx.emit(AppEvent::Selection);
-        cx.notify();
-    }
-
     /// Writes the shown image's annotations as GeoJSON next to the project (or in the working
     /// folder).
     pub fn export_geojson(&mut self, cx: &mut Context<Self>) {
@@ -1678,51 +1469,12 @@ impl Store {
         let _ = self.execute(Command::RemoveNodes { nodes: vec![id] }, cx);
     }
 
-    /// The Delete key and the Delete buttons: the selected annotations, else the result layers
-    /// (masks, labels, images of the pipeline) selected in Layers. Classes go only from their
-    /// menu (they may hold many annotations).
-    /// Selects the shapes (their bounds' centre) and cells or tiles (their centre) of the shown
-    /// image inside `rect` (`[x0, y0, x1, y1]`, level-0 px); `add` keeps the selection there was.
-    /// `None` (a click, no box) clears it unless `add`.
-    pub fn select_in_rect(&mut self, rect: Option<[f64; 4]>, add: bool, cx: &mut Context<Self>) {
-        let Some([x0, y0, x1, y1]) = rect else {
-            if !add {
-                self.selected_objects.clear();
-                self.select([], cx);
-            }
-            return;
-        };
-        let inside = |x: f64, y: f64| x >= x0 && x <= x1 && y >= y0 && y <= y1;
-        let Some(image) = self.doc.active_image.clone() else { return };
-        let mut shapes: std::collections::BTreeSet<String> = if add { self.selection.iter().cloned().collect() } else { Default::default() };
-        for a in self.doc.annotations_of(&image) {
-            let (ax0, ay0, ax1, ay1) = a.shape.bounds();
-            if inside((ax0 + ax1) / 2.0, (ay0 + ay1) / 2.0) {
-                shapes.insert(a.id.clone());
-            }
-        }
-        let mut objects: Vec<String> = if add { self.selected_objects.clone() } else { Vec::new() };
-        let known: HashSet<String> = objects.iter().cloned().collect();
-        for (prefix, list) in [("c", self.hist.cells.get(&image)), ("t", self.hist.tiles.get(&image))] {
-            for o in list.into_iter().flatten() {
-                let key = format!("{prefix}{}", o.id);
-                if inside(o.centroid[0], o.centroid[1]) && !known.contains(&key) {
-                    objects.push(key);
-                }
-            }
-        }
-        let (ns, no) = (shapes.len(), objects.len());
-        self.selected_objects = objects;
-        self.select(shapes, cx);
-        self.set_status(format!("{ns} shape(s) and {no} object(s) selected"), cx);
-    }
-
     /// Combines the selected region shapes of the shown image into new ones (Affinity's Add,
     /// Subtract, Intersect, Xor): Subtract takes the others from the first selected. The
     /// results take the first's class; the shapes combined are removed (one undo step).
     pub fn combine_shapes(&mut self, op: crate::domain::boolean::ShapeOp, cx: &mut Context<Self>) {
         let Some(image) = self.doc.active_image.clone() else { return };
-        let picked: Vec<Annotation> = self.doc.annotations_of(&image).filter(|a| self.selection.contains(&a.id) && a.shape.is_region()).cloned().collect();
+        let picked: Vec<Annotation> = self.doc.annotations_of(&image).filter(|a| self.sel.shapes.contains(&a.id) && a.shape.is_region()).cloned().collect();
         if picked.len() < 2 {
             return self.set_status(format!("{} needs two or more selected regions", op.title()), cx);
         }
@@ -1745,21 +1497,21 @@ impl Store {
     }
 
     pub fn delete_selection(&mut self, cx: &mut Context<Self>) {
-        if self.selection.is_empty() {
-            let views: Vec<String> = self.layers_selected.iter().filter_map(|k| k.strip_prefix("view:")).filter(|id| self.doc.graph.contains(id)).map(str::to_string).collect();
+        if self.sel.shapes.is_empty() {
+            let views: Vec<String> = self.sel.layers.iter().filter_map(|k| k.strip_prefix("view:")).filter(|id| self.doc.graph.contains(id)).map(str::to_string).collect();
             let n = views.len();
             if n > 0 && self.execute(Command::RemoveNodes { nodes: views }, cx).is_ok() {
-                self.layers_selected.retain(|k| !k.starts_with("view:"));
+                self.sel.layers.retain(|k| !k.starts_with("view:"));
                 self.set_status(format!("Removed {n} result layer(s) (Ctrl+Z brings them back)"), cx);
-            } else if self.layers_selected.iter().any(|k| k.starts_with("class:")) {
+            } else if self.sel.layers.iter().any(|k| k.starts_with("class:")) {
                 self.set_status("A class is deleted from its menu (right-click it in Layers)", cx);
             }
             return;
         }
-        let ids: Vec<String> = self.selection.iter().cloned().collect();
+        let ids: Vec<String> = self.sel.shapes.iter().cloned().collect();
         let n = ids.len();
         if self.execute(Command::RemoveAnnotations { ids }, cx).is_ok() {
-            self.selection.clear();
+            self.sel.shapes.clear();
             self.set_status(format!("Deleted {n} annotation(s)"), cx);
         }
     }

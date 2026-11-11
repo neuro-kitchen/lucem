@@ -60,7 +60,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
             (Shape::Line { .. }, _) | (Shape::Stroke { .. }, _) => a.shape.length().map_or(String::new(), |l| format_length(l, um)),
             _ => String::new(),
         };
-        let selected = s.selection.contains(&a.id);
+        let selected = s.sel.shapes.contains(&a.id);
         let (store, canvas, id) = (store.clone(), canvas.clone(), a.id.clone());
         let (bx0, by0, bx1, by1) = a.shape.bounds();
         let centre = [(bx0 + bx1) / 2.0, (by0 + by1) / 2.0];

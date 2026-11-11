@@ -40,7 +40,7 @@ pub fn summary(store: &Entity<Store>, cx: &App) -> AnyElement {
     let img = s.doc.active_image.clone().unwrap_or_default();
     let mut col = v_flex().gap(px(theme::SM));
     // Detected objects first (they are what was clicked last when any)
-    let objects: Vec<(String, &lumen_hist::HistObject)> = s.selected_objects.iter().filter_map(|k| s.object(k).map(|o| (k.clone(), o))).collect();
+    let objects: Vec<(String, &lumen_hist::HistObject)> = s.sel.objects.iter().filter_map(|k| s.object(k).map(|o| (k.clone(), o))).collect();
     if !objects.is_empty() {
         let hier = s.hierarchy(&img);
         let cells = s.hist.cells.get(&img);
@@ -88,13 +88,13 @@ pub fn summary(store: &Entity<Store>, cx: &App) -> AnyElement {
         let st = store.clone();
         col = col.child(div().pt(px(theme::SM)).child(Button::new("selection-clear-objects").ghost().small().icon(Icon::new(IconName::X)).label("Clear the selection").on_click(move |_, _, cx| {
             st.update(cx, |s, cx| {
-                s.selected_objects.clear();
+                s.sel.objects.clear();
                 cx.notify();
             })
         })));
         return col.into_any_element();
     }
-    let chosen: Vec<Annotation> = s.doc.annotations.iter().filter(|a| s.selection.contains(&a.id)).cloned().collect();
+    let chosen: Vec<Annotation> = s.doc.annotations.iter().filter(|a| s.sel.shapes.contains(&a.id)).cloned().collect();
     let hier = s.hierarchy(&img);
     let cells = s.hist.cells.get(&img).cloned().unwrap_or_default();
     // The cells a region holds (with the regions inside it), by class

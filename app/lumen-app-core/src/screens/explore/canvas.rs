@@ -632,10 +632,10 @@ impl ImageCanvas {
         let s = self.store.read(cx);
         let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
         let cells: Vec<lumen_hist::HistObject> = if s.hist.show && ov.annotations { s.hist.cells.get(&v.image).into_iter().chain(s.hist.tiles.get(&v.image)).flatten().cloned().collect() } else { Vec::new() };
-        let key = format!("{}/{}/{}/{}", v.image, s.hist.rev, ov.opacity, s.selected_objects.join(","));
+        let key = format!("{}/{}/{}/{}", v.image, s.hist.rev, ov.opacity, s.sel.objects.join(","));
         // Selected objects, by their index in the list drawn (cells, then tiles)
         let n_cells = s.hist.cells.get(&v.image).map_or(0, Vec::len);
-        let selected: std::collections::HashSet<usize> = cells.iter().enumerate().filter(|(i, o)| s.selected_objects.contains(&format!("{}{}", if *i < n_cells { "c" } else { "t" }, o.id))).map(|(i, _)| i).collect();
+        let selected: std::collections::HashSet<usize> = cells.iter().enumerate().filter(|(i, o)| s.sel.objects.contains(&format!("{}{}", if *i < n_cells { "c" } else { "t" }, o.id))).map(|(i, _)| i).collect();
         let (iw, ih) = (v.pyramid.width() as f64, v.pyramid.height() as f64);
         let view = self.visible();
         let ds_view = 1.0 / self.zoom.max(1e-9);
@@ -1168,7 +1168,7 @@ impl ImageCanvas {
             Tool::Select => {
                 match self.hit(p, cx) {
                     Some(id) => {
-                        let sel = self.store.read(cx).selection.clone();
+                        let sel = self.store.read(cx).sel.shapes.clone();
                         if e.modifiers.shift {
                             let mut s = sel.clone();
                             if !s.remove(&id) {
@@ -1192,7 +1192,7 @@ impl ImageCanvas {
                             }),
                             None if !e.modifiers.shift => self.store.update(cx, |st, cx| {
                                 st.select([], cx);
-                                st.selected_objects.clear();
+                                st.sel.objects.clear();
                                 cx.notify();
                             }),
                             None => {}
@@ -1354,7 +1354,7 @@ impl ImageCanvas {
             }
             Gesture::Move { start, now, moved } => {
                 if moved {
-                    let ids: Vec<String> = self.store.read(cx).selection.iter().cloned().collect();
+                    let ids: Vec<String> = self.store.read(cx).sel.shapes.iter().cloned().collect();
                     let (dx, dy) = (now[0] - start[0], now[1] - start[1]);
                     self.store.update(cx, |s, cx| {
                         let _ = s.execute(Command::MoveAnnotations { ids, dx, dy }, cx);
@@ -1483,7 +1483,7 @@ impl ImageCanvas {
             if !class.visible {
                 continue;
             }
-            let selected = s.selection.contains(&a.id);
+            let selected = s.sel.shapes.contains(&a.id);
             // Brush and eraser strokes are in the paint raster; a selected one shows the outline
             // of what it painted
             if matches!(a.shape, Shape::Stroke { .. }) && !selected {
@@ -1555,7 +1555,7 @@ impl ImageCanvas {
                     let len = a.shape.length().unwrap_or(0.0);
                     push(self.to_screen([(x0 + x1) / 2.0, (y0 + y1) / 2.0]), format_length(len, um));
                 }
-                shape if s.selection.contains(&a.id) && shape.is_region() => {
+                shape if s.sel.shapes.contains(&a.id) && shape.is_region() => {
                     let (x0, y0, _, _) = shape.bounds();
                     let (sx, sy) = self.to_screen([x0, y0]);
                     push((sx, sy - 20.0), crate::ui::widgets::format_area(shape.area().unwrap_or(0.0), um));

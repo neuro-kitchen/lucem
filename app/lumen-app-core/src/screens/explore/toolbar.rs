@@ -65,7 +65,7 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
     let t = s.tool.clone();
     let classes: Vec<String> = s.doc.classes.iter().filter(|c| c.name != "Measurement").map(|c| c.name.clone()).collect();
     let class_color = s.doc.class(&t.class).map_or([255, 255, 255], |c| c.color);
-    let selected = s.selection.len();
+    let selected = s.sel.shapes.len();
     let um = s.active_pyramid().and_then(|p| p.pixel_size_um);
     let volume = s.active_pyramid().is_some_and(|p| p.is_volume());
     let zoom = canvas.read(cx).zoom;
@@ -93,7 +93,7 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
             .child(divider_v());
     }
     // Shapes (Affinity's Add, Subtract, Intersect, Xor): while two or more regions are selected
-    let regions = s.doc.active_image.as_ref().map_or(0, |img| s.doc.annotations_of(img).filter(|a| s.selection.contains(&a.id) && a.shape.is_region()).count());
+    let regions = s.doc.active_image.as_ref().map_or(0, |img| s.doc.annotations_of(img).filter(|a| s.sel.shapes.contains(&a.id) && a.shape.is_region()).count());
     if regions >= 2 {
         use crate::domain::boolean::ShapeOp;
         bar = bar.child(label("Shapes"));
@@ -248,7 +248,7 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
             });
         }
         Tool::Marquee => {
-            let objects = s.selected_objects.len();
+            let objects = s.sel.objects.len();
             let st = store.clone();
             bar = bar.child(hint(if selected + objects == 0 { "Drag a box around shapes or cells; Shift adds".to_string() } else { format!("{selected} shape(s), {objects} object(s) selected") })).when(selected > 0, |b| {
                 b.child(Button::new("options-delete").ghost().small().icon(Icon::new(IconName::Trash)).label("Delete").on_click(move |_, _, cx| st.update(cx, |s, cx| s.delete_selection(cx))))

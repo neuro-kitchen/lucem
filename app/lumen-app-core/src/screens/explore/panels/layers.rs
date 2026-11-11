@@ -158,7 +158,7 @@ fn reveal(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, a: &Annotation, a
     let (id, image, z) = (a.id.clone(), a.image.clone(), a.z);
     let (x0, y0, x1, y1) = a.shape.bounds();
     store.update(cx, |s, cx| {
-        let mut sel = if additive { s.selection.clone() } else { Default::default() };
+        let mut sel = if additive { s.sel.shapes.clone() } else { Default::default() };
         if !sel.remove(&id) || !additive {
             sel.insert(id.clone());
         }
@@ -174,7 +174,7 @@ fn reveal(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, a: &Annotation, a
 /// An annotation's right-click menu: it acts on the whole selection when the annotation is in it,
 /// else on the annotation alone.
 fn annotation_menu(store: &Entity<Store>, a: &Annotation, s: &Store) -> MenuFn {
-    let ids: Vec<String> = if s.selection.contains(&a.id) { s.selection.iter().cloned().collect() } else { vec![a.id.clone()] };
+    let ids: Vec<String> = if s.sel.shapes.contains(&a.id) { s.sel.shapes.iter().cloned().collect() } else { vec![a.id.clone()] };
     let classes: Vec<String> = s.doc.classes.iter().filter(|c| c.name != MEASUREMENT).map(|c| c.name.clone()).collect();
     let (store, current) = (store.clone(), a.class.clone());
     Rc::new(move |m: PopupMenu, w: &mut Window, cx: &mut Context<PopupMenu>| {
@@ -209,8 +209,8 @@ fn combine_menu(store: &Entity<Store>, key: String, radius: usize, extra: Option
             let (st, key) = (store.clone(), key.clone());
             PopupMenuItem::new(label).on_click(move |_, _, cx| {
                 st.update(cx, |s, cx| {
-                    if !s.layers_selected.contains(&key) {
-                        s.layers_selected.push(key.clone());
+                    if !s.sel.layers.contains(&key) {
+                        s.sel.layers.push(key.clone());
                     }
                     s.apply_mask_operation(op.clone(), cx)
                 })
@@ -259,7 +259,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                     mark: dot(c.color),
                     name: c.label.clone(),
                     kind: if steps.is_empty() { String::new() } else { format!("{} step(s)", steps.len()) },
-                    selected: s.layers_selected.contains(&ch_key),
+                    selected: s.sel.layers.contains(&ch_key),
                     visible: Some(c.visible),
                     on_eye: Some(Box::new(move |cx| {
                         let mut display = doc.clone();
@@ -287,7 +287,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                     let (st, k) = (store.clone(), key.clone());
                     list = list.child(row(
                         store,
-                        Row { key: key.clone(), depth: 2, fold: None, mark: icon_mark(icon, None), name, kind: if on { String::new() } else { "off".into() }, selected: s.layers_selected.contains(&key), visible: None, on_eye: None, on_click: Box::new(move |e, cx| select(&st, &k, e, cx)), menu: None },
+                        Row { key: key.clone(), depth: 2, fold: None, mark: icon_mark(icon, None), name, kind: if on { String::new() } else { "off".into() }, selected: s.sel.layers.contains(&key), visible: None, on_eye: None, on_click: Box::new(move |e, cx| select(&st, &k, e, cx)), menu: None },
                     ));
                 }
             }
@@ -319,7 +319,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                         mark,
                         name: name.clone(),
                         kind: port.map_or("—", PortType::name).to_string(),
-                        selected: s.layers_selected.contains(&layer),
+                        selected: s.sel.layers.contains(&layer),
                         visible: Some(style.visible),
                         on_eye: Some(Box::new(move |cx| {
                             let style = ViewStyle { visible: !sty.visible, ..sty.clone() };
@@ -464,7 +464,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                     mark: dot(c.color),
                     name: c.name.clone(),
                     kind: if drawing { format!("{} · drawing", group_digits(of.len())) } else { group_digits(of.len()) },
-                    selected: s.layers_selected.contains(&layer),
+                    selected: s.sel.layers.contains(&layer),
                     visible: Some(c.visible),
                     on_eye: Some(Box::new(move |cx| {
                         let class = ClassDoc { visible: !cls.visible, ..cls.clone() };
@@ -498,7 +498,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                         mark: icon_mark(icon, Some(c.color)),
                         name: if a.note.is_empty() { format!("{label} {}", a.id) } else { a.note.clone() },
                         kind: plane,
-                        selected: s.selection.contains(&a.id),
+                        selected: s.sel.shapes.contains(&a.id),
                         visible: None,
                         on_eye: None,
                         on_click: Box::new(move |e, cx| {
