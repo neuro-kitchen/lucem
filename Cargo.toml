@@ -14,6 +14,7 @@ members = [
     # Models, one crate per upstream family, each under its upstream's licence (as dsp-kitchen's
     # sorters); the app never links them: plugins/ml programs run them
     "models/sam",
+    "models/stardist",
     # Pipeline engine
     "engine/lumen-pipeline",
     # Serving
@@ -26,6 +27,7 @@ members = [
     # Plugins: ml/ programs the app and the command line run (one per model family, never
     # linked, so ONNX Runtime and model licences stay out of lumen itself)
     "plugins/ml/lumen-ml-sam",
+    "plugins/ml/lumen-ml-stardist",
     # Bindings
     "bindings/python/lumen-py",
 ]
@@ -63,7 +65,7 @@ numpy = "0.30.0"
 gpui-kit = "0.9.0"
 # Analytics & columnar data (Arrow + Polars)
 arrow = { version = "60.1.0", default-features = false }
-polars = { version = "0.55.2", default-features = false, features = ["lazy", "fmt"] }
+polars = { version = "0.55.2", default-features = false, features = ["lazy", "fmt", "parquet"] }
 # Image I/O
 image = "0.25.10"
 tiff = "0.11.3"
@@ -87,6 +89,14 @@ flate2 = "1.1.11"
 tar = "0.4.46"
 lumen-hub = { path = "hub/lumen-hub", version = "0.1.0" }
 lumen-model-sam = { path = "models/sam", version = "0.1.0" }
+lumen-model-stardist = { path = "models/stardist", version = "0.1.0", default-features = false }
+# Keras weights (HDF5) read without the C library, written as safetensors
+hdf5-reader = "0.12.1"
+# Parallel loops over host data (objects, chunks): work stealing
+rayon = "1.12.0"
+# Boolean operations on shapes (add, subtract, intersect, xor)
+geo = "0.33.1"
+safetensors = "0.8.0"
 tokio = { version = "1.54.1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"

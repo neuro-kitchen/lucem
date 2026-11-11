@@ -332,18 +332,20 @@ pub(crate) fn blosc_decompress(bytes: &[u8]) -> IoResult<Vec<u8>> {
 
 /// Walks up `path` ancestors to find the root `.ome.zarr` container directory.
 pub fn find_ome_zarr_root(path: &Path) -> Option<PathBuf> {
-    for ancestor in path.ancestors() {
-        if let Some(name) = ancestor.file_name().and_then(|n| n.to_str())
-            && name.ends_with(".ome.zarr") && ancestor.is_dir() {
-                return Some(ancestor.to_path_buf());
-            }
-    }
+    // The nearest multiscale image first: a label image inside an image (`<image>.ome.zarr/
+    // labels/cells`) is its own image, not its parent
     for ancestor in path.ancestors() {
         if ancestor.is_dir() && ancestor.join(".zattrs").is_file() && ancestor.join(".zgroup").is_file()
             && let Ok(txt) = fs::read_to_string(ancestor.join(".zattrs"))
                 && txt.contains("multiscales") {
                     return Some(ancestor.to_path_buf());
                 }
+    }
+    for ancestor in path.ancestors() {
+        if let Some(name) = ancestor.file_name().and_then(|n| n.to_str())
+            && name.ends_with(".ome.zarr") && ancestor.is_dir() {
+                return Some(ancestor.to_path_buf());
+            }
     }
     None
 }

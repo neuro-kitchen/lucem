@@ -39,6 +39,8 @@ pub enum ComputeError {
     Unavailable(ComputeTarget, &'static str),
     #[error("no compute runtime is compiled in (enable one of the wgpu, cpu, cuda, hip features)")]
     NoneAvailable,
+    #[error("compute runtime {0} cannot run here: {1}")]
+    NoDriver(ComputeTarget, &'static str),
 }
 
 impl ComputeTarget {
@@ -80,6 +82,27 @@ impl ComputeTarget {
         Self::ALL.into_iter().filter(|t| t.is_available()).collect()
     }
 
+    /// Compiled in and its driver there. Opening CUDA or HIP without the driver panics on the
+    /// runtime's device thread and takes the caller down, so they are asked of the system first:
+    /// the NVIDIA kernel module (`/proc/driver/nvidia/version`, Linux) or AMD's (`/dev/kfd`).
+    pub fn is_usable(self) -> bool {
+        self.is_available() && self.unusable_reason().is_none()
+    }
+
+    /// Why a compiled-in runtime cannot run here (`None`: it can, as far as the system tells).
+    pub fn unusable_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Cuda if cfg!(target_os = "linux") && !std::path::Path::new("/proc/driver/nvidia/version").exists() => Some("the NVIDIA driver is not loaded"),
+            Self::Hip if cfg!(target_os = "linux") && !std::path::Path::new("/dev/kfd").exists() => Some("the AMD GPU driver (/dev/kfd) is not there"),
+            _ => None,
+        }
+    }
+
+    /// Usable runtimes in preference order.
+    pub fn usable() -> Vec<Self> {
+        Self::ALL.into_iter().filter(|t| t.is_usable()).collect()
+    }
+
     /// The runtimes tests run on: [`Self::available`], limited to the names in `LUMEN_TEST_RUNTIMES`
     /// when it is set. Compiled in is not the same as usable: a build with CUDA can run on a
     /// machine without an NVIDIA driver.
@@ -93,23 +116,35 @@ impl ComputeTarget {
                     .split(',')
                     .map(|name| Self::parse(name).unwrap_or_else(|e| panic!("{TEST_RUNTIMES_ENV}: {e}")))
                     .collect();
-                Self::available().into_iter().filter(|t| wanted.contains(t)).collect()
+                Self::usable().into_iter().filter(|t| wanted.contains(t)).collect()
             }
-            _ => Self::available(),
+            _ => {
+                let skipped: Vec<&str> = Self::available().into_iter().filter_map(|t| t.unusable_reason().map(|_| t.name())).collect();
+                if !skipped.is_empty() {
+                    eprintln!("lumen tests: skipping {} (no driver)", skipped.join(", "));
+                }
+                Self::usable()
+            }
         }
     }
 
-    /// `LUMEN_RUNTIME` when set, else the first compiled-in runtime.
+    /// `LUMEN_RUNTIME` when set, else the first usable runtime.
     pub fn from_env() -> Result<Self, ComputeError> {
         match std::env::var(RUNTIME_ENV) {
             Ok(name) if !name.trim().is_empty() => Self::parse(&name)?.checked(),
-            _ => Self::available().first().copied().ok_or(ComputeError::NoneAvailable),
+            _ => Self::usable().first().copied().ok_or(ComputeError::NoneAvailable),
         }
     }
 
-    /// `self` if it is compiled in, else [`ComputeError::Unavailable`].
+    /// `self` if it is compiled in and its driver is there, else an error saying which.
     pub fn checked(self) -> Result<Self, ComputeError> {
-        if self.is_available() { Ok(self) } else { Err(ComputeError::Unavailable(self, self.name())) }
+        if !self.is_available() {
+            return Err(ComputeError::Unavailable(self, self.name()));
+        }
+        match self.unusable_reason() {
+            Some(why) => Err(ComputeError::NoDriver(self, why)),
+            None => Ok(self),
+        }
     }
 }
 

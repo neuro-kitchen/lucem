@@ -9,6 +9,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rayon.workspace = true
 image.workspace = true
 lumen-core = { workspace = true, default-features = false, features = ["compute"] }
 serde.workspace = true

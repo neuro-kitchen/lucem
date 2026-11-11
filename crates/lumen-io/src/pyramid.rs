@@ -633,9 +633,14 @@ impl Pyramid {
         if x0 >= x1 || y0 >= y1 {
             return Ok(out);
         }
-        for ty in y0 / l.tile_h..=(y1 - 1) / l.tile_h {
-            for tx in x0 / l.tile_w..=(x1 - 1) / l.tile_w {
-                let t = self.read_tile_at(level, channel, z, tx, ty)?;
+        // The chunks under the region, read in parallel (each is its own file), then assembled
+        let coords: Vec<(usize, usize)> = (y0 / l.tile_h..=(y1 - 1) / l.tile_h).flat_map(|ty| (x0 / l.tile_w..=(x1 - 1) / l.tile_w).map(move |tx| (tx, ty))).collect();
+        let tiles: Vec<_> = {
+            use rayon::prelude::*;
+            coords.par_iter().map(|&(tx, ty)| self.read_tile_at(level, channel, z, tx, ty).map(|t| (tx, ty, t))).collect::<IoResult<Vec<_>>>()?
+        };
+        for (tx, ty, t) in tiles {
+            {
                 let (tx0, ty0) = (tx * l.tile_w, ty * l.tile_h);
                 let (ax0, ax1) = (x0.max(tx0), x1.min(tx0 + t.width));
                 let (ay0, ay1) = (y0.max(ty0), y1.min(ty0 + t.height));

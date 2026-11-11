@@ -34,7 +34,7 @@ impl SampleType {
 }
 
 /// An element a store can hold.
-pub trait Sample: Copy + Default + 'static {
+pub trait Sample: Copy + Default + Send + Sync + 'static {
     const TYPE: SampleType;
     fn to_bytes(values: &[Self], out: &mut Vec<u8>);
     fn from_bytes(bytes: &[u8]) -> Vec<Self>;
@@ -142,6 +142,13 @@ impl ZarrWriter {
         write_chunk(&self.chunk_path(0, channel, index), data, size, c)
     }
 
+    /// Stores many chunks at once, in parallel (each chunk is its own file, so they are
+    /// independent): `(channel, origin, size, values)` each, as [`Self::write`] takes them.
+    pub fn write_many<T: Sample>(&self, blocks: &[(usize, Zyx, Zyx, Vec<T>)]) -> IoResult<()> {
+        use rayon::prelude::*;
+        blocks.par_iter().try_for_each(|(c, origin, size, data)| self.write(*c, *origin, *size, data))
+    }
+
     fn check_type<T: Sample>(&self) -> IoResult<()> {
         if T::TYPE == self.sample { Ok(()) } else { Err(IoError::OmeZarr("this store holds another element type".into())) }
     }
@@ -159,25 +166,29 @@ impl ZarrWriter {
         }
         let (c, s) = (self.options.chunks, self.options.shape);
         let total: usize = c.iter().product();
+        // Every chunk is its own file: remapped in parallel
+        let mut chunks = Vec::new();
         for channel in 0..self.options.channels.len() {
             for z in 0..s[0].div_ceil(c[0]) {
                 for y in 0..s[1].div_ceil(c[1]) {
                     for x in 0..s[2].div_ceil(c[2]) {
-                        let path = self.chunk_path(0, channel, [z, y, x]);
-                        if !path.is_file() {
-                            continue;
-                        }
-                        let mut values = u32::from_bytes(&fs::read(&path)?);
-                        if values.len() != total {
-                            return Err(IoError::OmeZarr(format!("{} has the wrong size", path.display())));
-                        }
-                        values.iter_mut().for_each(|v| *v = map.get(*v as usize).copied().unwrap_or(0));
-                        write_raw(&path, &values)?;
+                        chunks.push(self.chunk_path(0, channel, [z, y, x]));
                     }
                 }
             }
         }
-        Ok(())
+        use rayon::prelude::*;
+        chunks.par_iter().try_for_each(|path| -> IoResult<()> {
+            if !path.is_file() {
+                return Ok(());
+            }
+            let mut values = u32::from_bytes(&fs::read(path)?);
+            if values.len() != total {
+                return Err(IoError::OmeZarr(format!("{} has the wrong size", path.display())));
+            }
+            values.iter_mut().for_each(|v| *v = map.get(*v as usize).copied().unwrap_or(0));
+            write_raw(path, &values)
+        })
     }
 
     /// Builds the coarser levels, writes the metadata and returns the store's path.
@@ -206,25 +217,31 @@ impl ZarrWriter {
         Ok(self.root)
     }
 
+    /// One coarser level: each of its chunks read from the level under it, reduced and stored,
+    /// in parallel (every chunk is its own file).
     fn build_level<T: Sample>(&self, index: usize, prev: &Level, next: &Level, halve_z: bool) -> IoResult<()> {
         let c = self.options.chunks;
         let zf = if halve_z { 2 } else { 1 };
+        let mut jobs = Vec::new();
         for channel in 0..self.options.channels.len() {
             for cz in 0..next.shape[0].div_ceil(c[0]) {
                 for cy in 0..next.shape[1].div_ceil(c[1]) {
                     for cx in 0..next.shape[2].div_ceil(c[2]) {
-                        let origin = [cz * c[0], cy * c[1], cx * c[2]];
-                        let size = [c[0].min(next.shape[0] - origin[0]), c[1].min(next.shape[1] - origin[1]), c[2].min(next.shape[2] - origin[2])];
-                        let src_origin = [origin[0] * zf, origin[1] * 2, origin[2] * 2];
-                        let src_size = [(size[0] * zf).min(prev.shape[0] - src_origin[0]), (size[1] * 2).min(prev.shape[1] - src_origin[1]), (size[2] * 2).min(prev.shape[2] - src_origin[2])];
-                        let src = self.read_box::<T>(index - 1, channel, prev, src_origin, src_size)?;
-                        let reduced = reduce::<T>(&src, src_size, size, zf);
-                        write_chunk(&self.chunk_path(index, channel, [cz, cy, cx]), &reduced, size, c)?;
+                        jobs.push((channel, [cz, cy, cx]));
                     }
                 }
             }
         }
-        Ok(())
+        use rayon::prelude::*;
+        jobs.par_iter().try_for_each(|&(channel, [cz, cy, cx])| {
+            let origin = [cz * c[0], cy * c[1], cx * c[2]];
+            let size = [c[0].min(next.shape[0] - origin[0]), c[1].min(next.shape[1] - origin[1]), c[2].min(next.shape[2] - origin[2])];
+            let src_origin = [origin[0] * zf, origin[1] * 2, origin[2] * 2];
+            let src_size = [(size[0] * zf).min(prev.shape[0] - src_origin[0]), (size[1] * 2).min(prev.shape[1] - src_origin[1]), (size[2] * 2).min(prev.shape[2] - src_origin[2])];
+            let src = self.read_box::<T>(index - 1, channel, prev, src_origin, src_size)?;
+            let reduced = reduce::<T>(&src, src_size, size, zf);
+            write_chunk(&self.chunk_path(index, channel, [cz, cy, cx]), &reduced, size, c)
+        })
     }
 
     /// A box of a level already on disk (missing chunks read as zeros).
