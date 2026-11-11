@@ -478,7 +478,7 @@ impl Render for ExploreView {
         let toggles = overlay_toggles(&self.store, &self.canvas, cx).into_any_element();
         // The right rail (dsp-kitchen's): an icon per panel; the selected one shows beside it
         let me = cx.entity().downgrade();
-        let mut rail = v_flex().flex_none().w(px(RAIL_W)).h_full().py(px(theme::XS)).gap(px(2.)).items_center().bg(color::panel()).border_l_1().border_color(color::border());
+        let mut rail = v_flex().flex_none().w(px(RAIL_W)).h_full().py(px(theme::XS)).gap(px(2.)).items_center().rounded(px(theme::RADIUS_LG)).bg(color::panel());
         for (i, tab) in RAIL.iter().copied().enumerate() {
             if i == RAIL_SPLIT {
                 rail = rail.child(div().w(px(18.)).h(px(1.)).my(px(theme::XS)).bg(color::border()));
@@ -500,8 +500,8 @@ impl Render for ExploreView {
                 .flex_none()
                 .w(px(self.side_w))
                 .h_full()
-                .border_l_1()
-                .border_color(color::border())
+                .rounded(px(theme::RADIUS_LG))
+                .overflow_hidden()
                 .bg(color::panel())
                 .child(h_flex().flex_none().h(px(30.)).px(px(theme::MD)).items_center().border_b_1().border_color(color::border()).child(div().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(color::text_muted()).child(title.to_uppercase())))
                 .child(div().flex_1().min_h_0().child(p))
@@ -527,8 +527,12 @@ impl Render for ExploreView {
                     .flex_1()
                     .min_h_0()
                     .w_full()
+                    // Panes are cards on the chrome, PANE_GAP apart (kitchen-ui)
+                    .p(px(theme::PANE_GAP))
+                    .gap(px(theme::PANE_GAP))
+                    .bg(color::chrome())
                     .on_drag_move(cx.listener(|this, e: &gpui_kit::DragMoveEvent<SideResize>, _, cx| {
-                        let w = f32::from(e.bounds.right() - e.event.position.x) - RAIL_W;
+                        let w = f32::from(e.bounds.right() - e.event.position.x) - RAIL_W - 2.0 * theme::PANE_GAP;
                         this.side_w = w.clamp(220., 720.);
                         cx.notify();
                     }))
@@ -538,6 +542,9 @@ impl Render for ExploreView {
                             .flex_1()
                             .min_w_0()
                             .h_full()
+                            .rounded(px(theme::RADIUS_LG))
+                            .overflow_hidden()
+                            .bg(color::panel())
                             .child(div().relative().flex_1().min_h_0().w_full().child(self.dock.clone()).children(self.dialog.as_ref().map(|(d, _)| d.clone()))),
                     )
                     .children(side_panel)

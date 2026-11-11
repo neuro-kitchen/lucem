@@ -1736,10 +1736,14 @@ impl Render for AnalyzeView {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.show_hierarchy, |d| d.child(v_flex().id("analyze-hierarchy").flex_none().w(px(240.)).h_full().overflow_y_scroll().p(px(theme::MD)).border_r_1().border_color(color::border()).child(hierarchy)))
+                    // Panes are cards on the chrome, PANE_GAP apart (kitchen-ui)
+                    .p(px(theme::PANE_GAP))
+                    .gap(px(theme::PANE_GAP))
+                    .bg(color::chrome())
+                    .when(self.show_hierarchy, |d| d.child(v_flex().id("analyze-hierarchy").flex_none().w(px(240.)).h_full().overflow_y_scroll().p(px(theme::MD)).rounded(px(theme::RADIUS_LG)).bg(color::panel()).child(hierarchy)))
                     // The views (table, plots) in Explore's container
-                    .child(v_flex().flex_1().min_w_0().h_full().child(div().relative().flex_1().min_h_0().child(self.dock.clone()).children(self.dialog.as_ref().map(|(d, _)| d.clone()))).when(self.code_open, |d| d.child(self.code_pane(cx))))
-                    .when(self.show_side, |d| d.child(v_flex().id("analyze-side").flex_none().w(px(300.)).h_full().overflow_y_scroll().p(px(theme::MD)).gap(px(theme::XL)).border_l_1().border_color(color::border()).children(has_selection.then(|| crate::screens::explore::panels::selection::summary(&self.store, cx))).children(summary).children(steps))),
+                    .child(v_flex().flex_1().min_w_0().h_full().rounded(px(theme::RADIUS_LG)).overflow_hidden().bg(color::panel()).child(div().relative().flex_1().min_h_0().child(self.dock.clone()).children(self.dialog.as_ref().map(|(d, _)| d.clone()))).when(self.code_open, |d| d.child(self.code_pane(cx))))
+                    .when(self.show_side, |d| d.child(v_flex().id("analyze-side").flex_none().w(px(300.)).h_full().overflow_y_scroll().p(px(theme::MD)).gap(px(theme::XL)).rounded(px(theme::RADIUS_LG)).bg(color::panel()).children(has_selection.then(|| crate::screens::explore::panels::selection::summary(&self.store, cx))).children(summary).children(steps))),
             )
             .into_any_element()
     }

@@ -7,5 +7,6 @@ pub mod command;
 pub mod geometry;
 pub mod graph;
 pub mod hierarchy;
+pub mod paths;
 pub mod project;
 pub mod tool;
