@@ -13,7 +13,13 @@ yanked = "deny"
 # A crate no longer maintained is an error when lumen depends on it directly; deep in the GUI
 # (fonts, D-Bus) and Burn stacks it is the upstream's to replace, and CI would fail on every one
 unmaintained = "workspace"
-ignore = []
+ignore = [
+    # quick-xml < 0.41: quadratic time on a start tag with many attributes (denial of service).
+    # Reached only through polars' object_store (cloud storage responses); lumen parses no
+    # untrusted XML with it. object_store 0.13 pins quick-xml 0.39 and polars 0.55.2 (the newest)
+    # uses object_store 0.13: remove this when polars moves to object_store 0.14.
+    { id = "RUSTSEC-2026-0194", reason = "only via polars' object_store; no fixed version reachable yet" },
+]
 
 [licenses]
 version = 2

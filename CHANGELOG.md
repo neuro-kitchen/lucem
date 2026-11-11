@@ -7,6 +7,11 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
+### Supply chain (2026-11-11)
+
+- RUSTSEC-2026-0194 (quick-xml, reached only through polars' `object_store`) is recorded as an
+  accepted advisory in `deny.toml` until polars moves to `object_store` 0.14.
+
 ### Architecture (2026-11-11)
 
 - **One engine for histology steps.** `lumen-hist::engine::apply(ctx, analysis, action)` is the
