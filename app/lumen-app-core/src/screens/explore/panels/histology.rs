@@ -74,14 +74,14 @@ pub fn panel(store: &Entity<Store>, cx: &App) -> AnyElement {
     let Some(img) = s.doc.active_image.clone() else { return div().p(px(theme::MD)).child(note("No image")).into_any_element() };
     let p = s.pyramids.get(&img).cloned();
     let um = p.as_ref().and_then(|p| p.pixel_size_um);
-    let busy = s.hist.busy.clone();
-    let idle = busy.is_none();
+    let job = s.hist_busy();
+    let idle = job.is_none();
     let stains = s.hist_stains(&img);
     let brightfield = !matches!(stains, StainChoice::Fluorescence(_));
     let cells = s.hist.cells.get(&img).cloned().unwrap_or_default();
     let count = cells.len();
     let tiles = s.hist.tiles.get(&img).map_or(0, Vec::len);
-    let selected: Vec<&crate::domain::annotation::Annotation> = s.doc.annotations.iter().filter(|a| a.image == img && s.selection.contains(&a.id) && a.shape.is_region()).collect();
+    let selected: Vec<&crate::domain::annotation::Annotation> = s.doc.annotations.iter().filter(|a| a.image == img && s.sel.shapes.contains(&a.id) && a.shape.is_region()).collect();
     let regions = selected.len();
 
     // ---- Slide --------------------------------------------------------------
@@ -386,8 +386,8 @@ fn recipe_body(store: &Entity<Store>, s: &Store, r: Recipe, img: &str, cells: &[
     }
     // Running: what, how far, Cancel; done: the outcome, in plain words
     let _ = cx;
-    if let Some(b) = &s.hist.busy {
-        let f = s.hist.progress.unwrap_or(0.0).clamp(0.0, 1.0);
+    if let Some(j) = &s.hist_busy() {
+        let (b, f) = (j.name.clone(), j.progress.unwrap_or(0.0).clamp(0.0, 1.0));
         let st = store.clone();
         body = body.child(
             v_flex()

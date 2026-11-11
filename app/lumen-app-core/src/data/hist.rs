@@ -31,8 +31,10 @@ use lumen_hist::pixel::PixelClassifier;
 use lumen_hist::superpixel::SuperpixelSettings;
 use serde::{Deserialize, Serialize};
 use lumen_hist::classify::{train_random_trees, Example, FeatureChoice, ObjectClassifier};
-use lumen_hist::intensity::{self, IntensityThresholds};
-use lumen_hist::slide::{auto_threshold, detect_cells_in_region, SlideRegion, Staining, Tiling};
+use lumen_hist::intensity::IntensityThresholds;
+use lumen_hist::engine::{apply, Analysis, Ctx, Outcome};
+use lumen_hist::session::{Action, Within};
+use lumen_hist::slide::Staining;
 use lumen_hist::stains::{estimate_background, estimate_macenko, StainVectors};
 use lumen_hist::{HistObject, IntensityClass};
 
@@ -84,7 +86,6 @@ pub struct HistState {
     pub auto_threshold: bool,
     pub intensity: IntensityThresholds,
     pub classifier: Option<ObjectClassifier>,
-    pub busy: Option<String>,
     /// Bumped when cells change (the canvas redraws them).
     pub rev: u64,
     pub show: bool,
@@ -109,9 +110,6 @@ pub struct HistState {
     /// How the last step went (`true`: done; `false`: a problem or what is missing), shown
     /// under the button that ran it.
     pub outcome: Option<(bool, String)>,
-    /// How far a running step is (0–1), and its cancel flag (checked between tiles).
-    pub progress: Option<f32>,
-    pub cancel: Arc<std::sync::atomic::AtomicBool>,
     /// Every step that changed the analysis, in order (`session.json` next to the project;
     /// `lumen session run` runs it again on other images).
     pub session: lumen_hist::session::Session,
@@ -223,6 +221,24 @@ struct ObjectsDoc {
     tiles: Vec<HistObject>,
 }
 
+/// The kind of a histology job (see `super::jobs`).
+const HIST_JOB: &str = "histology";
+
+/// The engine reaches nucleus models through the app's running plugin servers.
+struct AppModels;
+
+impl lumen_hist::engine::Models for AppModels {
+    fn channels(&mut self, id: &str) -> lumen_hist::HistResult<usize> {
+        super::ml::find_model(id).map(|(_, m)| m.channels as usize).ok_or_else(|| lumen_hist::HistError::Invalid(format!("the model {id} is not found: Settings → Models")))
+    }
+
+    fn request(&mut self, id: &str, req: &lumen_ml::Request) -> Result<serde_json::Value, String> {
+        let (program, _) = super::ml::find_model(id).ok_or_else(|| format!("the model {id} is not found"))?;
+        let server = super::ml::shared_server(&program);
+        super::ml::request(&server, &program, req, &mut |_, _| {})
+    }
+}
+
 /// Classes a pixel or object classifier never learns from.
 const NOT_TRAINING: [&str; 5] = ["Tissue", "Region", "Measurement", "Hotspot", "Ignore*"];
 
@@ -316,7 +332,6 @@ impl Default for HistState {
             auto_threshold: true,
             intensity: IntensityThresholds { measurement: "Nucleus: DAB OD mean".into(), thresholds: vec![0.2, 0.4, 0.6], filter: None },
             classifier: None,
-            busy: None,
             rev: 0,
             show: true,
             tiles: HashMap::new(),
@@ -331,8 +346,6 @@ impl Default for HistState {
             detector: None,
             recipe: Recipe::Count,
             outcome: None,
-            progress: None,
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session: Default::default(),
         }
     }
@@ -409,7 +422,6 @@ impl Store {
             msg = DEVICE_LOST.to_string();
         }
         self.hist.outcome = Some((ok, msg.clone()));
-        self.hist.progress = None;
         self.set_status(msg, cx);
     }
 
@@ -439,8 +451,13 @@ impl Store {
 
     /// Stops the running step after its current tile.
     pub fn hist_cancel(&mut self, cx: &mut Context<Self>) {
-        self.hist.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        super::jobs::cancel(HIST_JOB);
         cx.notify();
+    }
+
+    /// Whether a histology step is running.
+    pub fn hist_busy(&self) -> Option<super::jobs::Job> {
+        super::jobs::of(HIST_JOB)
     }
 
     /// The stains used for `image` (chosen, else guessed: RGB is H-DAB, else fluorescence with
@@ -467,14 +484,12 @@ impl Store {
     /// The selected region annotations of the shown image (their outlines, level-0 px, and plane).
     fn hist_selected_regions(&self) -> Vec<(Vec<[f64; 2]>, usize)> {
         let Some(img) = self.doc.active_image.as_deref() else { return Vec::new() };
-        self.doc.annotations.iter().filter(|a| a.image == img && self.selection.contains(&a.id) && a.shape.is_region()).map(|a| (a.shape.outline(), a.z.unwrap_or(0))).collect()
+        self.doc.annotations.iter().filter(|a| a.image == img && self.sel.shapes.contains(&a.id) && a.shape.is_region()).map(|a| (a.shape.outline(), a.z.unwrap_or(0))).collect()
     }
 
-    fn hist_job(&mut self, what: &str, cx: &mut Context<Self>) -> Option<(String, Arc<lumen_io::Pyramid>, Arc<super::device::Device>)> {
-        if self.hist.busy.is_some() {
-            self.hist_report(false, "Histology is still working on the last step", cx);
-            return None;
-        }
+    /// Starts a histology job on the shown image: its id, pyramid and device, and the job (a
+    /// second GPU job is refused, saying what runs).
+    fn hist_job(&mut self, what: &str, cx: &mut Context<Self>) -> Option<(String, Arc<lumen_io::Pyramid>, Arc<super::device::Device>, super::jobs::JobHandle)> {
         let image = self.doc.active_image.clone()?;
         let Some(p) = self.pyramids.get(&image).cloned() else {
             self.hist_report(false, "The image is still opening", cx);
@@ -489,12 +504,148 @@ impl Store {
             self.hist_report(false, "Starting the device; try again when it is up", cx);
             return None;
         };
-        self.hist.busy = Some(what.to_string());
+        let job = match super::jobs::start(HIST_JOB, what, true) {
+            Ok(j) => j,
+            Err(e) => {
+                self.hist_report(false, format!("Wait: {e}"), cx);
+                return None;
+            }
+        };
         self.hist.outcome = None;
-        self.hist.progress = Some(0.0);
-        self.hist.cancel.store(false, std::sync::atomic::Ordering::Relaxed);
         cx.notify();
-        Some((image, p, device))
+        Some((image, p, device, job))
+    }
+
+    /// The analysis of `image` as the engine takes it: its tissue (`Tissue` annotations), cells,
+    /// tiles and classifiers.
+    fn hist_analysis(&self, image: &str) -> Analysis {
+        Analysis {
+            tissue: self.doc.annotations_of(image).filter(|a| a.class == "Tissue" && a.shape.is_region()).map(|a| a.shape.outline()).collect(),
+            cells: self.hist.cells.get(image).cloned().unwrap_or_default(),
+            tiles: self.hist.tiles.get(image).cloned().unwrap_or_default(),
+            classifier: self.hist.classifier.clone(),
+            tile_classifier: self.hist.tile_classifier.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// Runs `actions` on the shown image through the engine (the one way a step runs: the same
+    /// as `lumen session run` and an agent), in the background as one job; the results come
+    /// back into the project and each step done is recorded in the session.
+    pub fn hist_run(&mut self, actions: Vec<Action>, what: &str, cx: &mut Context<Self>) {
+        let z = self.hist_selected_regions().first().map_or(0, |r| r.1);
+        let Some((image, p, device, job)) = self.hist_job(what, cx) else { return };
+        let mut a = self.hist_analysis(&image);
+        let (tx, rx) = async_channel::unbounded::<()>();
+        let task = cx.background_spawn(async move {
+            let mut models = AppModels;
+            let mut outcomes = Vec::new();
+            let mut error = None;
+            {
+                let mut progress = |what: &str, f: Option<f32>| {
+                    job.set(what, f);
+                    let _ = tx.try_send(());
+                };
+                for action in &actions {
+                    let mut ctx = Ctx { client: &device.client, pyramid: &p, z, models: &mut models, progress: &mut progress, cancel: &job.cancel };
+                    match apply(&mut ctx, &mut a, action) {
+                        Ok(o) => outcomes.push(o),
+                        Err(e) => {
+                            error = Some(e.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+            drop(job);
+            (a, actions, outcomes, error)
+        });
+        // Redrawn as the job moves on
+        cx.spawn(async move |this, cx| {
+            while rx.recv().await.is_ok() {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let (a, actions, outcomes, error) = task.await;
+            let _ = this.update(cx, |s, cx| s.hist_take(image, a, &actions[..outcomes.len()], &outcomes, error, cx));
+        })
+        .detach();
+    }
+
+    /// Takes a run's results into the project: objects, classifiers, tissue annotations, maps;
+    /// records each step done and reports.
+    fn hist_take(&mut self, image: String, a: Analysis, done: &[Action], outcomes: &[Outcome], error: Option<String>, cx: &mut Context<Self>) {
+        for action in done {
+            match action {
+                Action::Tissue { .. } if !a.tissue.is_empty() => {
+                    let mut commands = Vec::new();
+                    if self.doc.class("Tissue").is_none() {
+                        commands.push(Command::SetClass { class: ClassDoc { name: "Tissue".into(), color: [120, 200, 120], visible: true, opacity: 1.0 } });
+                    }
+                    let annotations: Vec<Annotation> = a.tissue.iter().map(|o| Annotation { id: String::new(), image: image.clone(), shape: Shape::Polygon { points: o.clone() }, class: "Tissue".into(), note: String::new(), z: None }).collect();
+                    commands.push(Command::AddAnnotations { annotations });
+                    let _ = self.execute(Command::Batch { commands }, cx);
+                }
+                Action::PixelClasses { classifier, .. } => {
+                    if let Some(m) = &a.class_map {
+                        let colors: Vec<[u8; 3]> = m.classes.iter().map(|c| self.doc.class(c).map(|c| c.color).unwrap_or_else(|| hashed_color(c))).collect();
+                        let mut bgra = vec![0u8; m.width * m.height * 4];
+                        for (i, &k) in m.map.iter().enumerate() {
+                            if k != 0 {
+                                let [r, g, b] = colors[k as usize - 1];
+                                bgra[i * 4..i * 4 + 4].copy_from_slice(&[b, g, r, 110]);
+                            }
+                        }
+                        let rect = [m.origin[0], m.origin[1], m.width as f64 * m.ds, m.height as f64 * m.ds];
+                        let layer = ClassMap { rect, width: m.width, height: m.height, ds: m.ds, map: m.map.clone(), classes: m.classes.clone(), areas: m.areas.clone(), image: lumen_view::bgra_image(m.width, m.height, bgra) };
+                        self.hist.class_maps.insert(image.clone(), layer);
+                        self.hist.pixel_classifier = Some(classifier.clone());
+                        self.hist.show_maps = true;
+                    }
+                }
+                Action::Density { .. } => {
+                    if let Some(d) = &a.density {
+                        let mut bgra = vec![0u8; d.map.width * d.map.height * 4];
+                        for (i, &v) in d.map.values.iter().enumerate() {
+                            if v > 0.0 {
+                                let t = v / d.max;
+                                let [r, g, b] = lumen_view::ColormapLut::Inferno.sample_rgb(t);
+                                bgra[i * 4..i * 4 + 4].copy_from_slice(&[b, g, r, (90.0 + 120.0 * t) as u8]);
+                            }
+                        }
+                        let rect = [d.map.origin[0], d.map.origin[1], d.map.width as f64 * d.map.ds, d.map.height as f64 * d.map.ds];
+                        self.hist.density_maps.insert(image.clone(), DensityLayer { rect, max: d.max, label: d.label.clone(), image: lumen_view::bgra_image(d.map.width, d.map.height, bgra) });
+                        self.hist.show_maps = true;
+                    }
+                }
+                _ => {}
+            }
+            self.hist_record(action.clone(), cx);
+        }
+        if !done.is_empty() {
+            for (map, list) in [(&mut self.hist.cells, a.cells), (&mut self.hist.tiles, a.tiles)] {
+                if list.is_empty() {
+                    map.remove(&image);
+                } else {
+                    map.insert(image.clone(), list);
+                }
+            }
+            self.hist.classifier = a.classifier;
+            self.hist.tile_classifier = a.tile_classifier;
+            self.hist.rev += 1;
+            self.hist_persist(vec![image], cx);
+        }
+        let said: Vec<String> = outcomes.iter().map(Outcome::summary).collect();
+        match error {
+            Some(e) if e.contains("cancelled") => self.hist_report(false, "Cancelled: what was there before is kept", cx),
+            Some(e) => self.hist_report(false, if said.is_empty() { e } else { format!("{}; then: {e}", said.join("; ")) }, cx),
+            None => self.hist_report(true, said.join("; "), cx),
+        }
+        cx.notify();
     }
 
     /// Fits the stains to the (first) selected region.
@@ -511,8 +662,12 @@ impl Store {
             StainChoice::HE => ("Hematoxylin".to_string(), "Eosin".to_string()),
             _ => ("Hematoxylin".to_string(), "DAB".to_string()),
         };
-        self.hist.busy = Some("Fitting the stains".into());
+        let job = match super::jobs::start(HIST_JOB, "Fitting the stains", false) {
+            Ok(j) => j,
+            Err(e) => return self.hist_report(false, format!("Wait: {e}"), cx),
+        };
         let task = cx.background_spawn(async move {
+            let _job = job;
             let (x0, y0, x1, y1) = lumen_hist::polygon::bounds(&outline);
             let level = (0..p.levels.len()).find(|&l| (x1 - x0).max(y1 - y0) / p.levels[l].downsample <= 2048.0).unwrap_or(p.coarsest());
             let l = &p.levels[level];
@@ -527,7 +682,6 @@ impl Store {
         cx.spawn(async move |this, cx| {
             let r = task.await;
             let _ = this.update(cx, |s, cx| {
-                s.hist.busy = None;
                 match r {
                     Ok(v) => {
                         let msg = format!("Stains fitted: {}", v.stains.iter().take(2).map(|st| format!("{} ({:.2}, {:.2}, {:.2})", st.name, st.od[0], st.od[1], st.od[2])).collect::<Vec<_>>().join(", "));
@@ -545,48 +699,8 @@ impl Store {
     /// Finds the tissue at a coarse level; its regions become `Tissue` annotations.
     pub fn hist_detect_tissue(&mut self, cx: &mut Context<Self>) {
         let Some(image) = self.doc.active_image.clone() else { return };
-        let Some(p) = self.pyramids.get(&image).cloned() else { return };
-        let Some(um) = p.pixel_size_um else { return self.hist_report(false, "Tissue detection needs the image's pixel size (µm)", cx) };
         let brightfield = !matches!(self.hist_stains(&image), StainChoice::Fluorescence(_));
-        let record = lumen_hist::session::Action::Tissue { settings: lumen_hist::tissue::TissueSettings { brightfield, ..Default::default() } };
-        self.hist.busy = Some("Finding the tissue".into());
-        cx.notify();
-        let task = cx.background_spawn(async move {
-            let level = (0..p.levels.len()).find(|&l| p.levels[l].width.max(p.levels[l].height) <= 4096).unwrap_or(p.coarsest());
-            let l = p.levels[level].clone();
-            let channels = if brightfield { 3.min(p.channels.len()) } else { p.channels.len() };
-            let planes: Vec<Vec<f32>> = (0..channels).map(|c| p.read_region_at(level, c, 0, 0, 0, l.width, l.height).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
-            let scale: Vec<f32> = (0..channels).map(|c| if brightfield { 255.0 / p.channels[c].range.1.max(1e-6) } else { 1.0 }).collect();
-            let img: Vec<f32> = (0..l.width * l.height).flat_map(|i| (0..channels).map(move |c| (i, c))).map(|(i, c)| planes[c][i] * scale[c]).collect();
-            let grid = lumen_hist::raster::Grid::new(l.width, l.height, [0.0, 0.0], l.downsample);
-            Ok::<_, String>(lumen_hist::tissue::detect(&img, channels, grid, um, &lumen_hist::tissue::TissueSettings { brightfield, ..Default::default() }))
-        });
-        cx.spawn(async move |this, cx| {
-            let r = task.await;
-            let _ = this.update(cx, |s, cx| {
-                s.hist.busy = None;
-                match r {
-                    Ok(t) if t.regions.is_empty() => s.hist_report(true, "No tissue found", cx),
-                    Ok(t) => {
-                        let mut commands = Vec::new();
-                        if s.doc.class("Tissue").is_none() {
-                            commands.push(Command::SetClass { class: ClassDoc { name: "Tissue".into(), color: [120, 200, 120], visible: true, opacity: 1.0 } });
-                        }
-                        let annotations: Vec<Annotation> = t.regions.iter().map(|r| Annotation { id: String::new(), image: image.clone(), shape: Shape::Polygon { points: r.roi.clone() }, class: "Tissue".into(), note: String::new(), z: None }).collect();
-                        let n = annotations.len();
-                        commands.push(Command::AddAnnotations { annotations });
-                        if s.execute(Command::Batch { commands }, cx).is_ok() {
-                            let mm2: f64 = t.regions.iter().filter_map(|r| r.get("Area µm^2")).sum::<f64>() / 1e6;
-                            s.hist_record(record.clone(), cx);
-                            s.hist_report(true, format!("{n} tissue region(s), {mm2:.2} mm² (threshold {:.3})", t.threshold), cx);
-                        }
-                    }
-                    Err(e) => s.hist_report(false, format!("Tissue: {e}"), cx),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.hist_run(vec![Action::Tissue { settings: lumen_hist::tissue::TissueSettings { brightfield, ..Default::default() } }], "Finding the tissue", cx);
     }
 
     /// Detects cells inside the selected region annotations (tile by tile on the device); they
@@ -597,122 +711,24 @@ impl Store {
             return self.hist_report(false, "Select one or more region annotations (or draw one) to find cells in", cx);
         }
         let stains = self.doc.active_image.as_deref().map(|i| self.hist_stains(i)).unwrap_or(StainChoice::HDab);
-        let mut settings = self.hist.detection.clone();
         // A model plugin finds the nuclei, when one is chosen
-        let model = match self.hist.detector.clone() {
-            None => None,
-            Some(id) => match self.ml.nucleus_models().into_iter().find(|(_, m)| m.id == id) {
+        if let Some(id) = &self.hist.detector {
+            match self.ml.nucleus_models().into_iter().find(|(_, m)| &m.id == id) {
                 None => return self.hist_report(false, format!("The nucleus model {id:?} is not found: Settings → Models (or choose Threshold)"), cx),
                 Some((_, m)) if !m.installed => return self.hist_report(false, format!("{} is not installed: Settings → Models → Install", m.name), cx),
-                Some((program, m)) => Some((self.ml.server(&program), program, m.id, m.channels as usize)),
-            },
-        };
+                Some(_) => {}
+            }
+        }
+        let model = self.hist.detector.clone();
         let auto = model.is_none() && self.hist.auto_threshold && matches!(stains, StainChoice::Fluorescence(_));
-        let record = lumen_hist::session::Action::Cells {
-            within: lumen_hist::session::Within::Regions { outlines: regions.iter().map(|(o, _)| o.clone()).collect() },
+        let action = Action::Cells {
+            within: Within::Regions { outlines: regions.into_iter().map(|(o, _)| o).collect() },
             staining: stains.staining(),
             detection: self.hist.detection.clone(),
             auto_threshold: auto,
-            model: self.hist.detector.clone(),
+            model: model.clone(),
         };
-        let Some((image, p, device)) = self.hist_job(if model.is_some() { "Finding cells with the model" } else { "Finding cells" }, cx) else { return };
-        let cancel = self.hist.cancel.clone();
-        let (tx, rx) = async_channel::unbounded::<(usize, usize)>();
-        let task = cx.background_spawn(async move {
-            let um = p.pixel_size_um.unwrap_or(1.0);
-            let names: Vec<String> = p.channels.iter().map(|c| c.label.clone()).collect();
-            let ranges: Vec<f32> = p.channels.iter().map(|c| c.range.1).collect();
-            let staining = stains.staining();
-            let mut all: Vec<HistObject> = Vec::new();
-            let mut threshold_note = String::new();
-            for (outline, z) in &regions {
-                let (x0, y0, x1, y1) = lumen_hist::polygon::bounds(outline);
-                if let (true, Staining::Fluorescence { nuclear }) = (auto, &staining) {
-                    let cl = (0..p.levels.len()).find(|&k| (x1 - x0).max(y1 - y0) / p.levels[k].downsample <= 2048.0).unwrap_or(p.coarsest());
-                    let c = &p.levels[cl];
-                    let (cx0, cy0) = ((x0.max(0.0) / c.downsample) as usize, (y0.max(0.0) / c.downsample) as usize);
-                    let (cw, ch) = ((((x1 - x0) / c.downsample).ceil() as usize).max(1), (((y1 - y0) / c.downsample).ceil() as usize).max(1));
-                    let v = p.read_region_at(cl, *nuclear, *z, cx0, cy0, cw, ch).map_err(|e| e.to_string())?;
-                    settings.threshold = auto_threshold(&v, settings.background_radius_um > 0.0).0;
-                    threshold_note = format!(" (threshold {:.1})", settings.threshold);
-                }
-                // Models read at about their own scale (≤ 0.55 µm per pixel), the threshold at full
-                let level = if model.is_some() { lumen_hist::models::model_level(&p.levels.iter().map(|l| l.downsample).collect::<Vec<_>>(), um) } else { 0 };
-                let ds = p.levels[level].downsample;
-                let (lw, lh) = (p.levels[level].width as f64, p.levels[level].height as f64);
-                let (rx0, ry0) = ((x0.max(0.0) / ds).floor(), (y0.max(0.0) / ds).floor());
-                let region = SlideRegion { x0: rx0 as usize, y0: ry0 as usize, width: ((x1 / ds).min(lw) - rx0).max(0.0).ceil() as usize, height: ((y1 / ds).min(lh) - ry0).max(0.0).ceil() as usize, downsample: ds, pixel_um: um, within: Some(outline.clone()) };
-                let z = *z;
-                let mut read = |x: usize, y: usize, w: usize, h: usize| -> lumen_hist::HistResult<Vec<Vec<f32>>> {
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        return Err(lumen_hist::HistError::Invalid("cancelled".into()));
-                    }
-                    (0..p.channels.len()).map(|c| p.read_region_at(level, c, z, x, y, w, h).map_err(|e| lumen_hist::HistError::Invalid(e.to_string()))).collect()
-                };
-                let mut progress = |d, t| {
-                    let _ = tx.try_send((d, t));
-                };
-                let mut found = match &model {
-                    None => detect_cells_in_region(&device.client, &mut read, &names, &ranges, &staining, &region, &settings, Tiling::default(), &mut progress),
-                    Some((server, program, id, channels)) => {
-                        let mut send = |req: &lumen_ml::Request| super::ml::request(server, program, req, &mut |_, _| {});
-                        let nuclear = match &staining {
-                            Staining::Fluorescence { nuclear } => *nuclear,
-                            Staining::Brightfield { .. } => 0,
-                        };
-                        let mut labeller = |raw: &[Vec<f32>], w: usize, h: usize| lumen_hist::models::model_nuclei(&mut send, id, *channels, nuclear, raw, &ranges, w, h, um * ds);
-                        lumen_hist::slide::cells_in_region(&device.client, &mut read, &names, &ranges, &staining, &region, &settings, Tiling { tile: 2048, overlap: 64 }, Some(&mut labeller), &mut progress)
-                    }
-                }
-                .map_err(|e| e.to_string())?;
-                for o in &mut found {
-                    o.id += all.len() as u32;
-                }
-                all.extend(found);
-            }
-            Ok::<_, String>((all, regions, threshold_note))
-        });
-        cx.spawn(async move |this, cx| {
-            while let Ok((d, t)) = rx.recv().await {
-                if this.update(cx, |s, cx| {
-                    s.hist.busy = Some(format!("Finding cells: tile {d} of {t}"));
-                    s.hist.progress = Some(d as f32 / t.max(1) as f32);
-                    cx.notify();
-                }).is_err() {
-                    return;
-                }
-            }
-        })
-        .detach();
-        cx.spawn(async move |this, cx| {
-            let r = task.await;
-            let _ = this.update(cx, |s, cx| {
-                s.hist.busy = None;
-                match r {
-                    Ok((mut found, regions, note)) => {
-                        if let Some(c) = &s.hist.classifier {
-                            c.apply(&mut found);
-                        }
-                        let n = found.len();
-                        let image_saved = image.clone();
-                        let list = s.hist.cells.entry(image).or_default();
-                        list.retain(|c| !regions.iter().any(|(o, _)| lumen_hist::polygon::contains(o, c.centroid)));
-                        list.extend(found);
-                        for (i, c) in list.iter_mut().enumerate() {
-                            c.id = i as u32 + 1;
-                        }
-                        s.hist.rev += 1;
-                        s.hist_persist(vec![image_saved], cx);
-                        s.hist_record(record.clone(), cx);
-                        s.hist_report(true, format!("{n} cell(s) found{note}"), cx);
-                    }
-                    Err(e) if e.contains("cancelled") => s.hist_report(false, "Cancelled: the cells found before were kept", cx),
-                    Err(e) => s.hist_report(false, format!("Finding cells failed: {e}"), cx),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.hist_run(vec![action], if model.is_some() { "Finding cells with the model" } else { "Finding cells" }, cx);
     }
 
     /// The shown image's classed annotations an object classifier learns from (regions and
@@ -730,68 +746,30 @@ impl Store {
     }
 
     /// Trains Random Trees on the shown image's cells (and, separately, its superpixel tiles)
-    /// from its classed annotations and classifies them all.
+    /// from its classed annotations; applying them is the step (the engine).
     pub fn hist_train_classifier(&mut self, cx: &mut Context<Self>) {
         let Some(image) = self.doc.active_image.clone() else { return };
         let examples = self.hist_examples(&image);
-        let mut done = Vec::new();
+        let mut actions = Vec::new();
         let mut errors = Vec::new();
-        let mut records = Vec::new();
         for tiles in [false, true] {
-            let list = if tiles { self.hist.tiles.get_mut(&image) } else { self.hist.cells.get_mut(&image) };
+            let list = if tiles { self.hist.tiles.get(&image) } else { self.hist.cells.get(&image) };
             let Some(objects) = list.filter(|c| !c.is_empty()) else { continue };
             match train_random_trees(objects, &examples, &FeatureChoice::All, false, None, &lumen_hist::forest::ForestSettings::default()) {
-                Ok(c) => {
-                    c.apply(objects);
-                    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-                    for o in objects.iter() {
-                        *counts.entry(o.class.clone().unwrap_or_else(|| "none".into())).or_default() += 1;
-                    }
-                    done.push(format!("{}: {}", if tiles { "tiles" } else { "cells" }, counts.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ")));
-                    records.push(lumen_hist::session::Action::ClassifyObjects { classifier: c.clone(), tiles });
-                    if tiles {
-                        self.hist.tile_classifier = Some(c);
-                    } else {
-                        self.hist.classifier = Some(c);
-                    }
-                }
+                Ok(classifier) => actions.push(Action::ClassifyObjects { classifier, tiles }),
                 Err(e) => errors.push(format!("{}: {e}", if tiles { "tiles" } else { "cells" })),
             }
         }
-        if done.is_empty() && errors.is_empty() {
-            return self.hist_report(false, "Find cells or superpixels first", cx);
+        if actions.is_empty() {
+            return self.hist_report(false, if errors.is_empty() { "Find cells or superpixels first".to_string() } else { format!("{} — draw regions or points of each class over the objects, then train", errors.join("; ")) }, cx);
         }
-        self.hist.rev += 1;
-        self.hist_persist(vec![image], cx);
-        for r in records {
-            self.hist_record(r, cx);
-        }
-        let msg = if errors.is_empty() {
-            format!("Classified {}", done.join("; "))
-        } else {
-            format!("{} — draw regions or points of each class over the objects, then train", [done, errors].concat().join("; "))
-        };
-        self.hist_report(true, msg, cx);
-        cx.notify();
+        self.hist_run(actions, "Classifying", cx);
     }
 
     /// Intensity classes of the shown image's cells.
     pub fn hist_apply_intensity(&mut self, cx: &mut Context<Self>) {
-        let Some(image) = self.doc.active_image.clone() else { return };
-        let t = self.hist.intensity.clone();
-        let Some(cells) = self.hist.cells.get_mut(&image).filter(|c| !c.is_empty()) else {
-            return self.hist_report(false, "Find cells first", cx);
-        };
-        if t.measurement.is_empty() || !cells.iter().any(|c| c.get(&t.measurement).is_some()) {
-            return self.hist_report(false, format!("The cells have no measurement {:?}", t.measurement), cx);
-        }
-        intensity::classify(cells, &t);
-        let s = intensity::summarize(cells.iter());
-        self.hist.rev += 1;
-        self.hist_persist(vec![image], cx);
-        self.hist_record(lumen_hist::session::Action::Intensity { thresholds: t.clone() }, cx);
-        self.hist_report(true, format!("Positive {:.1} % of {} (1+ {}, 2+ {}, 3+ {}; H-score {:.0})", s.positive_percent, s.total, s.one_plus, s.two_plus, s.three_plus, s.h_score), cx);
-        cx.notify();
+        let thresholds = self.hist.intensity.clone();
+        self.hist_run(vec![Action::Intensity { thresholds }], "Scoring intensity", cx);
     }
 
     /// The `count` densest places of the shown image's cells (within 50 µm) as point
@@ -848,11 +826,15 @@ impl Store {
             "session": self.hist.session,
             "pipeline": self.doc.graph,
         });
-        self.hist.busy = Some("Exporting".into());
+        let job = match super::jobs::start("export", "Exporting", false) {
+            Ok(j) => j,
+            Err(e) => return self.hist_report(false, format!("Wait: {e}"), cx),
+        };
         cx.notify();
         let name = img.name.clone();
         let task = cx.background_spawn(async move {
             use lumen_hist::output;
+            let _job = job;
             let store = output::store_for(&image_path, &name, &fallback);
             if store != image_path {
                 output::ensure_group(&store).map_err(|e| e.to_string())?;
@@ -873,7 +855,6 @@ impl Store {
         cx.spawn(async move |this, cx| {
             let r = task.await;
             let _ = this.update(cx, |s, cx| {
-                s.hist.busy = None;
                 match r {
                     Ok((store, c, t)) => s.hist_report(true, format!("{c} cells, {t} tiles → {} (labels, Parquet tables, GeoParquet shapes, provenance)", store.display()), cx),
                     Err(e) => s.hist_report(false, format!("Export failed: {e}"), cx),
@@ -904,44 +885,6 @@ impl Store {
             (None, None) => [90, 200, 255],
         }
     }
-}
-
-/// The finest level whose pixels are at most `target_um` (a little over is fine), coarser
-/// still while the `w × h` level-0 rectangle would be over `max_side` pixels.
-fn level_for(p: &lumen_io::Pyramid, um: f64, target_um: f64, w: f64, h: f64, max_side: f64) -> usize {
-    let mut level = 0;
-    for (k, l) in p.levels.iter().enumerate() {
-        if l.downsample * um <= target_um * 1.05 {
-            level = k;
-        }
-    }
-    while level < p.coarsest() && w.max(h) / p.levels[level].downsample > max_side {
-        level += 1;
-    }
-    level
-}
-
-/// Every channel of a level-0 rectangle read at `level`, scaled to 0..1 by its range: names and
-/// values, the level region `(x, y, w, h)` and its downsample.
-type Channels = (Vec<(String, Vec<f32>)>, [usize; 4], f64);
-
-fn read_channels(p: &lumen_io::Pyramid, level: usize, z: usize, b: (f64, f64, f64, f64)) -> Result<Channels, String> {
-    let l = &p.levels[level];
-    let ds = l.downsample;
-    let x = (b.0.max(0.0) / ds) as usize;
-    let y = (b.1.max(0.0) / ds) as usize;
-    let w = ((b.2.min(p.width() as f64) / ds).ceil() as usize).saturating_sub(x).max(1);
-    let h = ((b.3.min(p.height() as f64) / ds).ceil() as usize).saturating_sub(y).max(1);
-    let channels = p
-        .channels
-        .iter()
-        .enumerate()
-        .map(|(c, ch)| {
-            let scale = 1.0 / ch.range.1.max(1e-6);
-            p.read_region_at(level, c, z, x, y, w, h).map(|v| (ch.label.clone(), v.into_iter().map(|v| v * scale).collect())).map_err(|e| e.to_string())
-        })
-        .collect::<Result<_, _>>()?;
-    Ok((channels, [x, y, w, h], ds))
 }
 
 fn union_bounds(outlines: impl Iterator<Item = Vec<[f64; 2]>>) -> Option<(f64, f64, f64, f64)> {
@@ -1025,9 +968,9 @@ impl Store {
         .detach();
     }
 
-    /// Trains the pixel classifier from the shown image's classed regions and brush strokes and
-    /// classifies the selected regions (or where it was trained); the class map becomes a layer
-    /// and its areas are measured.
+    /// Trains the pixel classifier from the shown image's classed regions and brush strokes;
+    /// classing the selected regions (or where it was trained) is the step (the engine): the
+    /// class map becomes a layer and its areas are measured.
     pub fn hist_train_pixels(&mut self, cx: &mut Context<Self>) {
         let Some(image) = self.doc.active_image.clone() else { return };
         let training: Vec<Annotation> = self
@@ -1040,19 +983,16 @@ impl Store {
         if classes.len() < 2 {
             return self.hist_report(false, "Draw regions or brush strokes of at least two classes (Tumor, Stroma, …) to train a pixel classifier", cx);
         }
-        let selected: Vec<Annotation> = self.doc.annotations_of(&image).filter(|a| self.selection.contains(&a.id) && a.shape.is_region() && !classes.contains(&a.class)).cloned().collect();
-        let colors: Vec<[u8; 3]> = classes.iter().map(|c| self.doc.class(c).map(|c| c.color).unwrap_or_else(|| hashed_color(c))).collect();
+        let selected: Vec<Annotation> = self.doc.annotations_of(&image).filter(|a| self.sel.shapes.contains(&a.id) && a.shape.is_region() && !classes.contains(&a.class)).cloned().collect();
         let target_um = self.hist.pixel_um;
-        let rec_um = target_um;
         let z = training.iter().find_map(|a| a.z).unwrap_or(0);
-        let Some((image, p, device)) = self.hist_job("Training the pixel classifier", cx) else { return };
+        let Some((_image, p, device, job)) = self.hist_job("Training the pixel classifier", cx) else { return };
         let task = cx.background_spawn(async move {
+            let _job = job;
             let um = p.pixel_size_um.unwrap_or(1.0);
             let train_b = union_bounds(training.iter().map(|a| a.shape.outline())).ok_or("nothing to train on")?;
-            let area_b = union_bounds(selected.iter().map(|a| a.shape.outline())).unwrap_or(train_b);
-            let b = (train_b.0.min(area_b.0), train_b.1.min(area_b.1), train_b.2.max(area_b.2), train_b.3.max(area_b.3));
-            let level = level_for(&p, um, target_um, b.2 - b.0, b.3 - b.1, 4096.0);
-            let (channels, [x, y, w, h], ds) = read_channels(&p, level, z, b)?;
+            let level = lumen_hist::engine::level_for(&p, um, target_um, train_b.2 - train_b.0, train_b.3 - train_b.1, 4096.0);
+            let (channels, [x, y, w, h], ds) = lumen_hist::engine::read_channels(&p, level, z, train_b).map_err(|e| e.to_string())?;
             let refs: Vec<(String, &[f32])> = channels.iter().map(|(n, v)| (n.clone(), v.as_slice())).collect();
             let mut labels = vec![0u8; w * h];
             for (k, class) in classes.iter().enumerate() {
@@ -1064,52 +1004,20 @@ impl Store {
                     }
                 }
             }
-            let t = lumen_hist::pixel::PixelTraining::default();
-            let c = lumen_hist::pixel::train(&device.client, &refs, w, h, &labels, &classes, &t).map_err(|e| e.to_string())?;
-            let mut map = lumen_hist::pixel::classify(&device.client, &c, &refs, w, h).map_err(|e| e.to_string())?;
-            // Only inside the selected regions (when some are)
-            let within: Option<Vec<u8>> = (!selected.is_empty()).then(|| {
-                let refs: Vec<&Annotation> = selected.iter().collect();
-                crate::domain::annotation::rasterize(&refs, None, x, y, w, h, ds).into_iter().map(|v| u8::from(v != 0)).collect()
-            });
-            if let Some(m) = &within {
-                for (c, &inside) in map.iter_mut().zip(m) {
-                    if inside == 0 {
-                        *c = 0;
-                    }
-                }
-            }
-            let px_um2 = (ds * um) * (ds * um);
-            let areas = lumen_hist::area::class_areas(&map, &classes, within.as_deref(), px_um2);
-            let mut bgra = vec![0u8; w * h * 4];
-            for (i, &k) in map.iter().enumerate() {
-                if k != 0 {
-                    let [r, g, b] = colors[k as usize - 1];
-                    bgra[i * 4..i * 4 + 4].copy_from_slice(&[b, g, r, 110]);
-                }
-            }
-            let rect = [x as f64 * ds, y as f64 * ds, w as f64 * ds, h as f64 * ds];
-            let image = lumen_view::bgra_image(w, h, bgra);
-            Ok::<_, String>((c, ClassMap { rect, width: w, height: h, ds, map, classes, areas, image }))
+            let c = lumen_hist::pixel::train(&device.client, &refs, w, h, &labels, &classes, &lumen_hist::pixel::PixelTraining::default()).map_err(|e| e.to_string())?;
+            // Where it classes: the selected regions, else where it was trained
+            let within = if selected.is_empty() {
+                Within::Regions { outlines: vec![vec![[train_b.0, train_b.1], [train_b.2, train_b.1], [train_b.2, train_b.3], [train_b.0, train_b.3]]] }
+            } else {
+                Within::Regions { outlines: selected.iter().map(|a| a.shape.outline()).collect() }
+            };
+            Ok::<_, String>((c, within))
         });
         cx.spawn(async move |this, cx| {
             let r = task.await;
-            let _ = this.update(cx, |s, cx| {
-                s.hist.busy = None;
-                match r {
-                    Ok((c, m)) => {
-                        s.hist_record(lumen_hist::session::Action::PixelClasses { classifier: c.clone(), pixel_um: rec_um }, cx);
-                        let msg = format!("Pixel classes: {}", m.areas.iter().map(|a| format!("{} {:.3} mm² ({:.1} %)", a.class, a.area_um2 / 1e6, a.percent)).collect::<Vec<_>>().join(", "));
-                        s.hist.pixel_classifier = Some(c);
-                        s.hist.class_maps.insert(image.clone(), m);
-                        s.hist.show_maps = true;
-                        s.hist.rev += 1;
-                        s.hist_persist(vec![image], cx);
-                        s.hist_report(true, msg, cx);
-                    }
-                    Err(e) => s.hist_report(false, format!("Pixel classifier: {e}"), cx),
-                }
-                cx.notify();
+            let _ = this.update(cx, |s, cx| match r {
+                Ok((classifier, within)) => s.hist_run(vec![Action::PixelClasses { classifier, pixel_um: target_um, within }], "Classing pixels", cx),
+                Err(e) => s.hist_report(false, format!("Pixel classifier: {e}"), cx),
             });
         })
         .detach();
@@ -1155,91 +1063,14 @@ impl Store {
         if regions.is_empty() {
             return self.hist_report(false, "Select one or more region annotations to cut into superpixels", cx);
         }
-        let settings = self.hist.superpixel.clone();
-        let target_um = self.hist.pixel_um;
-        let record = lumen_hist::session::Action::Superpixels { within: lumen_hist::session::Within::Regions { outlines: regions.iter().map(|(o, _)| o.clone()).collect() }, settings: settings.clone(), pixel_um: target_um };
-        let Some((image, p, device)) = self.hist_job("Making superpixels", cx) else { return };
-        let task = cx.background_spawn(async move {
-            let um = p.pixel_size_um.unwrap_or(1.0);
-            let mut all: Vec<HistObject> = Vec::new();
-            for (outline, z) in &regions {
-                let b = lumen_hist::polygon::bounds(outline);
-                let level = level_for(&p, um, target_um, b.2 - b.0, b.3 - b.1, 4096.0);
-                let (channels, [x, y, w, h], ds) = read_channels(&p, level, *z, b)?;
-                let refs: Vec<(String, &[f32])> = channels.iter().map(|(n, v)| (n.clone(), v.as_slice())).collect();
-                let grid = lumen_hist::raster::Grid::new(w, h, [x as f64 * ds, y as f64 * ds], ds);
-                let (_, objects) = lumen_hist::superpixel::superpixels(&device.client, &refs, grid, um, &settings).map_err(|e| e.to_string())?;
-                all.extend(objects.into_iter().filter(|o| lumen_hist::polygon::contains(outline, o.centroid)));
-            }
-            Ok::<_, String>((all, regions))
-        });
-        cx.spawn(async move |this, cx| {
-            let r = task.await;
-            let _ = this.update(cx, |s, cx| {
-                s.hist.busy = None;
-                match r {
-                    Ok((mut found, regions)) => {
-                        if let Some(c) = &s.hist.tile_classifier {
-                            c.apply(&mut found);
-                        }
-                        let n = found.len();
-                        let list = s.hist.tiles.entry(image.clone()).or_default();
-                        list.retain(|c| !regions.iter().any(|(o, _)| lumen_hist::polygon::contains(o, c.centroid)));
-                        list.extend(found);
-                        for (i, c) in list.iter_mut().enumerate() {
-                            c.id = i as u32 + 1;
-                        }
-                        s.hist.rev += 1;
-                        s.hist_persist(vec![image], cx);
-                        s.hist_record(record.clone(), cx);
-                        s.hist_report(true, format!("{n} superpixel(s); give regions or points classes and Train to classify them"), cx);
-                    }
-                    Err(e) => s.hist_report(false, format!("Superpixels: {e}"), cx),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        let action = Action::Superpixels { within: Within::Regions { outlines: regions.into_iter().map(|(o, _)| o).collect() }, settings: self.hist.superpixel.clone(), pixel_um: self.hist.pixel_um };
+        self.hist_run(vec![action], "Making superpixels", cx);
     }
 
     /// The density map of the shown image's cells as a layer (transparent where it is 0).
     pub fn hist_density(&mut self, cx: &mut Context<Self>) {
-        let Some(image) = self.doc.active_image.clone() else { return };
-        let Some(um) = self.pyramids.get(&image).and_then(|p| p.pixel_size_um) else { return };
-        let Some(cells) = self.hist.cells.get(&image).filter(|c| !c.is_empty()) else {
-            return self.hist_report(false, "Find cells first", cx);
-        };
-        let s = self.hist.density.clone();
-        let b = cells.iter().map(|c| c.centroid).fold((f64::MAX, f64::MAX, f64::MIN, f64::MIN), |b, p| (b.0.min(p[0]), b.1.min(p[1]), b.2.max(p[0]), b.3.max(p[1])));
-        let pad = s.radius_um / um;
-        let bounds = (b.0 - pad, b.1 - pad, b.2 + pad + 1.0, b.3 + pad + 1.0);
-        let map = lumen_hist::density::density_map(cells, bounds, um, &s);
-        let max = map.values.iter().copied().fold(0.0f32, f32::max);
-        if max <= 0.0 {
-            return self.hist_report(false, "No cell counted (check the class chosen)", cx);
-        }
-        let mut bgra = vec![0u8; map.width * map.height * 4];
-        for (i, &v) in map.values.iter().enumerate() {
-            if v > 0.0 {
-                let t = v / max;
-                let [r, g, b] = lumen_view::ColormapLut::Inferno.sample_rgb(t);
-                bgra[i * 4..i * 4 + 4].copy_from_slice(&[b, g, r, (90.0 + 120.0 * t) as u8]);
-            }
-        }
-        let unit = match s.value {
-            lumen_hist::density::DensityValue::Count => format!("cells within {:.0} µm", s.radius_um),
-            lumen_hist::density::DensityValue::PerMm2 => "cells per mm²".into(),
-            lumen_hist::density::DensityValue::PercentPositive => format!("% positive within {:.0} µm", s.radius_um),
-        };
-        let label = format!("{}{unit}", s.class.as_ref().map(|c| format!("{c}: ")).unwrap_or_default());
-        let rect = [map.origin[0], map.origin[1], map.width as f64 * map.ds, map.height as f64 * map.ds];
-        let layer = DensityLayer { rect, max, label: label.clone(), image: lumen_view::bgra_image(map.width, map.height, bgra) };
-        self.hist.density_maps.insert(image, layer);
-        self.hist.show_maps = true;
-        self.hist.rev += 1;
-        self.hist_record(lumen_hist::session::Action::Density { settings: s.clone() }, cx);
-        self.hist_report(true, format!("Density map: {label}, up to {max:.1}"), cx);
-        cx.notify();
+        let settings = self.hist.density.clone();
+        self.hist_run(vec![Action::Density { settings }], "Making the density map", cx);
     }
 }
 

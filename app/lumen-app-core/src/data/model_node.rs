@@ -45,21 +45,6 @@ fn stored() -> &'static Mutex<HashMap<String, Stored>> {
     S.get_or_init(Default::default)
 }
 
-/// What a running model is doing (the plugin's last progress), for the status bar.
-fn progress_slot() -> &'static Mutex<Option<String>> {
-    static P: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-    P.get_or_init(Default::default)
-}
-
-pub fn progress() -> Option<String> {
-    progress_slot().lock().ok()?.clone()
-}
-
-fn set_progress(p: Option<String>) {
-    if let Ok(mut s) = progress_slot().lock() {
-        *s = p;
-    }
-}
 
 /// Asks node `id` to run on its next evaluation.
 pub fn arm(id: &str) {
@@ -210,12 +195,15 @@ pub fn run(doc: &ProjectDoc, image: &str, model: &str, prompt_class: Option<&str
     let server = super::ml::shared_server(&program);
     let out_dir = dir.to_string_lossy().into_owned();
     let labels = if ps.is_empty() {
-        set_progress(Some(format!("{}: starting", info.name)));
+        // A job the status bar shows (the plugin runs its own runtime: not a GPU job of lumen's)
+        let job = super::jobs::start("model", &format!("{}: starting", info.name), false).ok();
         let name = info.name.clone();
         let v = super::ml::request(&server, &program, &Request::Instances { model: model.into(), image: raster, pixel_um, out_dir }, &mut |stage, f| {
-            set_progress(Some(format!("{name}: {stage}{}", f.map_or(String::new(), |f| format!(" ({:.0} %)", f * 100.0)))));
+            if let Some(j) = &job {
+                j.set(&format!("{name}: {stage}"), f);
+            }
         });
-        set_progress(None);
+        drop(job);
         let v = v?;
         let r: InstancesResult = serde_json::from_value(v).map_err(|e| format!("the plugin's answer does not read: {e}"))?;
         if r.classes.is_empty() {
