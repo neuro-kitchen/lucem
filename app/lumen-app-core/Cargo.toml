@@ -9,12 +9,15 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rayon.workspace = true
+geo.workspace = true
 # Measurement tables (Analyze): region features → Arrow / Polars
 arrow.workspace = true
 async-channel.workspace = true
 gpui-kit.workspace = true
 lumen-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
 lumen-io.workspace = true
+flate2.workspace = true
 # Histology workflows (stains, tissue, cells, classifiers)
 lumen-hist = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
 # Machine-learning plugins: the contract only (the models run in separate programs)

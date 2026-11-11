@@ -119,16 +119,17 @@ fn level_under(py: &Pyramid, side: usize) -> usize {
 /// A node the evaluator asks the app for: a script node (run on its inputs, Python or Rust) or a
 /// source node.
 #[allow(clippy::too_many_arguments)]
-fn node_value(client: &Client, doc: &ProjectDoc, plan: &Plan, py: &Pyramid, image: &str, id: &str, level: usize, z: usize, region: (usize, usize, usize, usize)) -> Result<Value, String> {
+/// `whole`: the whole-image pass (coarse level) rather than the view's region.
+fn node_value(client: &Client, doc: &ProjectDoc, plan: &Plan, py: &Pyramid, image: &str, id: &str, level: usize, z: usize, region: (usize, usize, usize, usize), whole: bool) -> Result<Value, String> {
     let Some(NodeKind::Script { path, inputs, output, params, enabled }) = doc.graph.node(id).map(|n| &n.kind) else {
-        return source_value(client, doc, py, image, id, level, z, region);
+        return source_value(client, doc, py, image, id, level, z, region, whole);
     };
     let name = std::path::Path::new(path).file_name().map_or_else(|| id.to_string(), |n| n.to_string_lossy().into_owned());
     let feeds = doc.graph.inputs(id);
     let mut host = Vec::with_capacity(inputs.len());
     for (i, port) in inputs.iter().enumerate() {
         let from = feeds.get(i).cloned().flatten().ok_or_else(|| format!("{name} ({id}): its {} input is not connected", port.name))?;
-        let v = evaluate(client, plan, &from, &mut |sid: &str| node_value(client, doc, plan, py, image, sid, level, z, region))?;
+        let v = evaluate(client, plan, &from, &mut |sid: &str| node_value(client, doc, plan, py, image, sid, level, z, region, whole))?;
         if v.port() != port.port {
             return Err(format!("{name} ({id}): its {} input takes {}, {from} gives {}", port.name, port.port.name(), v.port().name()));
         }
@@ -159,7 +160,7 @@ fn node_value(client: &Client, doc: &ProjectDoc, plan: &Plan, py: &Pyramid, imag
 
 /// A source node's raster over a region of `level`.
 #[allow(clippy::too_many_arguments)]
-fn source_value(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, id: &str, level: usize, z: usize, (x0, y0, w, h): (usize, usize, usize, usize)) -> Result<Value, String> {
+fn source_value(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, id: &str, level: usize, z: usize, (x0, y0, w, h): (usize, usize, usize, usize), whole: bool) -> Result<Value, String> {
     let node = doc.graph.node(id).ok_or_else(|| format!("no node {id}"))?;
     let ds = py.levels[level].downsample;
     match &node.kind {
@@ -188,6 +189,84 @@ fn source_value(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, id
             let mask = rasterize(&anns, class.as_deref(), x0, y0, w, h, ds);
             DeviceArray::from_host(client, Shape::new([h, w]), mask).map(Value::Mask).map_err(|e| e.to_string())
         }
+        NodeKind::Model { image: img, channels, model, roi, prompts, enabled } => {
+            if img != image {
+                return Err(format!("{id} reads another image ({img})"));
+            }
+            if !enabled {
+                return Err(format!("{model} ({id}) is off"));
+            }
+            // Models run only when asked (Run in the Inspector); otherwise their last run is drawn
+            // where it lies, and nothing runs on a pan, a zoom or another node's change
+            let signature = format!("{id}|{}", serde_json::to_string(&doc.graph.node(id).map(|n| &n.kind)).unwrap_or_default());
+            let asked = !whole && crate::data::model_node::take_armed(id);
+            if !asked {
+                let ds = py.levels[level].downsample;
+                return match crate::data::model_node::last_run(&signature) {
+                    Some(run) => DeviceArray::from_host(client, Shape::new([h, w]), crate::data::model_node::sample(&run, (x0, y0, w, h), ds)).map(Value::Labels).map_err(|e| e.to_string()),
+                    None => Err(format!("{model} has not run: press Run in its Inspector")),
+                };
+            }
+            let l = &py.levels[level];
+            let plane = ((z as f64 / l.z_downsample) as usize).min(l.depth - 1);
+            // The region of interest: only the part of the asked region its annotations cover
+            let rois: Vec<&crate::domain::annotation::Annotation> = match roi {
+                Some(r) => {
+                    let found: Vec<_> = doc.annotations_of(image).filter(|a| r.matches(a) && a.on_plane(z)).collect();
+                    if found.is_empty() {
+                        return Err(format!("{model} ({id}): no region annotation for its region of interest on this plane"));
+                    }
+                    found
+                }
+                None => Vec::new(),
+            };
+            let (sx, sy, sw, sh) = if rois.is_empty() {
+                (x0, y0, w, h)
+            } else {
+                let b = rois.iter().map(|a| a.shape.outline()).flatten().fold((f64::MAX, f64::MAX, f64::MIN, f64::MIN), |b, p| (b.0.min(p[0]), b.1.min(p[1]), b.2.max(p[0]), b.3.max(p[1])));
+                // In level pixels, with a margin, clipped to the asked region
+                let pad = 16.0;
+                let bx0 = ((b.0 / ds - pad).floor().max(x0 as f64)) as usize;
+                let by0 = ((b.1 / ds - pad).floor().max(y0 as f64)) as usize;
+                let bx1 = ((b.2 / ds + pad).ceil().min((x0 + w) as f64)).max(0.0) as usize;
+                let by1 = ((b.3 / ds + pad).ceil().min((y0 + h) as f64)).max(0.0) as usize;
+                if bx1 <= bx0 || by1 <= by0 {
+                    // Outside the region of interest: nothing to run
+                    return DeviceArray::from_host(client, Shape::new([h, w]), vec![0u32; w * h]).map(Value::Labels).map_err(|e| e.to_string());
+                }
+                (bx0, by0, bx1 - bx0, by1 - by0)
+            };
+            let labels: Vec<String> = py.channels.iter().map(|c| c.label.clone()).collect();
+            let picked = crate::data::model_node::channels_of(channels, &labels);
+            let planes: Vec<Vec<f32>> = picked
+                .iter()
+                .map(|&c| {
+                    let top = py.channels.get(c).map_or(1.0, |ch| ch.range.1.max(1e-6));
+                    py.read_region_at(level, c, plane, sx, sy, sw, sh).map(|v| v.into_iter().map(|x| x / top).collect()).map_err(|e| e.to_string())
+                })
+                .collect::<Result<_, _>>()?;
+            let mut sub = crate::data::model_node::run(doc, image, model, prompts.as_deref(), &planes, sw, sh, z, (sx, sy, sw, sh), ds, py.pixel_size_um.map(|u| u * ds))?;
+            if !rois.is_empty() {
+                let inside = rasterize(&rois, None, sx, sy, sw, sh, ds);
+                for (l, m) in sub.iter_mut().zip(inside) {
+                    if m == 0 {
+                        *l = 0;
+                    }
+                }
+            }
+            crate::data::model_node::store_run(signature, crate::data::model_node::Stored { x0: sx, y0: sy, w: sw, h: sh, ds, labels: sub.clone() });
+            let labels = if (sx, sy, sw, sh) == (x0, y0, w, h) {
+                sub
+            } else {
+                let mut full = vec![0u32; w * h];
+                for row in 0..sh {
+                    let (dy, dx) = (sy - y0 + row, sx - x0);
+                    full[dy * w + dx..dy * w + dx + sw].copy_from_slice(&sub[row * sw..(row + 1) * sw]);
+                }
+                full
+            };
+            DeviceArray::from_host(client, Shape::new([h, w]), labels).map(Value::Labels).map_err(|e| e.to_string())
+        }
         _ => Err(format!("{id} is not a source")),
     }
 }
@@ -208,7 +287,7 @@ pub fn analyze(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, z: 
     // Views are evaluated through what feeds them
     let targets: Vec<String> = ids.iter().filter(|id| !matches!(doc.graph.node(id).map(|n| &n.kind), Some(NodeKind::View { .. }))).cloned().collect();
     let zz = z.min(py.depth() - 1);
-    let mut source = |id: &str| node_value(client, doc, &plan, py, image, id, level, zz, (0, 0, l.width, l.height));
+    let mut source = |id: &str| node_value(client, doc, &plan, py, image, id, level, zz, (0, 0, l.width, l.height), true);
     let values = evaluate_all(client, &plan, &targets, &mut source);
     for (id, v) in &values {
         match v {
@@ -323,8 +402,21 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
             _ => None,
         })
         .collect();
+    let n_channels = doc.image(&req.image).map_or(0, |i| i.channels.len());
+    let processed = doc.graph.processed_channels(&req.image, n_channels);
+    // The view of a channel's chain with every step off (or Raw): the channel draws as it is;
+    // a hidden channel hides its processing too (its eye in Layers acts on both)
+    let channel_visible = |c: usize| doc.image(&req.image).and_then(|i| i.channels.get(c)).is_none_or(|d| d.visible);
+    let raw_views: std::collections::HashSet<String> = (0..n_channels)
+        .filter_map(|c| doc.graph.channel_chain(&req.image, c).1.map(|v| (c, v)))
+        .filter(|(c, v)| !processed.values().any(|p| p == v) || !channel_visible(*c))
+        .map(|(_, v)| v)
+        .collect();
     let mut out = Vec::new();
     for (view, style) in views {
+        if raw_views.contains(&view) {
+            continue;
+        }
         let t0 = Instant::now();
         let base = LayerResult { view: view.clone(), image: req.image.clone(), rect: [0.0; 4], layer: None, port: None, error: None, ms: 0.0, level: 0 };
         let Some(target) = doc.graph.input(&view, 0).map(str::to_string) else {
@@ -360,7 +452,7 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
         let (x0, y0) = (vx0.saturating_sub(margin), vy0.saturating_sub(margin));
         let (x1, y1) = ((vx1 + margin).min(l.width), (vy1 + margin).min(l.height));
         let (w, h) = (x1 - x0, y1 - y0);
-        let mut source = |id: &str| node_value(client, doc, &plan, pyramid, &req.image, id, level, req.z, (x0, y0, w, h));
+        let mut source = |id: &str| node_value(client, doc, &plan, pyramid, &req.image, id, level, req.z, (x0, y0, w, h), false);
         let value = match evaluate(client, &plan, &target, &mut source) {
             Ok(v) => v,
             Err(e) => {
@@ -375,6 +467,17 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
         let mut crop = Vec::with_capacity(cw * ch);
         for y in cy0..cy0 + ch {
             crop.extend_from_slice(&host[y * w + cx0..y * w + cx0 + cw]);
+        }
+        // The processing of a channel: drawn as that channel, in its colour and window
+        if let Some(c) = processed.iter().find(|(_, v)| **v == view).map(|(c, _)| *c)
+            && port == PortType::Image
+            && let Some(chan) = doc.image(&req.image).and_then(|i| i.channels.get(c))
+        {
+            let top = pyramid.channels.get(c).map_or(1.0, |i| i.range.1.max(1e-6));
+            let scale = if top > 1.0 { 1.0 / top } else { 1.0 };
+            let image = channel_layer(&crop, cw, chan.min * scale, chan.max * scale, chan.gamma, chan.color);
+            out.push(LayerResult { rect: [vx0 as f64 * ds, vy0 as f64 * ds, cw as f64 * ds, ch as f64 * ds], layer: Some(image), port: Some(port), level, ms: t0.elapsed().as_secs_f64() * 1000.0, ..base });
+            continue;
         }
         let layer_style = match port {
             PortType::Image => {
@@ -394,6 +497,19 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
         });
     }
     out
+}
+
+/// A channel's processed values drawn as the channel is: through its window and gamma, in its
+/// colour, opaque where bright (over the other channels).
+fn channel_layer(v: &[f32], w: usize, min: f32, max: f32, gamma: f32, color: [u8; 3]) -> std::sync::Arc<gpui_kit::RenderImage> {
+    let span = (max - min).abs().max(1e-12);
+    let g = 1.0 / gamma.max(1e-3);
+    let mut out = vec![0u8; v.len() * 4];
+    for (px, &x) in out.as_chunks_mut::<4>().0.iter_mut().zip(v) {
+        let t = ((x - min) / span).clamp(0.0, 1.0).powf(g);
+        px.copy_from_slice(&[(color[2] as f32 * t) as u8, (color[1] as f32 * t) as u8, (color[0] as f32 * t) as u8, (t * 255.0) as u8]);
+    }
+    lumen_view::bgra_image(w, v.len() / w.max(1), out)
 }
 
 /// The colour map named in a view's style.

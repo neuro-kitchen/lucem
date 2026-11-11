@@ -76,6 +76,43 @@ pub enum NodeKind {
         #[serde(default = "yes")]
         enabled: bool,
     },
+    /// A model plugin run on an image (a source of its own: the model sees the image, not one
+    /// channel): `channels` are the ones it reads as red, green, blue (empty: the image's three
+    /// colour channels, else its first). A nucleus model gives every nucleus; Segment Anything
+    /// gives one object per box or point annotation of class `prompts`. Gives labels.
+    Model {
+        image: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        channels: Vec<usize>,
+        model: String,
+        /// Where it runs: inside these region annotations only (`None`: wherever it is asked).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        roi: Option<Roi>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompts: Option<String>,
+        #[serde(default = "yes")]
+        enabled: bool,
+    },
+}
+
+/// A model node's region of interest: the region annotations it runs inside.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum Roi {
+    /// Every region annotation of a class.
+    Class { class: String },
+    /// One annotation.
+    Annotation { id: String },
+}
+
+impl Roi {
+    pub fn matches(&self, a: &crate::domain::annotation::Annotation) -> bool {
+        a.shape.is_region()
+            && match self {
+                Roi::Class { class } => &a.class == class,
+                Roi::Annotation { id } => &a.id == id,
+            }
+    }
 }
 
 /// An input of a script: its name (the argument) and what it takes.
@@ -152,6 +189,7 @@ impl NodeKind {
             NodeKind::Op { op, .. } => op.inputs().into_iter().map(|(t, n)| (Some(t), n.to_string())).collect(),
             NodeKind::View { .. } => vec![(None, "result".to_string())],
             NodeKind::Script { inputs, .. } => inputs.iter().map(|p| (Some(p.port), p.name.clone())).collect(),
+            NodeKind::Model { .. } => Vec::new(),
         }
     }
 
@@ -162,6 +200,7 @@ impl NodeKind {
             NodeKind::Op { op, .. } => Some(op.output()),
             NodeKind::View { .. } => None,
             NodeKind::Script { output, .. } => Some(*output),
+            NodeKind::Model { .. } => Some(PortType::Labels),
         }
     }
 
@@ -176,7 +215,7 @@ impl NodeKind {
     /// The image a source node reads.
     pub fn image(&self) -> Option<&str> {
         match self {
-            NodeKind::Source { image, .. } | NodeKind::Annotations { image, .. } => Some(image),
+            NodeKind::Source { image, .. } | NodeKind::Annotations { image, .. } | NodeKind::Model { image, .. } => Some(image),
             _ => None,
         }
     }
@@ -340,6 +379,44 @@ impl GraphDoc {
         plan
     }
 
+    /// The processing of channel `channel` of `image`: the steps after its source, in order
+    /// (first output at each step), and the view at the end of the chain (when there is one).
+    pub fn channel_chain(&self, image: &str, channel: usize) -> (Vec<String>, Option<String>) {
+        let Some(source) = self.nodes.iter().find(|n| matches!(&n.kind, NodeKind::Source { image: i, channel: c } if i == image && *c == channel)) else { return (Vec::new(), None) };
+        let is_view = |id: &str| matches!(self.node(id).map(|n| &n.kind), Some(NodeKind::View { .. }));
+        let (mut steps, mut view, mut cur) = (Vec::new(), None, source.id.clone());
+        for _ in 0..64 {
+            let outs: Vec<String> = self.outputs(&cur).into_iter().filter(|(_, port)| *port == 0).map(|(to, _)| to.to_string()).collect();
+            if let Some(v) = outs.iter().find(|o| is_view(o)) {
+                view = Some(v.clone());
+            }
+            let Some(next) = outs.into_iter().find(|o| !is_view(o)) else { break };
+            steps.push(next.clone());
+            cur = next;
+        }
+        (steps, view)
+    }
+
+    /// Channels of `image` (of `channels`) shown processed: their chain has a step on and its
+    /// view is shown. Non-destructive: the processing replaces how the channel is drawn; every
+    /// step off, Raw, or no step, and the channel draws as it is.
+    pub fn processed_channels(&self, image: &str, channels: usize) -> std::collections::HashMap<usize, String> {
+        let mut out = std::collections::HashMap::new();
+        for c in 0..channels {
+            let (steps, view) = self.channel_chain(image, c);
+            let Some(view) = view else { continue };
+            let shown = matches!(self.node(&view).map(|n| &n.kind), Some(NodeKind::View { style, .. }) if style.visible);
+            let any_on = steps.iter().any(|id| match self.node(id).map(|n| &n.kind) {
+                Some(NodeKind::Op { enabled, .. }) | Some(NodeKind::Model { enabled, .. }) | Some(NodeKind::Script { enabled, .. }) => *enabled,
+                _ => false,
+            });
+            if shown && any_on {
+                out.insert(c, view);
+            }
+        }
+        out
+    }
+
     /// View nodes, in node order.
     pub fn views(&self) -> impl Iterator<Item = &GraphNode> {
         self.nodes.iter().filter(|n| matches!(n.kind, NodeKind::View { .. }))
@@ -356,6 +433,33 @@ mod tests {
 
     fn op(op: Op) -> NodeKind {
         NodeKind::Op { enabled: true, op }
+    }
+
+    /// A channel shows processed only while a step of its chain is on and its result is shown;
+    /// a step off (or Raw) and the channel draws as it is.
+    #[test]
+    fn a_channel_is_processed_only_while_a_step_is_on() {
+        let mut g = GraphDoc {
+            nodes: vec![
+                node("src", NodeKind::Source { image: "img".into(), channel: 1 }),
+                node("blur", op(Op::GaussianBlur { sigma: 2.0 })),
+                node("view", NodeKind::View { name: "Blur".into(), style: ViewStyle::default() }),
+            ],
+            edges: vec![EdgeDoc { from: "src".into(), to: "blur".into(), port: 0 }, EdgeDoc { from: "blur".into(), to: "view".into(), port: 0 }],
+        };
+        assert_eq!(g.channel_chain("img", 1), (vec!["blur".to_string()], Some("view".to_string())));
+        assert_eq!(g.processed_channels("img", 2).get(&1).map(String::as_str), Some("view"));
+        if let Some(NodeKind::Op { enabled, .. }) = g.node_mut("blur").map(|n| &mut n.kind) {
+            *enabled = false;
+        }
+        assert!(g.processed_channels("img", 2).is_empty(), "every step off: raw");
+        if let Some(NodeKind::Op { enabled, .. }) = g.node_mut("blur").map(|n| &mut n.kind) {
+            *enabled = true;
+        }
+        if let Some(NodeKind::View { style, .. }) = g.node_mut("view").map(|n| &mut n.kind) {
+            style.visible = false;
+        }
+        assert!(g.processed_channels("img", 2).is_empty(), "Raw chosen: raw");
     }
 
     /// dapi → blur → otsu → label → measure(labels, dapi) → table

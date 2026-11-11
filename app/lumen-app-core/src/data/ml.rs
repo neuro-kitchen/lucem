@@ -4,7 +4,7 @@
 //! off the UI thread.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use lumen_ml::{PluginInfo, PluginProcess, Prompt, RasterRef, Request, SegmentResult};
 
@@ -13,6 +13,34 @@ use crate::domain::geometry;
 
 /// A running plugin server, started on first use and again if it stopped.
 pub type Server = Arc<Mutex<Option<PluginProcess>>>;
+
+/// The plugins found and their servers, shared with work off the UI thread (pipeline model
+/// nodes run where the store is not at hand).
+#[derive(Default)]
+struct Registry {
+    plugins: Vec<PluginInfo>,
+    servers: HashMap<String, Server>,
+}
+
+fn registry() -> &'static RwLock<Registry> {
+    static R: OnceLock<RwLock<Registry>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// The server of `program` (the same one the store uses).
+pub fn shared_server(program: &str) -> Server {
+    if let Some(s) = registry().read().ok().and_then(|r| r.servers.get(program).cloned()) {
+        return s;
+    }
+    let mut r = registry().write().unwrap_or_else(|e| e.into_inner());
+    r.servers.entry(program.to_string()).or_default().clone()
+}
+
+/// The plugin offering model `id`: its program and manifest entry.
+pub fn find_model(id: &str) -> Option<(String, lumen_ml::ModelInfo)> {
+    let r = registry().read().ok()?;
+    r.plugins.iter().find_map(|p| p.models.iter().find(|m| m.id == id).map(|m| (p.program.clone(), m.clone())))
+}
 
 /// What the app knows of the plugins.
 #[derive(Default)]
@@ -24,18 +52,45 @@ pub struct MlState {
     pub scanning: bool,
     /// What a plugin is doing now (an install, a segmentation), and how far (0–1).
     pub busy: Option<(String, Option<f32>)>,
-    servers: HashMap<String, Server>,
 }
 
 impl MlState {
     /// The server of `program` (not started until a request needs it).
     pub fn server(&mut self, program: &str) -> Server {
-        self.servers.entry(program.to_string()).or_default().clone()
+        shared_server(program)
     }
 
     /// Drops every server (after a rescan: programs may have changed).
     pub fn stop_servers(&mut self) {
-        self.servers.clear();
+        if let Ok(mut r) = registry().write() {
+            r.servers.clear();
+        }
+    }
+
+    /// Takes the plugins found (shared with pipeline model nodes).
+    pub fn set_plugins(&mut self, plugins: Vec<PluginInfo>) {
+        if let Ok(mut r) = registry().write() {
+            r.plugins = plugins.clone();
+        }
+        self.plugins = plugins;
+    }
+
+    /// The models that find every nucleus or cell of a region (histology or fluorescence):
+    /// their program and manifest entry.
+    pub fn nucleus_models(&self) -> Vec<(String, lumen_ml::ModelInfo)> {
+        self.plugins
+            .iter()
+            .flat_map(|p| p.models.iter().filter(|m| m.task == lumen_ml::Task::Segmentation && m.domains.iter().any(|d| d == "histology" || d == "fluorescence")).map(move |m| (p.program.clone(), m.clone())))
+            .collect()
+    }
+
+    /// The nucleus models that fit an image: brightfield (H&E, IHC: domains `histology`,
+    /// `brightfield`) or fluorescence (`fluorescence`).
+    pub fn nucleus_models_for(&self, brightfield: bool) -> Vec<(String, lumen_ml::ModelInfo)> {
+        self.nucleus_models()
+            .into_iter()
+            .filter(|(_, m)| m.domains.iter().any(|d| if brightfield { d == "histology" || d == "brightfield" } else { d == "fluorescence" }))
+            .collect()
     }
 
     /// The model to segment with: `chosen` when a plugin offers it, else the first default model;
@@ -266,8 +321,8 @@ mod tests {
 
     #[test]
     fn the_chosen_model_wins_over_the_default() {
-        let model = |id: &str, default: bool| lumen_ml::ModelInfo { id: id.into(), name: id.into(), family: "sam".into(), task: lumen_ml::Task::InteractiveSegmentation, domains: vec![], description: String::new(), licence: "Apache-2.0".into(), paper: None, code: None, weights: vec![], installed: id == "b", default };
-        let plugin = PluginInfo { name: "SAM".into(), version: "0".into(), licence: "Apache-2.0".into(), runtime: lumen_ml::RuntimeStatus { ready: true, detail: String::new() }, models: vec![model("a", true), model("b", false)], program: "/p".into() };
+        let model = |id: &str, default: bool| lumen_ml::ModelInfo { id: id.into(), name: id.into(), family: "sam".into(), task: lumen_ml::Task::InteractiveSegmentation, domains: vec![], description: String::new(), licence: "Apache-2.0".into(), paper: None, code: None, weights: vec![], installed: id == "b", default, channels: 3 };
+        let plugin = PluginInfo { name: "SAM".into(), version: "0".into(), licence: "Apache-2.0".into(), runtime: lumen_ml::RuntimeStatus { ready: true, detail: String::new(), gpu: None }, models: vec![model("a", true), model("b", false)], program: "/p".into() };
         let ml = MlState { plugins: vec![plugin], ..Default::default() };
         assert_eq!(ml.segmenter(None), Some(("/p".into(), "a".into(), false)));
         assert_eq!(ml.segmenter(Some("b")), Some(("/p".into(), "b".into(), true)));

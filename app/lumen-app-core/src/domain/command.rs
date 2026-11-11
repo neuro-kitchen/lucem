@@ -123,6 +123,7 @@ impl Command {
                 NodeKind::Op { op, .. } => format!("Add {}", op.title()),
                 NodeKind::View { .. } => "Add view".into(),
                 NodeKind::Script { path, .. } => format!("Add script {}", std::path::Path::new(path).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())),
+                NodeKind::Model { model, .. } => format!("Add model {model}"),
             },
             C::RemoveNodes { nodes } => format!("Remove {} node(s)", nodes.len()),
             C::RemoveBridging { .. } => "Remove node".into(),
@@ -345,8 +346,9 @@ fn apply_inner(doc: &mut ProjectDoc, cmd: Command) -> Result<Changed, CommandErr
             Ok(Changed::Layout)
         }
         C::SetScript { id, kind } => {
-            if !matches!(kind, NodeKind::Script { .. }) || !matches!(node(doc, &id)?.kind, NodeKind::Script { .. }) {
-                return Err(invalid(format!("{id} is not a script node")));
+            let same = matches!((&kind, &node(doc, &id)?.kind), (NodeKind::Script { .. }, NodeKind::Script { .. }) | (NodeKind::Model { .. }, NodeKind::Model { .. }));
+            if !same {
+                return Err(invalid(format!("{id} is not a script or model node of that kind")));
             }
             let n = kind.inputs().len();
             if let Some(g) = doc.graph.node_mut(&id) {
@@ -597,6 +599,16 @@ fn check_kind(doc: &ProjectDoc, kind: &NodeKind) -> Result<(), CommandError> {
             }
             Ok(())
         }
+        NodeKind::Model { image: i, channels, model, .. } => {
+            if model.trim().is_empty() {
+                return Err(invalid("a model node names its model"));
+            }
+            let n = image(doc, i)?.channels.len();
+            if n > 0 && channels.iter().any(|&c| c >= n) {
+                return Err(invalid(format!("{i} has {n} channel(s)")));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -620,6 +632,7 @@ fn base_id(kind: &NodeKind) -> String {
         NodeKind::Op { op, .. } => op.tag().into(),
         NodeKind::View { .. } => "view".into(),
         NodeKind::Script { .. } => "script".into(),
+        NodeKind::Model { .. } => "model".into(),
     }
 }
 

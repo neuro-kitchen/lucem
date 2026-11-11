@@ -137,7 +137,8 @@ pub enum ViewRequest {
     TogglePipeline,
     /// Views move and zoom together, or not.
     ToggleLink,
-    /// Explore's left dock (Layers), right dock (the studio), or both, shown or hidden.
+    /// Explore's side panel (beside the right rail): Layers, or the last panel shown, shown or
+    /// hidden (ToggleSides as ToggleRight).
     ToggleLeft,
     ToggleRight,
     ToggleSides,
@@ -188,6 +189,11 @@ pub struct Store {
     /// Results are being computed.
     pub computing: bool,
     last_request: Option<ResultRequest>,
+    /// The request the results on show answer (asked again: nothing to do).
+    results_for: Option<ResultRequest>,
+    /// Asked while computing: run once more when the computation ends (one at a time, so slow
+    /// steps such as model nodes are never started over and over, nor thrown away).
+    results_pending: bool,
     results_gen: Arc<AtomicU64>,
     pub device: Option<Arc<Device>>,
     device_pending: bool,
@@ -214,6 +220,11 @@ pub struct Store {
     pub annotations_rev: u64,
     /// Histology: cells by image, the stains, detection and classifier settings.
     pub hist: super::hist::HistState,
+    /// Detected objects selected on the shown image (`c12`: cell 12, `t5`: tile 5).
+    pub selected_objects: Vec<String>,
+    /// The object hierarchy of the shown image, kept until its shapes or cells change (built
+    /// once per change, never per frame).
+    hierarchy: std::cell::RefCell<Option<(String, u64, u64, Arc<crate::domain::hierarchy::Hierarchy>)>>,
 }
 
 impl EventEmitter<AppEvent> for Store {}
@@ -243,6 +254,8 @@ impl Store {
             live_base: None,
             computing: false,
             last_request: None,
+            results_for: None,
+            results_pending: false,
             results_gen: Arc::new(AtomicU64::new(0)),
             device: None,
             device_pending: false,
@@ -257,6 +270,8 @@ impl Store {
             cursors: HashMap::new(),
             annotations_rev: 0,
             hist: Default::default(),
+            hierarchy: Default::default(),
+            selected_objects: Vec::new(),
         }
     }
 
@@ -343,8 +358,9 @@ impl Store {
     fn after_change(&mut self, change: Changed, cx: &mut Context<Self>) {
         match &change {
             Changed::Images => {
-                // Selected layers belong to the image shown before
+                // Selected layers and objects belong to the image shown before
                 self.layers_selected.clear();
+                self.selected_objects.clear();
                 self.ensure_pyramids(cx);
                 self.results.retain(|_, r| self.doc.image(&r.image).is_some());
             }
@@ -370,6 +386,15 @@ impl Store {
                 self.results.retain(|v, _| self.doc.graph.contains(v));
                 let reads_annotations = self.doc.graph.nodes.iter().any(|n| matches!(n.kind, NodeKind::Annotations { .. }));
                 if reads_annotations {
+                    self.recompute(cx);
+                }
+            }
+            // A channel with processing draws through its result (its colour, window and eye):
+            // that layer is made again
+            Changed::Display(image) => {
+                let n = self.doc.image(image).map_or(0, |i| i.channels.len());
+                if (0..n).any(|c| self.doc.graph.channel_chain(image, c).1.is_some()) {
+                    self.results_for = None;
                     self.recompute(cx);
                 }
             }
@@ -423,6 +448,7 @@ impl Store {
         self.future_labels.clear();
         self.layers_selected.clear();
         self.project_file = None;
+        self.hist = Default::default();
         self.pyramids.clear();
         self.results.clear();
         self.selection.clear();
@@ -448,6 +474,7 @@ impl Store {
                 self.project_file = Some(file.clone());
                 self.prefs.push_recent(&file);
                 self.save_prefs();
+                self.hist_persist_all(cx);
                 self.set_status(format!("Project saved in {}", folder.display()), cx);
             }
             Err(e) => self.set_status(format!("Project not saved: {e}"), cx),
@@ -472,6 +499,7 @@ impl Store {
                 self.save_prefs();
                 self.after_change(Changed::Images, cx);
                 self.watch_scripts(cx);
+                self.hist_load(cx);
                 self.set_workspace(Workspace::Explore, cx);
                 self.set_status(format!("Opened project {}", self.doc.name), cx);
             }
@@ -695,6 +723,109 @@ impl Store {
         self.ensure_device(cx);
     }
 
+    /// Removes a processing step; a channel's last step takes its chain with it (its source and
+    /// result view), so the channel is back to how it was. One undo step.
+    pub fn remove_step(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(image) = self.doc.active_image.clone() else { return };
+        let n = self.doc.image(&image).map_or(0, |i| i.channels.len());
+        let last_of = (0..n).find_map(|c| {
+            let (steps, view) = self.doc.graph.channel_chain(&image, c);
+            (steps == [id.clone()]).then(|| {
+                let source = self.doc.graph.nodes.iter().find(|g| matches!(&g.kind, NodeKind::Source { image: i, channel: ch } if *i == image && *ch == c)).map(|g| g.id.clone());
+                view.into_iter().chain(source).collect::<Vec<String>>()
+            })
+        });
+        let cmd = match last_of {
+            Some(rest) => Command::Batch { commands: vec![Command::RemoveBridging { id: id.clone() }, Command::RemoveNodes { nodes: rest }] },
+            None => Command::RemoveBridging { id },
+        };
+        if self.execute(cmd, cx).is_ok() {
+            self.set_status("Step removed (Ctrl+Z brings it back)", cx);
+        }
+    }
+
+    /// The detected object `key` (`c12`, `t5`) of the shown image.
+    pub fn object(&self, key: &str) -> Option<&lumen_hist::HistObject> {
+        let img = self.doc.active_image.as_deref()?;
+        let (list, n) = match key.split_at(1) {
+            ("c", n) => (self.hist.cells.get(img)?, n),
+            ("t", n) => (self.hist.tiles.get(img)?, n),
+            _ => return None,
+        };
+        let id: u32 = n.parse().ok()?;
+        list.iter().find(|o| o.id == id)
+    }
+
+    /// Selects a detected object (Shift / Ctrl add or take it out) and shows it in Explore's view.
+    pub fn select_object(&mut self, key: String, additive: bool, cx: &mut Context<Self>) {
+        let at = self.object(&key).map(|o| o.centroid);
+        if additive {
+            match self.selected_objects.iter().position(|k| *k == key) {
+                Some(i) => {
+                    self.selected_objects.remove(i);
+                }
+                None => self.selected_objects.push(key),
+            }
+        } else {
+            self.selected_objects = vec![key];
+            self.selection.clear();
+        }
+        if let Some(p) = at {
+            cx.emit(AppEvent::Reveal(p));
+        }
+        cx.emit(AppEvent::Selection);
+        cx.notify();
+    }
+
+    /// The detected object under `p` (level-0) on the shown image: a cell holding it, else a tile.
+    pub fn object_at(&self, p: [f64; 2]) -> Option<String> {
+        let img = self.doc.active_image.as_deref()?;
+        let hit = |o: &&lumen_hist::HistObject| {
+            let (x0, y0, x1, y1) = lumen_hist::polygon::bounds(&o.roi);
+            p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1 && lumen_hist::polygon::contains(&o.roi, p)
+        };
+        if let Some(c) = self.hist.cells.get(img).and_then(|l| l.iter().find(hit)) {
+            return Some(format!("c{}", c.id));
+        }
+        self.hist.tiles.get(img).and_then(|l| l.iter().find(hit)).map(|t| format!("t{}", t.id))
+    }
+
+    /// The object hierarchy of `image` (regions and cells), from the cache when nothing changed.
+    pub fn hierarchy(&self, image: &str) -> Arc<crate::domain::hierarchy::Hierarchy> {
+        if let Some((i, a, h, hier)) = self.hierarchy.borrow().as_ref()
+            && i == image
+            && *a == self.annotations_rev
+            && *h == self.hist.rev
+        {
+            return hier.clone();
+        }
+        let empty = Vec::new();
+        let cells = self.hist.cells.get(image).unwrap_or(&empty);
+        let hier = Arc::new(crate::domain::hierarchy::Hierarchy::build(self.doc.annotations_of(image), cells));
+        *self.hierarchy.borrow_mut() = Some((image.to_string(), self.annotations_rev, self.hist.rev, hier.clone()));
+        hier
+    }
+
+    /// Channels shown processed (see `GraphDoc::processed_channels`).
+    pub fn processed_channels(&self, image: &str) -> std::collections::HashMap<usize, String> {
+        let n = self.doc.image(image).map_or(0, |i| i.channels.len());
+        self.doc.graph.processed_channels(image, n)
+    }
+
+    /// The device stopped responding (lost or poisoned): every handle to it is dropped and the
+    /// devices are shut down in the background, so the next run opens a fresh one (never
+    /// reopened here: a job that loses it again must not loop).
+    pub fn drop_device(&mut self, cx: &mut Context<Self>) {
+        self.device = None;
+        self.device_pending = false;
+        self.device_generation += 1;
+        self.results.clear();
+        self.results_for = None;
+        self.analysis = None;
+        cx.emit(AppEvent::Results);
+        cx.background_spawn(async { lumen_core::compute::shutdown_devices() }).detach();
+    }
+
     /// A blur of a 512² image on the device, read back checked: the output must be finite, not
     /// all zero, and keep the image's mean (CubeCL #1461: zeros are not success). Says how long.
     pub fn test_device(&mut self, cx: &mut Context<Self>) {
@@ -749,7 +880,7 @@ impl Store {
                 s.ml.scanning = false;
                 s.ml.scanned = true;
                 s.ml.stop_servers();
-                s.ml.plugins = found.iter().filter_map(|r| r.as_ref().ok().cloned()).collect();
+                s.ml.set_plugins(found.iter().filter_map(|r| r.as_ref().ok().cloned()).collect());
                 s.ml.problems = found.into_iter().filter_map(Result::err).collect();
                 cx.emit(AppEvent::Status);
                 cx.notify();
@@ -799,7 +930,14 @@ impl Store {
             lumen_ml::Request::Install { model: model.clone() },
             move |s, r, cx| {
                 match r {
-                    Ok(_) => s.set_status(if model == lumen_ml::RUNTIME_ID { "ONNX Runtime installed and verified".to_string() } else { format!("{model} installed and verified") }, cx),
+                    Ok(_) => s.set_status(
+                        match model.as_str() {
+                            lumen_ml::RUNTIME_ID => "ONNX Runtime installed and verified".to_string(),
+                            lumen_ml::RUNTIME_CUDA_ID => "ONNX Runtime (GPU) installed and verified; it is used once cuDNN 9 is there".to_string(),
+                            _ => format!("{model} installed and verified"),
+                        },
+                        cx,
+                    ),
                     Err(e) => s.set_status(format!("{model}: {e}"), cx),
                 }
                 s.scan_plugins(cx);
@@ -939,6 +1077,23 @@ impl Store {
         let y = self.doc.graph.next_row();
         if self.execute(Command::AddNode { kind, x: 0.0, y, id: None, after: self.selected_node.clone() }, cx).is_ok() {
             self.set_status(format!("Script {} added; edit it, save, and the node runs again", path.display()), cx);
+        }
+    }
+
+    /// A Model node running `model` (a plugin's); Segment Anything is prompted by the drawing
+    /// class' boxes and points until another class is chosen.
+    pub fn add_model_node(&mut self, model: String, interactive: bool, cx: &mut Context<Self>) {
+        let Some(image) = self.doc.active_image.clone() else {
+            return self.set_status("Open an image first: the model runs on it", cx);
+        };
+        let prompts = interactive.then(|| self.tool.class.clone());
+        // One selected region annotation: the model runs inside it
+        let picked: Vec<&crate::domain::annotation::Annotation> = self.doc.annotations_of(&image).filter(|a| self.selection.contains(&a.id) && a.shape.is_region()).collect();
+        let roi = (picked.len() == 1).then(|| crate::domain::graph::Roi::Annotation { id: picked[0].id.clone() });
+        let kind = NodeKind::Model { image, channels: Vec::new(), model: model.clone(), roi, prompts, enabled: true };
+        let y = self.doc.graph.next_row();
+        if self.execute(Command::AddNode { kind, x: 0.0, y, id: None, after: None }, cx).is_ok() {
+            self.set_status(format!("Model {model} added on the shown image; connect it to a view (or a measure)"), cx);
         }
     }
 
@@ -1102,7 +1257,7 @@ impl Store {
 
     /// What is on screen changed: compute the results there (debounced by the canvas).
     pub fn request_results(&mut self, req: ResultRequest, cx: &mut Context<Self>) {
-        if self.last_request.as_ref() == Some(&req) && !self.results.is_empty() {
+        if self.last_request.as_ref() == Some(&req) && (self.computing || self.results_for.as_ref() == Some(&req)) {
             return;
         }
         self.last_request = Some(req);
@@ -1112,6 +1267,10 @@ impl Store {
     /// Computes the results again for the last place on screen.
     pub fn recompute(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.last_request.clone() else { return };
+        if self.computing {
+            self.results_pending = true;
+            return;
+        }
         let has_nodes = self.doc.graph.nodes.iter().any(|n| self.doc.graph.images_of(&n.id).contains(&req.image));
         if !has_nodes {
             if !self.results.is_empty() || self.analysis.is_some() {
@@ -1135,6 +1294,7 @@ impl Store {
         let cached = self.analysis.clone().filter(|a| a.key == key);
         let show = self.tool.show_results;
         let image = req.image.clone();
+        let asked = req.clone();
         self.computing = true;
         cx.emit(AppEvent::Results);
         let task = cx.background_spawn(async move {
@@ -1160,14 +1320,35 @@ impl Store {
                         s.analysis = Some(analysis.clone());
                     }
                 }
-                if s.results_gen.load(Ordering::Acquire) != generation {
-                    return;
-                }
                 s.computing = false;
+                // Shown even when something newer was asked meanwhile (each layer sits at its own
+                // place); what was asked meanwhile runs next
+                let current = s.results_gen.load(Ordering::Acquire) == generation;
+                s.results_for = Some(asked);
+                if s.results_pending || !current {
+                    s.results_pending = false;
+                    s.results_for = None;
+                    cx.spawn(async move |this, cx| {
+                        let _ = this.update(cx, |s, cx| s.recompute(cx));
+                    })
+                    .detach();
+                }
                 if let Some((analysis, Some(list))) = out {
                     s.results.retain(|v, r| r.image != image && s.doc.graph.contains(v));
-                    let errors: Vec<String> = list.iter().filter_map(|r| r.error.clone().map(|e| format!("{}: {e}", r.view))).chain(analysis.errors.iter().map(|(n, e)| format!("{n}: {e}"))).collect();
+                    // The views' errors first; the whole-image pass' only when no view was computed
+                    // (a model node skips that pass on purpose, and says so in Pipeline)
+                    let mut errors: Vec<String> = list.iter().filter_map(|r| r.error.clone().map(|e| format!("{}: {e}", r.view))).collect();
+                    if list.is_empty() {
+                        errors.extend(analysis.errors.iter().map(|(n, e)| format!("{n}: {e}")));
+                    }
                     let ms: f64 = list.iter().map(|r| r.ms).sum();
+                    if errors.iter().any(|e| crate::data::hist::is_device_lost(e)) {
+                        s.drop_device(cx);
+                        s.status = crate::data::hist::DEVICE_LOST.to_string();
+                        cx.emit(AppEvent::Status);
+                        cx.notify();
+                        return;
+                    }
                     for r in list {
                         s.results.insert(r.view.clone(), r);
                     }
@@ -1500,6 +1681,69 @@ impl Store {
     /// The Delete key and the Delete buttons: the selected annotations, else the result layers
     /// (masks, labels, images of the pipeline) selected in Layers. Classes go only from their
     /// menu (they may hold many annotations).
+    /// Selects the shapes (their bounds' centre) and cells or tiles (their centre) of the shown
+    /// image inside `rect` (`[x0, y0, x1, y1]`, level-0 px); `add` keeps the selection there was.
+    /// `None` (a click, no box) clears it unless `add`.
+    pub fn select_in_rect(&mut self, rect: Option<[f64; 4]>, add: bool, cx: &mut Context<Self>) {
+        let Some([x0, y0, x1, y1]) = rect else {
+            if !add {
+                self.selected_objects.clear();
+                self.select([], cx);
+            }
+            return;
+        };
+        let inside = |x: f64, y: f64| x >= x0 && x <= x1 && y >= y0 && y <= y1;
+        let Some(image) = self.doc.active_image.clone() else { return };
+        let mut shapes: std::collections::BTreeSet<String> = if add { self.selection.iter().cloned().collect() } else { Default::default() };
+        for a in self.doc.annotations_of(&image) {
+            let (ax0, ay0, ax1, ay1) = a.shape.bounds();
+            if inside((ax0 + ax1) / 2.0, (ay0 + ay1) / 2.0) {
+                shapes.insert(a.id.clone());
+            }
+        }
+        let mut objects: Vec<String> = if add { self.selected_objects.clone() } else { Vec::new() };
+        let known: HashSet<String> = objects.iter().cloned().collect();
+        for (prefix, list) in [("c", self.hist.cells.get(&image)), ("t", self.hist.tiles.get(&image))] {
+            for o in list.into_iter().flatten() {
+                let key = format!("{prefix}{}", o.id);
+                if inside(o.centroid[0], o.centroid[1]) && !known.contains(&key) {
+                    objects.push(key);
+                }
+            }
+        }
+        let (ns, no) = (shapes.len(), objects.len());
+        self.selected_objects = objects;
+        self.select(shapes, cx);
+        self.set_status(format!("{ns} shape(s) and {no} object(s) selected"), cx);
+    }
+
+    /// Combines the selected region shapes of the shown image into new ones (Affinity's Add,
+    /// Subtract, Intersect, Xor): Subtract takes the others from the first selected. The
+    /// results take the first's class; the shapes combined are removed (one undo step).
+    pub fn combine_shapes(&mut self, op: crate::domain::boolean::ShapeOp, cx: &mut Context<Self>) {
+        let Some(image) = self.doc.active_image.clone() else { return };
+        let picked: Vec<Annotation> = self.doc.annotations_of(&image).filter(|a| self.selection.contains(&a.id) && a.shape.is_region()).cloned().collect();
+        if picked.len() < 2 {
+            return self.set_status(format!("{} needs two or more selected regions", op.title()), cx);
+        }
+        let outlines: Vec<Vec<[f64; 2]>> = picked.iter().map(|a| a.shape.outline()).collect();
+        let result = crate::domain::boolean::combine(&outlines, op);
+        let first = picked[0].clone();
+        let made: Vec<Annotation> = result.into_iter().map(|points| Annotation { id: String::new(), shape: Shape::Polygon { points }, ..first.clone() }).collect();
+        let n = made.len();
+        let ids: Vec<String> = picked.iter().map(|a| a.id.clone()).collect();
+        let before: HashSet<String> = self.doc.annotations.iter().map(|a| a.id.clone()).collect();
+        let mut commands = vec![Command::RemoveAnnotations { ids }];
+        if n > 0 {
+            commands.push(Command::AddAnnotations { annotations: made });
+        }
+        if self.execute(Command::Batch { commands }, cx).is_ok() {
+            let new: Vec<String> = self.doc.annotations.iter().filter(|a| !before.contains(&a.id)).map(|a| a.id.clone()).collect();
+            self.select(new, cx);
+            self.set_status(if n == 0 { format!("{}: nothing left", op.title()) } else { format!("{}: {n} shape(s) (Ctrl+Z undoes)", op.title()) }, cx);
+        }
+    }
+
     pub fn delete_selection(&mut self, cx: &mut Context<Self>) {
         if self.selection.is_empty() {
             let views: Vec<String> = self.layers_selected.iter().filter_map(|k| k.strip_prefix("view:")).filter(|id| self.doc.graph.contains(id)).map(str::to_string).collect();
