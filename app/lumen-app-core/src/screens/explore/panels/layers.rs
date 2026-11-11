@@ -1,6 +1,7 @@
-//! Layers (Figma's left panel): everything on the image as one tree, top to bottom as it is
-//! drawn: the pipeline's results, then the annotation classes (each annotation a row), then the
-//! image's channels. Classes live here: a click picks the class the tools draw with, its menu
+//! Layers (Figma's layer tree): everything on the image as one tree, top to bottom as it is
+//! drawn: the pipeline's results, then the shapes by class (each shape a row; drawn regions,
+//! points and detected objects alike), then the image's channels, each unfolding to the
+//! processing steps applied to it. The editor above the tree edits the row selected. Classes live here: a click picks the class the tools draw with, its menu
 //! changes its colour; "New class" adds one. Rows fold; the eye shows or hides a layer; a click
 //! on an annotation selects it and brings it into view, on its plane.
 //!
@@ -14,7 +15,7 @@ use std::rc::Rc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{div, img, px, AnyElement, App, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
 use lumen_pipeline::{Op, PortType};
@@ -25,7 +26,7 @@ use crate::domain::command::{Command, MEASUREMENT};
 use crate::domain::graph::{NodeKind, ViewStyle};
 use crate::screens::explore::canvas::ImageCanvas;
 use crate::ui::theme::{self, color};
-use crate::ui::widgets::{group_digits, stepper};
+use crate::ui::widgets::group_digits;
 
 /// Thumbnail of a result at the top level of a group, and the icon / dot of other rows.
 const THUMB: f32 = 28.;
@@ -34,8 +35,7 @@ const MARK: f32 = 16.;
 const INDENT: f32 = 14.;
 /// Annotation rows listed per class before "… more".
 const MAX_ROWS: usize = 200;
-/// Colours offered for a class.
-const CLASS_COLORS: [(&str, [u8; 3]); 8] = [("Yellow", [255, 196, 0]), ("Red", [230, 70, 70]), ("Green", [70, 190, 100]), ("Blue", [70, 130, 240]), ("Purple", [170, 90, 230]), ("Cyan", [0, 200, 220]), ("Orange", [240, 140, 40]), ("Grey", [150, 150, 150])];
+use super::display::{chain_of, CLASS_COLORS};
 
 type OnEye = Box<dyn Fn(&mut App)>;
 type OnRowClick = Box<dyn Fn(&ClickEvent, &mut App)>;
@@ -71,7 +71,13 @@ fn row(store: &Entity<Store>, r: Row) -> AnyElement {
     let dim = r.visible == Some(false);
     let top = r.depth == 0;
     let label = if top {
-        v_flex().flex_1().min_w_0().child(div().truncate().text_sm().child(r.name)).child(div().truncate().text_xs().text_color(color::text_muted()).child(r.kind)).into_any_element()
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(px(theme::SM))
+            .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(r.name))
+            .child(div().flex_none().text_xs().text_color(color::text_muted()).child(r.kind))
+            .into_any_element()
     } else {
         h_flex()
             .flex_1()
@@ -84,7 +90,8 @@ fn row(store: &Entity<Store>, r: Row) -> AnyElement {
     let eye_key = r.key.clone();
     let base = h_flex()
         .id(SharedString::from(format!("layer-{}", r.key)))
-        .h(px(if top { 40. } else { 26. }))
+        .h(px(if top { 30. } else { 26. }))
+        .when(top, |d| d.mt(px(theme::XS)))
         .pl(px(theme::XS + r.depth as f32 * INDENT))
         .pr(px(theme::XS))
         .gap(px(6.))
@@ -234,27 +241,63 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
     let noop = |_: &ClickEvent, _: &mut App| {};
     let radius = s.mask_radius;
 
-    // The image itself: the root
-    let root = format!("image:{image}");
-    let pyr = s.pyramids.get(&image);
-    let about = pyr.map_or("image".to_string(), |p| format!("{} × {} px{} · {} channel(s)", p.width(), p.height(), if p.is_volume() { format!(" × {}", p.depth()) } else { String::new() }, p.channels.len()));
-    let image_menu: MenuFn = {
-        let (st, id, name) = (store.clone(), image.clone(), active.name.clone());
-        Rc::new(move |m: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
-            let (st, id) = (st.clone(), id.clone());
-            m.label(name.clone()).item(PopupMenuItem::new("Remove from the project (the file stays)").icon(Icon::new(IconName::Trash)).on_click(move |_, _, cx| st.update(cx, |s, cx| s.remove_image(id.clone(), cx))))
-        })
-    };
-    list = list.child(row(store, Row { key: root.clone(), depth: 0, fold: Some(open(&root)), mark: icon_mark(IconName::Image, None), name: active.name.clone(), kind: about, selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: Some(image_menu) }));
-    if !open(&root) {
-        return finish(store, s, list);
+    // Channels first: the image itself, what everything else is drawn over
+    let key = format!("channels:{image}");
+    list = list.child(row(store, Row { key: key.clone(), depth: 0, fold: Some(open(&key)), mark: icon_mark(IconName::Layers, None), name: "Channels".into(), kind: active.channels.len().to_string(), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
+    if open(&key) {
+        for (i, c) in active.channels.iter().enumerate().rev() {
+            let (st, doc, img_id) = (store.clone(), c.clone(), image.clone());
+            let ch_key = format!("channel:{i}");
+            let (steps, _) = chain_of(s, &image, i);
+            let (st_sel, k_sel) = (store.clone(), ch_key.clone());
+            list = list.child(row(
+                store,
+                Row {
+                    key: ch_key.clone(),
+                    depth: 1,
+                    fold: (!steps.is_empty()).then(|| open(&ch_key)),
+                    mark: dot(c.color),
+                    name: c.label.clone(),
+                    kind: if steps.is_empty() { String::new() } else { format!("{} step(s)", steps.len()) },
+                    selected: s.layers_selected.contains(&ch_key),
+                    visible: Some(c.visible),
+                    on_eye: Some(Box::new(move |cx| {
+                        let mut display = doc.clone();
+                        display.visible = !display.visible;
+                        let image = img_id.clone();
+                        st.update(cx, |s, cx| {
+                            let _ = s.execute(Command::SetChannel { image, channel: i, display }, cx);
+                        });
+                    })),
+                    on_click: Box::new(move |e, cx| select(&st_sel, &k_sel, e, cx)),
+                    menu: None,
+                },
+            ));
+            // Its processing steps, in order (the editor above edits the one selected)
+            if !steps.is_empty() && open(&ch_key) {
+                for sid in &steps {
+                    let Some(n) = s.doc.graph.node(sid) else { continue };
+                    let (name, icon, on) = match &n.kind {
+                        NodeKind::Op { op, enabled } => (op.title().to_string(), crate::screens::pipeline::catalog::family_icon(op.family()), *enabled),
+                        NodeKind::Model { model, enabled, .. } => (model.clone(), IconName::BrainCircuit, *enabled),
+                        NodeKind::Script { path, .. } => (std::path::Path::new(path).file_name().map_or(path.clone(), |f| f.to_string_lossy().into_owned()), IconName::SquareTerminal, true),
+                        _ => continue,
+                    };
+                    let key = format!("node:{sid}");
+                    let (st, k) = (store.clone(), key.clone());
+                    list = list.child(row(
+                        store,
+                        Row { key: key.clone(), depth: 2, fold: None, mark: icon_mark(icon, None), name, kind: if on { String::new() } else { "off".into() }, selected: s.layers_selected.contains(&key), visible: None, on_eye: None, on_click: Box::new(move |e, cx| select(&st, &k, e, cx)), menu: None },
+                    ));
+                }
+            }
+        }
     }
-
     // Results: on top of the image, as they are drawn
     let views: Vec<_> = s.doc.graph.views().filter(|v| s.doc.graph.images_of(&v.id).contains(&image)).cloned().collect();
     if !views.is_empty() {
         let key = format!("results:{image}");
-        list = list.child(row(store, Row { key: key.clone(), depth: 1, fold: Some(open(&key)), mark: icon_mark(IconName::ChartColumn, None), name: "Results".into(), kind: views.len().to_string(), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
+        list = list.child(row(store, Row { key: key.clone(), depth: 0, fold: Some(open(&key)), mark: icon_mark(IconName::ChartColumn, None), name: "Results".into(), kind: views.len().to_string(), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
         if open(&key) {
             for v in views.iter().rev() {
                 let NodeKind::View { name, style } = &v.kind else { continue };
@@ -271,7 +314,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                     store,
                     Row {
                         key: layer.clone(),
-                        depth: 2,
+                        depth: 1,
                         fold: None,
                         mark,
                         name: name.clone(),
@@ -304,8 +347,12 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
 
     // Annotations by class (every class: they are managed here), each annotation a row
     let all: Vec<&Annotation> = s.doc.annotations_of(&image).collect();
+    // The hierarchy: how many cells each region holds (with the regions inside it)
+    let cells = s.hist.cells.get(&image).cloned().unwrap_or_default();
+    let hier = s.hierarchy(&image);
+    let cells_in = |id: &str| hier.in_subtree.get(id).copied().unwrap_or(0);
     let key = format!("annotations:{image}");
-    list = list.child(row(store, Row { key: key.clone(), depth: 1, fold: Some(open(&key)), mark: icon_mark(IconName::Shapes, None), name: "Annotations".into(), kind: group_digits(all.len()), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
+    list = list.child(row(store, Row { key: key.clone(), depth: 0, fold: Some(open(&key)), mark: icon_mark(IconName::Shapes, None), name: "Shapes".into(), kind: group_digits(all.len()), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
     if open(&key) {
         // Classes with annotations first; the empty ones folded under one row (closed by default),
         // Measurement (the rulers' class) only when it has rulers
@@ -328,7 +375,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                     store,
                     Row {
                         key: show_empty_key.clone(),
-                        depth: 2,
+                        depth: 1,
                         fold: Some(show_empty),
                         mark: icon_mark(IconName::Shapes, None),
                         name: format!("{} empty class(es)", empties.len()),
@@ -412,7 +459,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                 store,
                 Row {
                     key: layer.clone(),
-                    depth: 2,
+                    depth: 1,
                     fold: (!of.is_empty()).then(|| open(&layer)),
                     mark: dot(c.color),
                     name: c.name.clone(),
@@ -439,13 +486,14 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
             }
             for a in of.iter().rev().take(MAX_ROWS) {
                 let (label, icon) = shape_label(&a.shape);
-                let plane = a.z.map_or(String::new(), |z| format!("z {z}"));
+                let n_cells = if a.shape.is_region() && !cells.is_empty() { cells_in(&a.id) } else { 0 };
+                let plane = [a.z.map(|z| format!("z {z}")), (n_cells > 0).then(|| format!("{} cells", group_digits(n_cells)))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
                 let (st, cv, ann) = (store.clone(), canvas.clone(), (**a).clone());
                 list = list.child(row(
                     store,
                     Row {
                         key: format!("ann:{}", a.id),
-                        depth: 3,
+                        depth: 2,
                         fold: None,
                         mark: icon_mark(icon, Some(c.color)),
                         name: if a.note.is_empty() { format!("{label} {}", a.id) } else { a.note.clone() },
@@ -462,7 +510,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                 ));
             }
             if of.len() > MAX_ROWS {
-                list = list.child(div().pl(px(theme::XS + 3.0 * INDENT + 26.0)).py(px(2.)).text_xs().text_color(color::text_muted()).child(format!("… {} more (newest shown; all in Analyze)", group_digits(of.len() - MAX_ROWS))));
+                list = list.child(div().pl(px(theme::XS + 2.0 * INDENT + 26.0)).py(px(2.)).text_xs().text_color(color::text_muted()).child(format!("… {} more (newest shown; all in the Analyze workspace)", group_digits(of.len() - MAX_ROWS))));
             }
         }
         // New class
@@ -472,7 +520,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
             div()
                 .id("layers-new-class")
                 .h(px(26.))
-                .pl(px(theme::XS + 2.0 * INDENT + 26.0))
+                .pl(px(theme::XS + INDENT + 26.0))
                 .flex()
                 .items_center()
                 .gap(px(theme::XS))
@@ -495,78 +543,59 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
         );
     }
 
-    // The channels: the image itself, at the bottom
-    let key = format!("channels:{image}");
-    list = list.child(row(store, Row { key: key.clone(), depth: 1, fold: Some(open(&key)), mark: icon_mark(IconName::Layers, None), name: "Channels".into(), kind: active.channels.len().to_string(), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
-    if open(&key) {
-        for (i, c) in active.channels.iter().enumerate().rev() {
-            let (st, doc, img_id) = (store.clone(), c.clone(), image.clone());
-            list = list.child(row(
-                store,
-                Row {
-                    key: format!("channel:{i}"),
-                    depth: 2,
-                    fold: None,
-                    mark: dot(c.color),
-                    name: c.label.clone(),
-                    kind: String::new(),
-                    selected: false,
-                    visible: Some(c.visible),
-                    on_eye: Some(Box::new(move |cx| {
-                        let mut display = doc.clone();
-                        display.visible = !display.visible;
-                        let image = img_id.clone();
-                        st.update(cx, |s, cx| {
-                            let _ = s.execute(Command::SetChannel { image, channel: i, display }, cx);
-                        });
-                    })),
-                    on_click: Box::new(noop),
-                    menu: None,
-                },
-            ));
+    // Detections: the cells and tiles found, by class (thousands: drawn as a raster, listed here
+    // by class; each one is in the Analyze workspace, under the region it belongs to)
+    let tiles = s.hist.tiles.get(&image).cloned().unwrap_or_default();
+    if !cells.is_empty() || !tiles.is_empty() {
+        let key = format!("detections:{image}");
+        let shown = s.hist.show;
+        let st = store.clone();
+        list = list.child(row(
+            store,
+            Row {
+                key: key.clone(),
+                depth: 0,
+                fold: Some(open(&key)),
+                mark: icon_mark(IconName::Sparkles, None),
+                name: "Detections".into(),
+                kind: group_digits(cells.len() + tiles.len()),
+                selected: false,
+                visible: Some(shown),
+                on_eye: Some(Box::new(move |cx| {
+                    st.update(cx, |s, cx| {
+                        s.hist.show = !s.hist.show;
+                        s.hist.rev += 1;
+                        cx.notify();
+                    })
+                })),
+                on_click: Box::new(noop),
+                menu: None,
+            },
+        ));
+        if open(&key) {
+            for (what, objects, icon) in [("Cells", &cells, IconName::Sparkles), ("Tiles", &tiles, IconName::Grid3x3)] {
+                if objects.is_empty() {
+                    continue;
+                }
+                let mut by_class: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                for o in objects.iter() {
+                    *by_class.entry(o.class.clone().unwrap_or_else(|| "Unclassified".into())).or_default() += 1;
+                }
+                let gkey = format!("detections:{image}:{what}");
+                list = list.child(row(store, Row { key: gkey.clone(), depth: 1, fold: Some(open(&gkey)), mark: icon_mark(icon, None), name: what.into(), kind: group_digits(objects.len()), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
+                if open(&gkey) {
+                    for (class, n) in by_class {
+                        let color = s.doc.class(&class).map(|c| c.color).unwrap_or([90, 200, 255]);
+                        list = list.child(row(store, Row { key: format!("{gkey}:{class}"), depth: 2, fold: None, mark: dot(color), name: class, kind: group_digits(n), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
+                    }
+                }
+            }
         }
     }
     finish(store, s, list)
 }
 
-/// The tree, then the Combine bar while masks are selected.
-fn finish(store: &Entity<Store>, s: &Store, list: gpui_kit::Stateful<gpui_kit::Div>) -> AnyElement {
-    let masks = s.selected_masks();
-    let combine = (!masks.is_empty()).then(|| {
-        let action = |id: &'static str, label: String, tip: &'static str, enabled: bool, op: MaskOperation| {
-            let st = store.clone();
-            Button::new(id).outline().xsmall().label(label).tooltip(tip).disabled(!enabled).on_click(move |_, _, cx| st.update(cx, |s, cx| s.apply_mask_operation(op.clone(), cx)))
-        };
-        let two = masks.len() >= 2;
-        let r = s.mask_radius;
-        let names: Vec<String> = masks.iter().map(|k| k.split_once(':').map_or(k.clone(), |(_, n)| s.doc.graph.node(n).and_then(|n| if let NodeKind::View { name, .. } = &n.kind { Some(name.clone()) } else { None }).unwrap_or_else(|| n.to_string()))).collect();
-        let st = store.clone();
-        v_flex()
-            .flex_none()
-            .p(px(theme::SM))
-            .gap(px(theme::SM))
-            .border_t_1()
-            .border_color(color::border())
-            .bg(color::raised())
-            .child(h_flex().gap(px(theme::XS)).child(Icon::new(IconName::Combine).small()).child(div().text_sm().child(format!("Combine {}", names.join(", ")))))
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap(px(theme::XS))
-                    .child(action("combine-union", "Union".into(), "On where any selected mask is on", two, MaskOperation::Union))
-                    .child(action("combine-intersect", "Intersect".into(), "On where all selected masks are on", two, MaskOperation::Intersect))
-                    .child(action("combine-subtract", "Subtract".into(), "The first selected, minus the others", two, MaskOperation::Subtract))
-                    .child(action("combine-invert", "Invert".into(), "The first selected, inverted", true, MaskOperation::Invert))
-                    .child(action("combine-grow", format!("Grow {r} px"), "The first selected, grown", true, MaskOperation::Op(Op::Dilate { radius: r })))
-                    .child(action("combine-shrink", format!("Shrink {r} px"), "The first selected, shrunk", true, MaskOperation::Op(Op::Erode { radius: r }))),
-            )
-            .child(h_flex().gap(px(theme::SM)).child(div().text_xs().text_color(color::text_muted()).child("Grow / shrink by")).child(stepper("mask-radius", format!("{r} px"), move |d, _, cx| {
-                st.update(cx, |s, cx| {
-                    s.mask_radius = ((s.mask_radius as i64 + d as i64).clamp(1, 64)) as usize;
-                    cx.notify();
-                })
-            })))
-            .child(div().text_xs().text_color(color::text_muted()).child(if two { "Each makes a new result layer through the Pipeline; the originals stay." } else { "Shift-click another mask to union, intersect or subtract." }))
-    });
-    v_flex().size_full().child(list.flex_1().min_h_0().overflow_y_scroll().p(px(theme::SM))).children(combine).into_any_element()
+/// The tree (the Combine commands are in Shapes ▸ Combine and the options bar, not in a panel).
+fn finish(_store: &Entity<Store>, _s: &Store, list: gpui_kit::Stateful<gpui_kit::Div>) -> AnyElement {
+    v_flex().size_full().child(list.flex_1().min_h_0().overflow_y_scroll().p(px(theme::SM))).into_any_element()
 }

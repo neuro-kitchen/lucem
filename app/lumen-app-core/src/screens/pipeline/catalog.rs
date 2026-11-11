@@ -112,6 +112,19 @@ pub fn describe(kind: &NodeKind, doc: &ProjectDoc) -> (String, String, IconName)
             let sub = if nums.is_empty() { format!("{lang} → {}", output.name()) } else { format!("{lang} · {}", nums.join(" · ")) };
             (name, sub, IconName::SquareTerminal)
         }
+        NodeKind::Model { image, model, roi, prompts, .. } => {
+            let img = doc.image(image).map_or(image.as_str(), |i| i.name.as_str());
+            let place = match roi {
+                Some(crate::domain::graph::Roi::Class { class }) => format!(" · in {class}"),
+                Some(crate::domain::graph::Roi::Annotation { id }) => format!(" · in {id}"),
+                None => String::new(),
+            };
+            let sub = match prompts {
+                Some(c) => format!("{img}{place} · prompts: {c} → labels"),
+                None => format!("{img}{place} → labels"),
+            };
+            (model.clone(), sub, IconName::BrainCircuit)
+        }
     }
 }
 
@@ -147,5 +160,6 @@ pub fn kind_color(kind: &NodeKind) -> Hsla {
         NodeKind::Op { op, .. } => port_color(Some(op.output())),
         NodeKind::View { .. } => gpui_kit::hsla(271. / 360., 0.60, 0.65, 1.0),
         NodeKind::Script { .. } => gpui_kit::hsla(38. / 360., 0.80, 0.55, 1.0),
+        NodeKind::Model { .. } => gpui_kit::hsla(320. / 360., 0.60, 0.62, 1.0),
     }
 }

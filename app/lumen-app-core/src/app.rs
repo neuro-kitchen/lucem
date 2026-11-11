@@ -3,7 +3,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::{h_flex, v_flex, Selectable as _, Sizable as _, TitleBar};
+use gpui_kit::component::{h_flex, v_flex, Icon, Selectable as _, Sizable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, AnyElement, App, AppContext as _, Context, Entity, ExternalPaths, FocusHandle, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
@@ -72,7 +72,7 @@ impl Render for StatusBar {
             })
             .when(!explore, |d| d.child(div().flex_1()))
             .children(busy.map(|b| div().text_color(color::accent_hover()).child(b)))
-            .when(s.computing, |d| d.child(div().text_color(color::warning()).child("computing results…")))
+            .when(s.computing, |d| d.child(div().text_color(color::warning()).child(crate::data::model_node::progress().unwrap_or_else(|| "computing results…".to_string()))))
             .when(explore, |d| {
                 d.children(st.level.clone().map(|l| div().font_family("monospace").text_color(color::text_muted()).child(l)))
                     .child(div().font_family("monospace").child(crate::ui::widgets::scrub_label("status-zoom", format!("{:.1} %", st.zoom * 100.0), move |d, _, cx| c1.update(cx, |c, cx| c.zoom_at(if d > 0.0 { 1.05 } else { 1.0 / 1.05 }, None, cx)))))
@@ -189,63 +189,83 @@ impl LumenApp {
         });
     }
 
-    /// Every command the search offers.
-    fn commands(&self, cx: &mut Context<Self>) -> Vec<PaletteCommand> {
+    /// Every command the search offers (`ops_only`: the operations alone, by family).
+    fn commands(&self, ops_only: bool, cx: &mut Context<Self>) -> Vec<PaletteCommand> {
         use std::rc::Rc;
         let mut out = Vec::new();
         let store = self.store.clone();
-        let mut add = |group: &'static str, name: String, hint: String, run: crate::screens::palette::Run| out.push(PaletteCommand { group, name, hint, run });
-        for w in Workspace::ALL {
+        let mut add = |group: &'static str, icon: IconName, name: String, hint: String, run: crate::screens::palette::Run| out.push(PaletteCommand { group, name, hint, icon, run });
+        if !ops_only {
+            for w in Workspace::ALL {
+                let st = store.clone();
+                add("Go to", IconName::AppWindow, format!("{} workspace", w.title()), "Switch the workspace".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.set_workspace(w, cx))));
+            }
             let st = store.clone();
-            add("Go to", format!("{} workspace", w.title()), String::new(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.set_workspace(w, cx))));
-        }
-        let st = store.clone();
-        add("File", "Open image or OME-Zarr…".into(), "Ctrl+O".into(), Rc::new(move |_, cx| Self::open_image(&st, cx)));
-        let st = store.clone();
-        add("File", "Open project…".into(), "Ctrl+Shift+O".into(), Rc::new(move |_, cx| Self::open_project(&st, cx)));
-        let st = store.clone();
-        add("File", "Save project in folder…".into(), "Ctrl+Shift+S".into(), Rc::new(move |_, cx| Self::save_project(&st, cx)));
-        let me = cx.entity().downgrade();
-        add("File", "Settings…".into(), "Ctrl+,".into(), Rc::new(move |_, cx| {
-            let _ = me.update(cx, |a, cx| a.toggle_settings(cx));
-        }));
-        let st = store.clone();
-        add("Edit", "Undo".into(), "Ctrl+Z".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.undo(false, cx))));
-        let st = store.clone();
-        add("Edit", "Redo".into(), "Ctrl+Shift+Z".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.undo(true, cx))));
-        for t in Tool::BAR.iter().flatten().copied() {
+            add("File", IconName::ImagePlus, "Open image or OME-Zarr…".into(), "Ctrl+O · add an image to the project".into(), Rc::new(move |_, cx| Self::open_image(&st, cx)));
             let st = store.clone();
-            add("Tool", t.name().to_string(), t.key().to_uppercase(), Rc::new(move |_, cx| st.update(cx, |s, cx| {
-                s.set_tool(t, cx);
-                s.set_workspace(Workspace::Explore, cx);
-            })));
+            add("File", IconName::FolderOpen, "Open project…".into(), "Ctrl+Shift+O".into(), Rc::new(move |_, cx| Self::open_project(&st, cx)));
+            let st = store.clone();
+            add("File", IconName::Save, "Save project in folder…".into(), "Ctrl+Shift+S".into(), Rc::new(move |_, cx| Self::save_project(&st, cx)));
+            let me = cx.entity().downgrade();
+            add("File", IconName::Settings, "Settings…".into(), "Ctrl+,".into(), Rc::new(move |_, cx| {
+                let _ = me.update(cx, |a, cx| a.toggle_settings(cx));
+            }));
+            let st = store.clone();
+            add("Edit", IconName::Undo2, "Undo".into(), "Ctrl+Z".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.undo(false, cx))));
+            let st = store.clone();
+            add("Edit", IconName::Redo2, "Redo".into(), "Ctrl+Shift+Z".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.undo(true, cx))));
+            for t in Tool::BAR.iter().flatten().copied() {
+                let st = store.clone();
+                add("Tools", t.icon(), t.name().to_string(), format!("Key {}", t.key().to_uppercase()), Rc::new(move |_, cx| st.update(cx, |s, cx| {
+                    s.set_tool(t, cx);
+                    s.set_workspace(Workspace::Explore, cx);
+                })));
+            }
+            let st = store.clone();
+            add("View", IconName::Ruler, "Rulers on / off".into(), "Ctrl+R".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.update_tool(|t| t.rulers = !t.rulers, cx))));
+            let st = store.clone();
+            add("View", IconName::ChartColumn, "Results over the image on / off".into(), "Show or hide the pipeline's results".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.update_tool(|t| t.show_results = !t.show_results, cx))));
+            let (a, b, c) = (store.clone(), store.clone(), store.clone());
+            add("Analyze", IconName::Sparkles, "Find cells".into(), "In the selected regions".into(), Rc::new(move |_, cx| a.update(cx, |s, cx| s.hist_detect_cells(cx))));
+            add("Analyze", IconName::ScanSearch, "Find tissue".into(), "Regions of class Tissue".into(), Rc::new(move |_, cx| b.update(cx, |s, cx| s.hist_detect_tissue(cx))));
+            add("Classify", IconName::BrainCircuit, "Train from the classed shapes".into(), "Random Trees on cells and tiles".into(), Rc::new(move |_, cx| c.update(cx, |s, cx| s.hist_train_classifier(cx))));
         }
-        let st = store.clone();
-        add("View", "Rulers on / off".into(), "Ctrl+R".into(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.update_tool(|t| t.rulers = !t.rulers, cx))));
-        let st = store.clone();
-        add("View", "Results over the image on / off".into(), String::new(), Rc::new(move |_, cx| st.update(cx, |s, cx| s.update_tool(|t| t.show_results = !t.show_results, cx))));
+        // Operations under their family, as Process ▸ shows them
         for c in operations() {
             for it in c.items {
                 let Template::Op(op) = it.template else { continue };
                 let st = store.clone();
-                add("Operation", format!("{} · {}", c.name, it.label), it.hint, Rc::new(move |_, cx| Self::apply_op(&st, op.clone(), cx)));
+                add(c.name, c.icon, it.label.to_string(), format!("{} · a step on the shown channel", it.hint), Rc::new(move |_, cx| Self::apply_op(&st, op.clone(), cx)));
             }
         }
         out
     }
 
     fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_search(false, window, cx);
+    }
+
+    /// The search (Ctrl+K: everything; Process ▸ Find an operation: operations only); closes it
+    /// when open.
+    pub fn open_search(&mut self, ops_only: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.take().is_some() {
             window.focus(&self.focus, cx);
             cx.notify();
             return;
         }
-        let commands = self.commands(cx);
-        let palette = cx.new(|cx| Palette::new(commands, window, cx));
-        let sub = cx.subscribe_in(&palette, window, |this, _, _: &PaletteEvent, window, cx| {
+        let commands = self.commands(ops_only, cx);
+        let (title, placeholder) = if ops_only { ("Find an operation", "Blur, threshold, watershed…") } else { ("Search", "An operation, a tool or an action…") };
+        let palette = cx.new(|cx| Palette::new(commands, title, placeholder, window, cx));
+        let sub = cx.subscribe_in(&palette, window, |this, _, e: &PaletteEvent, window, cx| {
             this.palette = None;
             window.focus(&this.focus, cx);
             cx.notify();
+            // The chosen command runs once the search is gone (it may open Settings, take focus)
+            if let PaletteEvent::Run(run) = e {
+                let run = run.clone();
+                // On the window, with no entity borrowed (the command may update the app itself)
+                window.defer(cx, move |window, cx| run(window, cx));
+            }
         });
         self.palette = Some((palette, sub));
         cx.notify();
@@ -255,26 +275,42 @@ impl LumenApp {
     // Title bar
     // ------------------------------------------------------------------------
 
-    fn menus(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The menu bar by purpose (each menu a verb): File, Edit, View, Image, Shapes, Process,
+    /// Analyze, Classify, Automate, Help; items carry the toolbar's icons. Models appear under
+    /// the purpose they serve, next to the built-in way, only when they fit the image.
+    /// Returns the Lumen menu (File's items, opened from the app's name), Help, and the menu row
+    /// (Edit … Automate) shown under the title bar.
+    fn menus(&self, cx: &mut Context<Self>) -> (AnyElement, AnyElement, AnyElement) {
         let store = self.store.clone();
         let (can_undo, can_redo) = (self.store.read(cx).can_undo(), self.store.read(cx).can_redo());
         let recent = self.store.read(cx).prefs.recent.clone();
+        let has_selection = !self.store.read(cx).selection.is_empty();
+        let item = |label: &str, icon: IconName| PopupMenuItem::new(label.to_string()).icon(Icon::new(icon));
         let file = {
             let store = store.clone();
             let me = cx.entity().downgrade();
-            Button::new("menu-file").ghost().small().label("File").dropdown_menu(move |menu: PopupMenu, _, _| {
-                let (a, b, c, d) = (store.clone(), store.clone(), store.clone(), store.clone());
+            Button::new("menu-file").ghost().small().child(div().font_weight(FontWeight::SEMIBOLD).child("Lumen")).tooltip("Files, projects, Settings").dropdown_menu(move |menu: PopupMenu, _, _| {
+                let (a, b, c, d, e, f, g) = (store.clone(), store.clone(), store.clone(), store.clone(), store.clone(), store.clone(), store.clone());
                 let mut m = menu
-                    .item(PopupMenuItem::new("Open image or OME-Zarr…  Ctrl+O").on_click(move |_, _, cx| Self::open_image(&a, cx)))
-                    .item(PopupMenuItem::new("Open project…  Ctrl+Shift+O").on_click(move |_, _, cx| Self::open_project(&b, cx)))
-                    .item(PopupMenuItem::new("Save project in folder…  Ctrl+Shift+S").on_click(move |_, _, cx| Self::save_project(&c, cx)))
-                    .item(PopupMenuItem::new("Settings…  Ctrl+,").on_click({
-                        let me = me.clone();
-                        move |_, _, cx| {
-                            let _ = me.update(cx, |a, cx| a.toggle_settings(cx));
-                        }
+                    .item(item("New project  Ctrl+N", IconName::FilePlus).on_click(move |_, _, cx| d.update(cx, |s, cx| s.new_project(cx))))
+                    .item(item("Open image or OME-Zarr…  Ctrl+O", IconName::ImagePlus).on_click(move |_, _, cx| Self::open_image(&a, cx)))
+                    .item(item("Open project…  Ctrl+Shift+O", IconName::FolderOpen).on_click(move |_, _, cx| Self::open_project(&b, cx)))
+                    .item(item("Save project in folder…  Ctrl+Shift+S", IconName::Save).on_click(move |_, _, cx| Self::save_project(&c, cx)))
+                    .separator()
+                    .label("Shapes")
+                    .item(item("Import GeoJSON…", IconName::FileInput).on_click(move |_, _, cx| {
+                        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("GeoJSON file".into()) });
+                        let st = e.clone();
+                        cx.spawn(async move |cx| {
+                            if let Ok(Ok(Some(paths))) = rx.await
+                                && let Some(p) = paths.into_iter().next() {
+                                    st.update(cx, |s, cx| s.import_geojson(p, cx));
+                                }
+                        })
+                        .detach();
                     }))
-                    .item(PopupMenuItem::new("New project  Ctrl+N").on_click(move |_, _, cx| d.update(cx, |s, cx| s.new_project(cx))));
+                    .item(item("Export as GeoJSON", IconName::FileOutput).on_click(move |_, _, cx| f.update(cx, |s, cx| s.export_geojson(cx))))
+                    .item(item("Export cell measurements", IconName::Sheet).on_click(move |_, _, cx| g.update(cx, |s, cx| s.hist_export(cx))));
                 if !recent.is_empty() {
                     m = m.separator().label("Recent");
                     for p in recent.iter().take(8) {
@@ -282,31 +318,49 @@ impl LumenApp {
                         m = m.item(PopupMenuItem::new(crate::data::store::display_name(&p)).on_click(move |_, _, cx| st.update(cx, |s, cx| s.open(p.clone(), cx))));
                     }
                 }
-                m.separator().item(PopupMenuItem::new("Quit  Ctrl+Q").on_click(|_, _, cx| cx.quit()))
+                m.separator()
+                    .item(item("Settings…  Ctrl+,", IconName::Settings).on_click({
+                        let me = me.clone();
+                        move |_, _, cx| {
+                            let _ = me.update(cx, |a, cx| a.toggle_settings(cx));
+                        }
+                    }))
+                    .item(item("Quit  Ctrl+Q", IconName::Power).on_click(|_, _, cx| cx.quit()))
             })
         };
         let edit = {
             let store = store.clone();
             Button::new("menu-edit").ghost().small().label("Edit").dropdown_menu(move |menu: PopupMenu, _, _| {
                 let (a, b, c) = (store.clone(), store.clone(), store.clone());
-                menu.item(PopupMenuItem::new("Undo  Ctrl+Z").disabled(!can_undo).on_click(move |_, _, cx| a.update(cx, |s, cx| s.undo(false, cx))))
-                    .item(PopupMenuItem::new("Redo  Ctrl+Shift+Z").disabled(!can_redo).on_click(move |_, _, cx| b.update(cx, |s, cx| s.undo(true, cx))))
+                menu.item(item("Undo  Ctrl+Z", IconName::Undo2).disabled(!can_undo).on_click(move |_, _, cx| a.update(cx, |s, cx| s.undo(false, cx))))
+                    .item(item("Redo  Ctrl+Shift+Z", IconName::Redo2).disabled(!can_redo).on_click(move |_, _, cx| b.update(cx, |s, cx| s.undo(true, cx))))
                     .separator()
-                    .item(PopupMenuItem::new("Delete selected annotations  Del").on_click(move |_, _, cx| c.update(cx, |s, cx| s.delete_selection(cx))))
+                    .item(item("Delete selected  Del", IconName::Trash).disabled(!has_selection).on_click(move |_, _, cx| c.update(cx, |s, cx| s.delete_selection(cx))))
             })
         };
-        // Photoshop style: one menu of operations, by family; each applies to what Explore shows
+        // Process: change pixels (image → image), one submenu per family
         let ops = {
             let store = store.clone();
-            Button::new("menu-ops").ghost().small().label("Process").dropdown_menu(move |menu: PopupMenu, _, _| {
-                let mut m = menu.scrollable(true).max_h(px(560.));
+            let me_find = cx.entity().downgrade();
+            Button::new("menu-ops").ghost().small().label("Process").dropdown_menu(move |menu: PopupMenu, window, cx| {
+                let me = me_find.clone();
+                let mut m = menu
+                    .item(PopupMenuItem::new("Find an operation…  Ctrl+K").icon(Icon::new(IconName::Search)).on_click(move |_, window, cx| {
+                        let _ = me.update(cx, |a, cx| a.open_search(true, window, cx));
+                    }))
+                    .separator()
+                    .label("A step on the shown channel");
                 for c in operations() {
-                    m = m.label(c.name);
-                    for it in c.items {
-                        let Template::Op(op) = it.template else { continue };
-                        let st = store.clone();
-                        m = m.item(PopupMenuItem::new(format!("{}   {}", it.label, it.hint)).on_click(move |_, _, cx| Self::apply_op(&st, op.clone(), cx)));
-                    }
+                    let (store, icon) = (store.clone(), c.icon);
+                    let items = c.items;
+                    m = m.submenu_with_icon(Some(Icon::new(icon)), c.name, window, cx, move |mut sub, _, _| {
+                        for it in &items {
+                            let Template::Op(op) = it.template.clone() else { continue };
+                            let st = store.clone();
+                            sub = sub.item(PopupMenuItem::new(format!("{}   {}", it.label, it.hint)).icon(Icon::new(icon)).on_click(move |_, _, cx| Self::apply_op(&st, op.clone(), cx)));
+                        }
+                        sub
+                    });
                 }
                 m
             })
@@ -316,7 +370,7 @@ impl LumenApp {
             let me_view = cx.entity().downgrade();
             let tool = self.store.read(cx).tool.clone();
             let (link, pipeline_open) = (self.store.read(cx).prefs.link_views, self.store.read(cx).prefs.pipeline_dock);
-            Button::new("menu-view").ghost().small().label("View").dropdown_menu(move |menu: PopupMenu, _, _| {
+            Button::new("menu-view").ghost().small().label("View").dropdown_menu(move |menu: PopupMenu, window, cx| {
                 let request = |r: ViewRequest| {
                     let st = store.clone();
                     move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| st.update(cx, |s, cx| s.request_view(r, cx))
@@ -325,40 +379,51 @@ impl LumenApp {
                     let st = store.clone();
                     move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| st.update(cx, |s, cx| s.update_tool(f, cx))
                 };
-                let mut m = menu.label("This view shows");
-                for kind in ViewKind::ALL {
-                    m = m.item(PopupMenuItem::new(format!("{}: {}", kind.title(), kind.hint())).on_click(request(ViewRequest::Show(kind))));
+                let mut m = menu.label("Show over the image")
+                    .item(item("Shapes  A", IconName::Shapes).checked(tool.show_annotations).on_click(toggle(|t| t.show_annotations = !t.show_annotations)))
+                    .item(item("Fill regions  Shift+F", IconName::PaintBucket).checked(tool.fill_annotations).on_click(toggle(|t| t.fill_annotations = !t.fill_annotations)))
+                    .item(item("Names  Shift+N", IconName::Type).checked(tool.show_names).on_click(toggle(|t| t.show_names = !t.show_names)))
+                    .item(item("Results", IconName::ChartColumn).checked(tool.show_results).on_click(toggle(|t| t.show_results = !t.show_results)))
+                    .item(item("Crosshair (3D cursor)", IconName::Crosshair).checked(tool.crosshair).on_click(toggle(|t| t.crosshair = !t.crosshair)))
+                    .item(item("Rulers  Ctrl+R", IconName::Ruler).checked(tool.rulers).on_click(toggle(|t| t.rulers = !t.rulers)))
+                    .separator();
+                {
+                    let store = store.clone();
+                    m = m.submenu_with_icon(Some(Icon::new(IconName::LayoutGrid)), "This view shows", window, cx, move |mut sub, _, _| {
+                        for kind in ViewKind::ALL {
+                            let st = store.clone();
+                            sub = sub.item(PopupMenuItem::new(format!("{}: {}", kind.title(), kind.hint())).on_click(move |_, _, cx| st.update(cx, |s, cx| s.request_view(ViewRequest::Show(kind), cx))));
+                        }
+                        sub
+                    });
                 }
-                m = m.separator().label("Views");
-                for kind in ViewKind::ALL {
-                    m = m.item(PopupMenuItem::new(format!("Add a {} view", kind.title())).on_click(request(ViewRequest::Add(kind))));
+                {
+                    let store = store.clone();
+                    m = m.submenu_with_icon(Some(Icon::new(IconName::SquarePlus)), "Views", window, cx, move |mut sub, _, _| {
+                        for kind in ViewKind::ALL {
+                            let st = store.clone();
+                            sub = sub.item(PopupMenuItem::new(format!("Add a {} view", kind.title())).on_click(move |_, _, cx| st.update(cx, |s, cx| s.request_view(ViewRequest::Add(kind), cx))));
+                        }
+                        let st = store.clone();
+                        sub = sub.item(PopupMenuItem::new("Close this view").on_click(move |_, _, cx| st.update(cx, |s, cx| s.request_view(ViewRequest::ClosePane, cx))));
+                        for how in Arrangement::ALL {
+                            let st = store.clone();
+                            sub = sub.item(PopupMenuItem::new(format!("Arrange: {}", how.title())).on_click(move |_, _, cx| st.update(cx, |s, cx| s.request_view(ViewRequest::Arrange(how), cx))));
+                        }
+                        sub
+                    });
                 }
-                m = m.item(PopupMenuItem::new("Close this view").on_click(request(ViewRequest::ClosePane)));
-                for how in Arrangement::ALL {
-                    m = m.item(PopupMenuItem::new(format!("Arrange: {}", how.title())).on_click(request(ViewRequest::Arrange(how))));
-                }
-                let side = store.clone();
-                m.item(PopupMenuItem::new("Link views").checked(link).on_click(request(ViewRequest::ToggleLink)))
-                    .item(PopupMenuItem::new("Pipeline under the views").checked(pipeline_open).on_click(request(ViewRequest::TogglePipeline)))
+                m.item(item("Link views", IconName::Link).checked(link).on_click(request(ViewRequest::ToggleLink)))
+                    .item(item("Pipeline under the views", IconName::Workflow).checked(pipeline_open).on_click(request(ViewRequest::TogglePipeline)))
                     .separator()
-                    .item(PopupMenuItem::new("Crosshair (3D cursor)").checked(tool.crosshair).on_click(toggle(|t| t.crosshair = !t.crosshair)))
-                    .item(PopupMenuItem::new("Rulers  Ctrl+R").checked(tool.rulers).on_click(toggle(|t| t.rulers = !t.rulers)))
-                    .item(PopupMenuItem::new("Results over the image").checked(tool.show_results).on_click(toggle(|t| t.show_results = !t.show_results)))
-                    .item(PopupMenuItem::new("Layers panel (left)  Ctrl+[").on_click(request(ViewRequest::ToggleLeft)))
-                    .item(PopupMenuItem::new("Studio panels (right)  Ctrl+]").on_click(request(ViewRequest::ToggleRight)))
-                    .item(PopupMenuItem::new("Both side panels  Tab").on_click(move |_, _, cx| side.update(cx, |s, cx| s.request_view(ViewRequest::ToggleSides, cx))))
-                    .item(PopupMenuItem::new("Reset panel layout").on_click(request(ViewRequest::ResetLayout)))
+                    .item(item("Layers  Ctrl+[", IconName::Layers2).on_click(request(ViewRequest::ToggleLeft)))
+                    .item(item("Side panel  Ctrl+]", IconName::PanelRight).on_click(request(ViewRequest::ToggleRight)))
+                    .item(item("Reset panel layout", IconName::RotateCcw).on_click(request(ViewRequest::ResetLayout)))
                     .separator()
                     .item({
                         let me = me_view.clone();
-                        PopupMenuItem::new("Light / dark").on_click(move |_, window, cx| {
+                        item("Light / dark", IconName::SunMoon).on_click(move |_, window, cx| {
                             let _ = me.update(cx, |a, cx| a.toggle_theme(window, cx));
-                        })
-                    })
-                    .item({
-                        let me = me_view.clone();
-                        PopupMenuItem::new("Settings…  Ctrl+,").on_click(move |_, _, cx| {
-                            let _ = me.update(cx, |a, cx| a.toggle_settings(cx));
                         })
                     })
             })
@@ -367,7 +432,7 @@ impl LumenApp {
             let me = cx.entity().downgrade();
             Button::new("menu-help").ghost().small().label("Help").dropdown_menu(move |menu: PopupMenu, _, _| {
                 let me = me.clone();
-                menu.item(PopupMenuItem::new("Keyboard & mouse  F1").on_click(move |_, _, cx| {
+                menu.item(item("Keyboard & mouse  F1", IconName::Keyboard).on_click(move |_, _, cx| {
                     let _ = me.update(cx, |a, cx| {
                         a.show_help = true;
                         cx.notify();
@@ -376,11 +441,10 @@ impl LumenApp {
             })
         };
         let domain = self.domain_menus(cx);
-        h_flex().gap(px(2.)).child(file).child(edit).child(view).children(domain.0).child(ops).children(domain.1).child(help)
+        (file.into_any_element(), help.into_any_element(), h_flex().gap(px(2.)).child(edit).child(view).children(domain.0).child(ops).children(domain.1).into_any_element())
     }
 
-    /// The menus by domain: Image, Annotations, Measure (before Process), then Automate, Analyze,
-    /// Window (after it).
+    /// Image and Shapes (before Process), then Analyze, Classify and Automate (after it).
     fn domain_menus(&self, cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
         use crate::data::script::Language;
         let store = self.store.clone();
@@ -391,10 +455,13 @@ impl LumenApp {
         let image_id = s.doc.active_image.clone();
         let masks = s.selected_masks().len();
         let has_selection = !s.selection.is_empty();
-        let request = |st: &Entity<Store>, r: ViewRequest| {
-            let st = st.clone();
-            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| st.update(cx, |s, cx| s.request_view(r, cx))
-        };
+        let brightfield = image_id.as_deref().map(|i| s.hist_is_brightfield(i));
+        // Models by purpose, those fitting the image
+        let detectors: Vec<(String, String, bool)> = brightfield.map(|b| s.ml.nucleus_models_for(b).into_iter().map(|(_, m)| (m.id, m.name, m.installed)).collect()).unwrap_or_default();
+        let classifiers: Vec<(String, String, bool)> = s.ml.plugins.iter().flat_map(|p| p.models.iter()).filter(|m| m.task == lumen_ml::Task::Classification).map(|m| (m.id.clone(), m.name.clone(), m.installed)).collect();
+        let segmenter = s.ml.segmenter(s.prefs.ml_model.as_deref()).is_some();
+        let detector = s.hist.detector.clone();
+        let item = |label: &str, icon: IconName| PopupMenuItem::new(label.to_string()).icon(Icon::new(icon));
         let image = {
             let store = store.clone();
             Button::new("menu-image").ghost().small().label("Image").dropdown_menu(move |menu: PopupMenu, _, _| {
@@ -414,14 +481,14 @@ impl LumenApp {
                 m = m.separator().label("Images of the project");
                 for (id, name, on) in &images {
                     let (st, id) = (store.clone(), id.clone());
-                    m = m.item(PopupMenuItem::new(name.clone()).checked(*on).on_click(move |_, _, cx| st.update(cx, |s, cx| {
+                    m = m.item(PopupMenuItem::new(name.clone()).icon(Icon::new(IconName::Image)).checked(*on).on_click(move |_, _, cx| st.update(cx, |s, cx| {
                         let _ = s.execute(Command::SelectImage { id: id.clone() }, cx);
                     })));
                 }
                 let st = store.clone();
-                m = m.separator().item(PopupMenuItem::new("Open image or OME-Zarr…  Ctrl+O").on_click(move |_, _, cx| Self::open_image(&st, cx)));
+                m = m.separator().item(item("Open image or OME-Zarr…  Ctrl+O", IconName::ImagePlus).on_click(move |_, _, cx| Self::open_image(&st, cx)));
                 let (st, img) = (store.clone(), image_id.clone());
-                m.item(PopupMenuItem::new("Remove from the project (the file stays)").disabled(img.is_none()).on_click(move |_, _, cx| {
+                m.item(item("Remove from the project (the file stays)", IconName::Trash).disabled(img.is_none()).on_click(move |_, _, cx| {
                     if let Some(id) = img.clone() {
                         st.update(cx, |s, cx| s.remove_image(id, cx));
                     }
@@ -429,63 +496,120 @@ impl LumenApp {
             })
             .into_any_element()
         };
-        let annotations = {
+        // Shapes: draw and manage regions, points, lines and detected objects
+        let shapes = {
             let store = store.clone();
-            Button::new("menu-annotations").ghost().small().label("Annotations").dropdown_menu(move |menu: PopupMenu, _, _| {
+            Button::new("menu-shapes").ghost().small().label("Shapes").dropdown_menu(move |menu: PopupMenu, window, cx| {
                 let tool_item = |t: Tool| {
                     let st = store.clone();
-                    PopupMenuItem::new(format!("{}  {}", t.name(), t.key().to_uppercase())).checked(tool.tool == t).on_click(move |_, _, cx| st.update(cx, |s, cx| s.set_tool(t, cx)))
+                    PopupMenuItem::new(format!("{}  {}", t.name(), t.key().to_uppercase())).icon(Icon::new(t.icon())).checked(tool.tool == t).on_click(move |_, _, cx| st.update(cx, |s, cx| s.set_tool(t, cx)))
                 };
-                let toggle = |label: &'static str, on: bool, f: fn(&mut crate::domain::tool::ToolState)| {
-                    let st = store.clone();
-                    PopupMenuItem::new(label).checked(on).on_click(move |_, _, cx| st.update(cx, |s, cx| s.update_tool(f, cx)))
-                };
-                let combine = |label: &'static str, need: usize, op: crate::data::store::MaskOperation| {
-                    let st = store.clone();
-                    PopupMenuItem::new(label).disabled(masks < need).on_click(move |_, _, cx| st.update(cx, |s, cx| s.apply_mask_operation(op.clone(), cx)))
-                };
-                let (del, exp, imp) = (store.clone(), store.clone(), store.clone());
-                let mut m = menu.label("Draw");
+                let mut m = menu.label("Select").item(tool_item(Tool::Select)).item(tool_item(Tool::Marquee)).separator().label("Draw");
+                {
+                    // The selected regions as one (Affinity's Add, Subtract, Intersect, Xor)
+                    let store = store.clone();
+                    m = m.submenu_with_icon(Some(Icon::new(IconName::SquaresUnite)), "Combine the selected shapes", window, cx, move |mut sub, _, _| {
+                        use crate::domain::boolean::ShapeOp;
+                        for op in ShapeOp::ALL {
+                            let st = store.clone();
+                            let icon = match op {
+                                ShapeOp::Add => IconName::SquaresUnite,
+                                ShapeOp::Subtract => IconName::SquaresSubtract,
+                                ShapeOp::Intersect => IconName::SquaresIntersect,
+                                ShapeOp::Xor => IconName::SquaresExclude,
+                            };
+                            sub = sub.item(PopupMenuItem::new(op.hint()).icon(Icon::new(icon)).on_click(move |_, _, cx| st.update(cx, |s, cx| s.combine_shapes(op, cx))));
+                        }
+                        sub
+                    });
+                }
                 for t in [Tool::Rect, Tool::Ellipse, Tool::Polygon, Tool::Lasso, Tool::Point, Tool::Brush, Tool::Eraser, Tool::Wand, Tool::Threshold] {
                     m = m.item(tool_item(t));
                 }
-                let r = 2usize;
+                if segmenter {
+                    m = m.item(tool_item(Tool::Segment));
+                }
+                {
+                    let store = store.clone();
+                    m = m.separator().submenu_with_icon(Some(Icon::new(IconName::Combine)), "Combine the selected", window, cx, move |sub, _, _| {
+                        let combine = |label: &'static str, need: usize, icon: IconName, op: crate::data::store::MaskOperation| {
+                            let st = store.clone();
+                            PopupMenuItem::new(label).icon(Icon::new(icon)).disabled(masks < need).on_click(move |_, _, cx| st.update(cx, |s, cx| s.apply_mask_operation(op.clone(), cx)))
+                        };
+                        let r = 2usize;
+                        sub.item(combine("Union", 2, IconName::SquaresUnite, crate::data::store::MaskOperation::Union))
+                            .item(combine("Intersect", 2, IconName::SquaresIntersect, crate::data::store::MaskOperation::Intersect))
+                            .item(combine("Subtract", 2, IconName::SquaresSubtract, crate::data::store::MaskOperation::Subtract))
+                            .item(combine("Invert", 1, IconName::Contrast, crate::data::store::MaskOperation::Invert))
+                            .item(combine("Grow 2 px", 1, IconName::Expand, crate::data::store::MaskOperation::Op(lumen_pipeline::Op::Dilate { radius: r })))
+                            .item(combine("Shrink 2 px", 1, IconName::Shrink, crate::data::store::MaskOperation::Op(lumen_pipeline::Op::Erode { radius: r })))
+                    });
+                }
+                let del = store.clone();
                 m.separator()
-                    .label("Show")
-                    .item(toggle("Annotations  A", tool.show_annotations, |t| t.show_annotations = !t.show_annotations))
-                    .item(toggle("Fill regions  Shift+F", tool.fill_annotations, |t| t.fill_annotations = !t.fill_annotations))
-                    .item(toggle("Names  Shift+N", tool.show_names, |t| t.show_names = !t.show_names))
-                    .separator()
-                    .label("Combine the selected masks (Layers)")
-                    .item(combine("Union", 2, crate::data::store::MaskOperation::Union))
-                    .item(combine("Intersect", 2, crate::data::store::MaskOperation::Intersect))
-                    .item(combine("Subtract", 2, crate::data::store::MaskOperation::Subtract))
-                    .item(combine("Invert", 1, crate::data::store::MaskOperation::Invert))
-                    .item(combine("Grow 2 px", 1, crate::data::store::MaskOperation::Op(lumen_pipeline::Op::Dilate { radius: r })))
-                    .item(combine("Shrink 2 px", 1, crate::data::store::MaskOperation::Op(lumen_pipeline::Op::Erode { radius: r })))
-                    .separator()
-                    .separator()
                     .label("Measure")
                     .item(tool_item(Tool::Ruler))
                     .item(tool_item(Tool::Probe))
-                    .item({
-                        let st = store.clone();
-                        PopupMenuItem::new("Measurements table (Analyze)  Ctrl+3").on_click(move |_, _, cx| st.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx)))
-                    })
                     .separator()
-                    .item(PopupMenuItem::new("Delete selected  Del").disabled(!has_selection).on_click(move |_, _, cx| del.update(cx, |s, cx| s.delete_selection(cx))))
-                    .item(PopupMenuItem::new("Export as GeoJSON").on_click(move |_, _, cx| exp.update(cx, |s, cx| s.export_geojson(cx))))
-                    .item(PopupMenuItem::new("Import GeoJSON…").on_click(move |_, _, cx| {
-                        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("GeoJSON file".into()) });
-                        let st = imp.clone();
-                        cx.spawn(async move |cx| {
-                            if let Ok(Ok(Some(paths))) = rx.await
-                                && let Some(p) = paths.into_iter().next() {
-                                    st.update(cx, |s, cx| s.import_geojson(p, cx));
-                                }
-                        })
-                        .detach();
-                    }))
+                    .item(item("Delete selected  Del", IconName::Trash).disabled(!has_selection).on_click(move |_, _, cx| del.update(cx, |s, cx| s.delete_selection(cx))))
+            })
+            .into_any_element()
+        };
+        // Analyze: find and measure (in the selected regions)
+        let analyze_menu = {
+            let store = store.clone();
+            let detectors = detectors.clone();
+            let detector = detector.clone();
+            Button::new("menu-analyze").ghost().small().label("Analyze").dropdown_menu(move |menu: PopupMenu, window, cx| {
+                let (a, b, c, d, e, f, g) = (store.clone(), store.clone(), store.clone(), store.clone(), store.clone(), store.clone(), store.clone());
+                let mut m = menu
+                    .label("Find (in the selected regions)")
+                    .item(item("Find tissue", IconName::ScanSearch).on_click(move |_, _, cx| a.update(cx, |s, cx| s.hist_detect_tissue(cx))))
+                    .item(item("Find cells", IconName::Sparkles).disabled(brightfield.is_none()).on_click(move |_, _, cx| b.update(cx, |s, cx| s.hist_detect_cells(cx))));
+                {
+                    let (store, detectors, detector) = (store.clone(), detectors.clone(), detector.clone());
+                    m = m.submenu_with_icon(Some(Icon::new(IconName::Microscope)), "Find cells with", window, cx, move |mut sub, _, _| {
+                        let st = store.clone();
+                        sub = sub.item(PopupMenuItem::new("Threshold (built in)").checked(detector.is_none()).on_click(move |_, _, cx| st.update(cx, |s, cx| s.hist_set_detector(None, cx))));
+                        for (id, name, installed) in &detectors {
+                            let (st, id) = (store.clone(), id.clone());
+                            let label = if *installed { name.clone() } else { format!("{name} (install in Settings → Models)") };
+                            sub = sub.item(PopupMenuItem::new(label).icon(Icon::new(IconName::BrainCircuit)).checked(detector.as_deref() == Some(id.as_str())).disabled(!installed).on_click(move |_, _, cx| st.update(cx, |s, cx| s.hist_set_detector(Some(id.clone()), cx))));
+                        }
+                        sub
+                    });
+                }
+                m.item(item("Superpixels", IconName::Grid3x3).on_click(move |_, _, cx| c.update(cx, |s, cx| s.hist_superpixels(cx))))
+                    .separator()
+                    .label("Density")
+                    .item(item("Density map", IconName::Flame).on_click(move |_, _, cx| d.update(cx, |s, cx| s.hist_density(cx))))
+                    .item(item("Mark 3 hotspots", IconName::MapPin).on_click(move |_, _, cx| e.update(cx, |s, cx| s.hist_hotspots(3, cx))))
+                    .separator()
+                    .label("Measure")
+                    .item(item("Measurements table  Ctrl+3", IconName::Table2).on_click(move |_, _, cx| f.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx))))
+                    .item(item("Export cell measurements", IconName::Sheet).on_click(move |_, _, cx| g.update(cx, |s, cx| s.hist_export(cx))))
+            })
+            .into_any_element()
+        };
+        // Classify: objects and pixels, built-in first, then models for the purpose
+        let classify = {
+            let store = store.clone();
+            Button::new("menu-classify").ghost().small().label("Classify").dropdown_menu(move |menu: PopupMenu, _, _| {
+                let (a, b, c, d) = (store.clone(), store.clone(), store.clone(), store.clone());
+                let mut m = menu
+                    .label("Cells and tiles")
+                    .item(item("Train from the classed shapes (Random Trees)", IconName::BrainCircuit).on_click(move |_, _, cx| a.update(cx, |s, cx| s.hist_train_classifier(cx))))
+                    .item(item("Intensity classes (1+ / 2+ / 3+)", IconName::Gauge).on_click(move |_, _, cx| b.update(cx, |s, cx| s.hist_apply_intensity(cx))));
+                if !classifiers.is_empty() {
+                    m = m.label("Models");
+                    for (_, name, installed) in &classifiers {
+                        m = m.item(PopupMenuItem::new(if *installed { name.clone() } else { format!("{name} (install in Settings → Models)") }).icon(Icon::new(IconName::BrainCircuit)).disabled(true));
+                    }
+                }
+                m.separator()
+                    .label("Pixels")
+                    .item(item("Train and classify pixels", IconName::Palette).on_click(move |_, _, cx| c.update(cx, |s, cx| s.hist_train_pixels(cx))))
+                    .item(item("Class map → shapes", IconName::Shapes).on_click(move |_, _, cx| d.update(cx, |s, cx| s.hist_class_regions(cx))))
             })
             .into_any_element()
         };
@@ -497,20 +621,23 @@ impl LumenApp {
                 let (a, b, c, d, e) = (store.clone(), store.clone(), store.clone(), store.clone(), store.clone());
                 let an = analyze.clone();
                 menu.label("Pipeline")
-                    .item(PopupMenuItem::new("Pipeline workspace  Ctrl+2").on_click(move |_, _, cx| a.update(cx, |s, cx| s.set_workspace(Workspace::Pipeline, cx))))
-                    .item(PopupMenuItem::new("Pipeline as a panel of Explore").on_click(request(&b, ViewRequest::TogglePipeline)))
+                    .item(item("Pipeline workspace  Ctrl+2", IconName::Workflow).on_click(move |_, _, cx| a.update(cx, |s, cx| s.set_workspace(Workspace::Pipeline, cx))))
+                    .item(item("Pipeline as a panel of Explore", IconName::PanelBottom).on_click({
+                        let st = b.clone();
+                        move |_, _, cx| st.update(cx, |s, cx| s.request_view(ViewRequest::TogglePipeline, cx))
+                    }))
                     .separator()
                     .label("Scripts (Python, Rust)")
-                    .item(PopupMenuItem::new("New Python script node…").on_click(move |_, _, cx| c.update(cx, |s, cx| s.add_script_node(Language::Python, cx))))
-                    .item(PopupMenuItem::new("New Rust script node…").on_click(move |_, _, cx| d.update(cx, |s, cx| s.add_script_node(Language::Rust, cx))))
-                    .item(PopupMenuItem::new("Code on the measurement table").on_click(move |_, _, cx| {
+                    .item(item("New Python script node…", IconName::SquareTerminal).on_click(move |_, _, cx| c.update(cx, |s, cx| s.add_script_node(Language::Python, cx))))
+                    .item(item("New Rust script node…", IconName::SquareTerminal).on_click(move |_, _, cx| d.update(cx, |s, cx| s.add_script_node(Language::Rust, cx))))
+                    .item(item("Code on the measurement table", IconName::Code).on_click(move |_, _, cx| {
                         e.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx));
                         an.update(cx, |a, cx| a.open_code(cx));
                     }))
             })
             .into_any_element()
         };
-        (vec![image, annotations], vec![automate])
+        (vec![image, shapes], vec![analyze_menu, classify, automate])
     }
 
     /// Dark ↔ light (as dsp-kitchen's title bar button); Settings keeps System, the accent and more.
@@ -540,33 +667,26 @@ impl LumenApp {
         let s = self.store.read(cx);
         let saved = s.project_file.is_some();
         let name = s.doc.name.clone();
-        TitleBar::new().when(rounded, |t| t.rounded_t(px(WINDOW_RADIUS - 1.0))).child(
+        let (lumen, help, row) = self.menus(cx);
+        // Affinity's layout: the app's menu (Lumen: files, Settings) and Help at the top left,
+        // the workspaces next to them; the menus of what to do sit in a row under the bar
+        let bar = TitleBar::new().when(rounded, |t| t.rounded_t(px(WINDOW_RADIUS - 1.0))).child(
             h_flex()
                 .w_full()
                 .h(px(theme::TITLE_BAR_H))
                 .gap(px(theme::MD))
                 .pr(px(theme::SM))
                 .items_center()
-                .child(div().pl(px(theme::XS)).text_sm().font_weight(FontWeight::SEMIBOLD).child("Lumen"))
-                .child(self.menus(cx))
-                .child(div().flex_1())
+                .child(h_flex().gap(px(2.)).child(lumen).child(help))
                 .child(self.workspaces(cx))
                 .child(div().flex_1())
                 .child(div().text_sm().text_color(color::text_muted()).truncate().child(if saved { name } else { format!("{name} · not saved") }))
-                .child(
-                    Button::new("title-left")
-                        .ghost()
-                        .small()
-                        .icon(IconName::PanelLeft)
-                        .tooltip("Layers panel (Ctrl+[)")
-                        .on_click(cx.listener(|this, _, _, cx| this.store.update(cx, |s, cx| s.request_view(ViewRequest::ToggleLeft, cx)))),
-                )
                 .child(
                     Button::new("title-right")
                         .ghost()
                         .small()
                         .icon(IconName::PanelRight)
-                        .tooltip("Studio panels (Ctrl+])")
+                        .tooltip("Side panel (Ctrl+]; Ctrl+[ for Layers)")
                         .on_click(cx.listener(|this, _, _, cx| this.store.update(cx, |s, cx| s.request_view(ViewRequest::ToggleRight, cx)))),
                 )
                 .child(
@@ -577,7 +697,12 @@ impl LumenApp {
                         .tooltip(if theme::is_dark() { "Light theme" } else { "Dark theme" })
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
                 ),
-        )
+        );
+        v_flex()
+            .flex_none()
+            .w_full()
+            .child(bar)
+            .child(h_flex().flex_none().w_full().h(px(30.)).px(px(theme::XS)).items_center().border_b_1().border_color(color::border()).bg(color::panel()).child(row))
     }
 
     // ------------------------------------------------------------------------

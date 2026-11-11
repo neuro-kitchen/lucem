@@ -136,6 +136,32 @@ impl PipelineView {
             })
         };
         bar = bar.child(scripts);
+        // Model plugins: nucleus models and Segment Anything as steps
+        let models = {
+            let store = self.store.clone();
+            let list: Vec<(String, String, bool, bool)> = self
+                .store
+                .read(cx)
+                .ml
+                .plugins
+                .iter()
+                .flat_map(|p| p.models.iter())
+                .filter(|m| matches!(m.task, lumen_ml::Task::Segmentation | lumen_ml::Task::InteractiveSegmentation))
+                .map(|m| (m.id.clone(), m.name.clone(), m.task == lumen_ml::Task::InteractiveSegmentation, m.installed))
+                .collect();
+            Button::new("pipeline-menu-model").ghost().small().icon(Icon::new(IconName::BrainCircuit)).label("Model").dropdown_menu(move |m: PopupMenu, _, _| {
+                let mut m = m.label(if list.is_empty() { "No model plugins found (Settings → Models)" } else { "A step by a model → labels" });
+                for (id, name, interactive, installed) in &list {
+                    let (store, id, interactive) = (store.clone(), id.clone(), *interactive);
+                    // Named by purpose: what the step does, then with which model
+                    let purpose = if interactive { "Segment what shapes point at" } else { "Detect cells" };
+                    let label = if *installed { format!("{purpose} · {name}") } else { format!("{purpose} · {name} (not installed)") };
+                    m = m.item(PopupMenuItem::new(label).on_click(move |_, _, cx| store.update(cx, |s, cx| s.add_model_node(id.clone(), interactive, cx))));
+                }
+                m
+            })
+        };
+        bar = bar.child(models);
         let view = {
             let canvas = canvas.clone();
             Button::new("pipeline-menu-view").ghost().small().label("View").dropdown_menu(move |m: PopupMenu, _, _| {
@@ -173,9 +199,10 @@ impl PipelineView {
             Button::new(id).ghost().small().icon(Icon::new(icon)).tooltip(tip).selected(on).on_click(move |_, _, cx| Self::canvas_do(&canvas, cx, f))
         };
         let store = self.store.clone();
+        // Only the pill takes the pointer: the strip it is centred in must not cover the canvas'
+        // own bar (zoom, fit, grid, minimap) at the bottom left
         h_flex()
             .id("pipeline-toolbar")
-            .occlude()
             .absolute()
             .bottom_4()
             .left_0()
@@ -183,6 +210,8 @@ impl PipelineView {
             .justify_center()
             .child(
                 h_flex()
+                    .id("pipeline-toolbar-pill")
+                    .occlude()
                     .gap(px(2.))
                     .p(px(theme::XS))
                     .rounded(px(8.))
@@ -415,6 +444,112 @@ impl Inspector {
                         MenuSelect::new("view-lut", COLORMAPS.iter().map(|m| SharedString::from(*m)).collect(), lut_idx, move |i, _, cx| s3(&move |st: &mut ViewStyle| st.colormap = COLORMAPS[i].to_string(), cx)),
                     ))
                     .into_any_element()
+            }
+            NodeKind::Model { image, channels, model, roi, prompts, enabled } => {
+                let info = crate::data::ml::find_model(model).map(|(_, m)| m);
+                let interactive = info.as_ref().is_some_and(|m| m.task == lumen_ml::Task::InteractiveSegmentation);
+                let (store, id2, kind) = (self.store.clone(), id.clone(), node.kind.clone());
+                let mut col = v_flex()
+                    .gap(px(theme::MD))
+                    .child(Checkbox::new("inspector-model-on").checked(*enabled).label("On").on_click(move |v: &bool, _, cx| {
+                        let mut k = kind.clone();
+                        if let NodeKind::Model { enabled, .. } = &mut k {
+                            *enabled = *v;
+                        }
+                        Self::exec(&store, Command::SetScript { id: id2.clone(), kind: k }, cx)
+                    }))
+                    .child(row("Model", div().text_sm().child(info.as_ref().map_or_else(|| format!("{model} (no plugin offers it)"), |m| m.name.clone()))));
+                // Runs only when asked: over the view shown in Explore (or its region of interest)
+                {
+                    let (st, id_run) = (self.store.clone(), id.clone());
+                    let has_run = { let sig = format!("{id}|{}", serde_json::to_string(&Some(&node.kind)).unwrap_or_default()); crate::data::model_node::last_run(&sig).is_some() };
+                    col = col.child(
+                        v_flex()
+                            .gap(px(theme::XS))
+                            .child(Button::new("inspector-model-run").primary().small().icon(Icon::new(IconName::Play)).label(if has_run { "Run again" } else { "Run" }).on_click(move |_, _, cx| {
+                                crate::data::model_node::arm(&id_run);
+                                st.update(cx, |s, cx| {
+                                    // Its labels need a view to be drawn (and run): one is added when there is none
+                                    let has_view = s.doc.graph.outputs(&id_run).iter().any(|(to, _)| matches!(s.doc.graph.node(to).map(|n| &n.kind), Some(NodeKind::View { .. })));
+                                    if !has_view {
+                                        let (x, y) = s.doc.graph.node(&id_run).map_or((0.0, 0.0), |n| (n.x + 240.0, n.y));
+                                        let kind = NodeKind::View { name: "Nuclei".into(), style: crate::domain::graph::ViewStyle::default() };
+                                        let _ = s.execute(Command::AddNode { kind, x, y, id: None, after: Some(id_run.clone()) }, cx);
+                                    }
+                                    s.set_status("Running the model over the view…", cx);
+                                    s.recompute(cx);
+                                });
+                            }))
+                            .child(div().text_xs().text_color(color::text_muted()).child(if has_run { "Shown from its last run; changing a setting needs Run again." } else { "Not run yet: runs over the view in Explore, or inside its region." })),
+                    );
+                }
+                // What the model sees: the colour image, or one channel
+                let names: Vec<String> = doc.image(image).map(|i| i.channels.iter().map(|c| c.label.clone()).collect()).unwrap_or_default();
+                let mut options: Vec<(SharedString, Vec<usize>)> = Vec::new();
+                if names.len() == 3 {
+                    options.push(("Colour (all three channels)".into(), Vec::new()));
+                }
+                options.extend(names.iter().enumerate().map(|(i, n)| (SharedString::from(format!("Channel {}: {n}", i + 1)), vec![i])));
+                let current = options.iter().position(|(_, c)| c == channels).or_else(|| channels.is_empty().then_some(0));
+                let (store_c, id_c, kind_c) = (self.store.clone(), id.clone(), node.kind.clone());
+                let picks: Vec<Vec<usize>> = options.iter().map(|(_, c)| c.clone()).collect();
+                // Where it runs: the whole region asked, a class' regions, or one annotation
+                {
+                    use crate::domain::graph::Roi;
+                    let regions: Vec<&crate::domain::annotation::Annotation> = doc.annotations_of(image).filter(|a| a.shape.is_region()).collect();
+                    let classes: Vec<String> = regions.iter().map(|a| a.class.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+                    let mut opts: Vec<(SharedString, Option<Roi>)> = vec![("Whole image".into(), None)];
+                    opts.extend(classes.iter().map(|c| (SharedString::from(format!("Every {c} region")), Some(Roi::Class { class: c.clone() }))));
+                    opts.extend(regions.iter().take(60).map(|a| {
+                        let name = if a.note.is_empty() { format!("{} {} ({})", a.shape.kind(), a.id, a.class) } else { format!("{} ({})", a.note.lines().next().unwrap_or_default(), a.class) };
+                        (SharedString::from(name), Some(Roi::Annotation { id: a.id.clone() }))
+                    }));
+                    let cur = opts.iter().position(|(_, r)| r == roi);
+                    let (store_r, id_r, kind_r) = (self.store.clone(), id.clone(), node.kind.clone());
+                    let picks: Vec<Option<Roi>> = opts.iter().map(|(_, r)| r.clone()).collect();
+                    col = col.child(row(
+                        "Region",
+                        MenuSelect::new("inspector-model-roi", opts.iter().map(|(l, _)| l.clone()).collect(), cur, move |i, _, cx| {
+                            let mut k = kind_r.clone();
+                            if let NodeKind::Model { roi, .. } = &mut k {
+                                *roi = picks[i].clone();
+                            }
+                            Self::exec(&store_r, Command::SetScript { id: id_r.clone(), kind: k }, cx)
+                        }),
+                    ));
+                }
+                col = col.child(row(
+                    "Reads",
+                    MenuSelect::new("inspector-model-channels", options.iter().map(|(l, _)| l.clone()).collect(), current, move |i, _, cx| {
+                        let mut k = kind_c.clone();
+                        if let NodeKind::Model { channels, .. } = &mut k {
+                            *channels = picks[i].clone();
+                        }
+                        Self::exec(&store_c, Command::SetScript { id: id_c.clone(), kind: k }, cx)
+                    }),
+                ));
+                if interactive {
+                    let classes: Vec<String> = doc.classes.iter().map(|c| c.name.clone()).collect();
+                    let current = prompts.as_ref().and_then(|p| classes.iter().position(|c| c == p));
+                    let (store, id3, kind) = (self.store.clone(), id.clone(), node.kind.clone());
+                    let names = classes.clone();
+                    col = col.child(row(
+                        "Prompts",
+                        MenuSelect::new("inspector-model-prompts", classes.iter().map(|c| SharedString::from(c.clone())).collect(), current, move |i, _, cx| {
+                            let mut k = kind.clone();
+                            if let NodeKind::Model { prompts, .. } = &mut k {
+                                *prompts = Some(names[i].clone());
+                            }
+                            Self::exec(&store, Command::SetScript { id: id3.clone(), kind: k }, cx)
+                        }),
+                    ));
+                }
+                col.child(div().text_xs().text_color(color::text_muted()).child(if interactive {
+                    "One object per box or point annotation of the prompt class on the plane shown. Reads the image itself · gives labels."
+                } else {
+                    "Every nucleus of the region. Reads the image itself · gives labels. Answers are kept, so moving back over a region does not run it again."
+                }))
+                .into_any_element()
             }
             NodeKind::Script { path, inputs, output, params, enabled } => {
                 let p = std::path::PathBuf::from(path);

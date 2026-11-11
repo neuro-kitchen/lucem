@@ -43,7 +43,9 @@ impl RenderOnce for MenuSelect {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let Self { id, current, options, selected, on_pick, full } = self;
         let face = h_flex().w_full().min_w_0().gap_1().child(div().flex_1().min_w_0().truncate().text_left().child(current)).child(Icon::new(IconName::ChevronDown).xsmall());
-        Button::new(id).outline().small().min_w_0().max_w_full().child(face).cursor_pointer().when(full, |b| b.w_full()).dropdown_menu(move |menu, _, _| {
+        // It fills its place, so a long value ends in "…" instead of being cut
+        let _ = full;
+        Button::new(id).outline().small().min_w_0().w_full().child(face).cursor_pointer().dropdown_menu(move |menu, _, _| {
             let mut menu = menu.scrollable(true).max_h(px(360.));
             for (i, label) in options.iter().enumerate() {
                 let on_pick = on_pick.clone();
@@ -97,14 +99,99 @@ impl RenderOnce for Section {
     }
 }
 
-/// `label    control` on one line, never wider than its panel.
+/// `label    control` on one line when both fit; in a narrow panel the control drops under its
+/// label, full width. Nothing is ever clipped (a cut label or value names nothing); a long value
+/// ends in "…".
 pub fn row(label: impl Into<SharedString>, control: impl IntoElement) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .flex_wrap()
+        .gap(px(theme::SM))
+        .child(div().flex_none().w(px(112.)).text_sm().text_color(color::text_muted()).child(label.into()))
+        .child(h_flex().flex_1().min_w(px(140.)).justify_end().child(control))
+}
+
+/// What a slider calls: the new value (`0..=1` of its range mapped back) and whether the drag
+/// ended (to commit one undo step).
+pub type OnSlide = Rc<dyn Fn(f32, bool, &mut Window, &mut App)>;
+
+thread_local! {
+    /// The slider being dragged: its id and its track (window px: left, width).
+    static SLIDING: std::cell::RefCell<Option<(String, f32, f32)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A horizontal slider over `min..=max` with the value printed beside it (`fmt`). A click sets the
+/// value; a drag follows the pointer (even off the track) and ends on release.
+pub fn slider(id: impl Into<String>, value: f32, (min, max): (f32, f32), fmt: impl Fn(f32) -> String, on_change: impl Fn(f32, bool, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    let on_change: OnSlide = Rc::new(on_change);
+    let id: String = id.into();
+    let t = ((value - min) / (max - min).max(1e-12)).clamp(0.0, 1.0);
+    let active = SLIDING.with(|s| s.borrow().as_ref().is_some_and(|(k, _, _)| *k == id));
+    let bounds = Rc::new(std::cell::Cell::new(gpui_kit::Bounds::<gpui_kit::Pixels>::default()));
+    let to_value = move |x: f32, left: f32, width: f32| min + ((x - left) / width.max(1.0)).clamp(0.0, 1.0) * (max - min);
+    // While dragging, the window's pointer events drive it
+    let (b1, id1, ch1) = (bounds.clone(), id.clone(), on_change.clone());
+    let listener = gpui_kit::canvas(
+        move |b, _, _| b1.set(b),
+        move |_, _, window, _| {
+            if !active {
+                return;
+            }
+            let (id, ch) = (id1.clone(), ch1.clone());
+            window.on_mouse_event(move |e: &gpui_kit::MouseMoveEvent, phase, window, cx| {
+                if phase != gpui_kit::DispatchPhase::Bubble {
+                    return;
+                }
+                let Some((_, left, width)) = SLIDING.with(|s| s.borrow().clone()).filter(|(k, _, _)| *k == id) else { return };
+                if e.pressed_button != Some(gpui_kit::MouseButton::Left) {
+                    SLIDING.with(|s| *s.borrow_mut() = None);
+                    ch(to_value(e.position.x.as_f32(), left, width), true, window, cx);
+                    window.refresh();
+                    return;
+                }
+                ch(to_value(e.position.x.as_f32(), left, width), false, window, cx);
+            });
+            let (id, ch) = (id1.clone(), ch1.clone());
+            window.on_mouse_event(move |e: &gpui_kit::MouseUpEvent, phase, window, cx| {
+                if phase != gpui_kit::DispatchPhase::Bubble {
+                    return;
+                }
+                if let Some((_, left, width)) = SLIDING.with(|s| s.borrow_mut().take()).filter(|(k, _, _)| *k == id) {
+                    ch(to_value(e.position.x.as_f32(), left, width), true, window, cx);
+                    window.refresh();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full();
+    let (b2, id2, ch2) = (bounds, id.clone(), on_change);
+    let track = div()
+        .id(SharedString::from(format!("{id}-track")))
+        .relative()
+        .flex_1()
+        .min_w(px(60.))
+        .h(px(16.))
+        .cursor_pointer()
+        .on_mouse_down(gpui_kit::MouseButton::Left, move |e, window, cx| {
+            cx.stop_propagation();
+            let b = b2.get();
+            let (left, width) = (b.origin.x.as_f32(), b.size.width.as_f32());
+            SLIDING.with(|s| *s.borrow_mut() = Some((id2.clone(), left, width)));
+            ch2(to_value(e.position.x.as_f32(), left, width), false, window, cx);
+            window.refresh();
+        })
+        // The track, its filled part, the thumb
+        .child(div().absolute().left_0().right_0().top(px(6.)).h(px(4.)).rounded_full().bg(color::control()))
+        .child(div().absolute().left_0().top(px(6.)).h(px(4.)).w(gpui_kit::relative(t)).rounded_full().bg(color::accent()))
+        .child(div().absolute().top(px(2.)).left(gpui_kit::relative(t)).ml(px(-6.)).size(px(12.)).rounded_full().bg(gpui_kit::white()).border_1().border_color(if active { color::accent_hover() } else { color::border() }))
+        .child(listener);
     h_flex()
         .w_full()
         .min_w_0()
         .gap(px(theme::SM))
-        .child(div().flex_none().w(px(96.)).truncate().text_sm().text_color(color::text_muted()).child(label.into()))
-        .child(h_flex().flex_1().min_w_0().justify_end().overflow_hidden().child(control))
+        .child(track)
+        .child(div().flex_none().w(px(44.)).text_right().text_xs().font_family("monospace").child(fmt(value)))
 }
 
 /// Centred icon, title and a line of explanation, with actions under it.
@@ -334,15 +421,25 @@ pub fn format_length(px_len: f64, pixel_um: Option<f64>) -> String {
     }
 }
 
-/// An area in µm² (or px²).
+/// An area in µm² (or px²): three significant figures, in mm² from 0.01 mm² up (an area of
+/// 814 873.0 µm² reads as 0.815 mm²).
 pub fn format_area(px_area: f64, pixel_um: Option<f64>) -> String {
     match pixel_um {
         Some(um) => {
             let v = px_area * um * um;
-            if v >= 1.0e6 { format!("{:.3} mm²", v / 1.0e6) } else { format!("{v:.1} µm²") }
+            if v >= 1.0e4 { format!("{} mm²", sig3(v / 1.0e6)) } else { format!("{} µm²", sig3(v)) }
         }
-        None => format!("{px_area:.0} px²"),
+        None => format!("{} px²", group_digits(px_area.round() as usize)),
     }
+}
+
+/// `v` with three significant figures (no exponent).
+pub fn sig3(v: f64) -> String {
+    if v == 0.0 || !v.is_finite() {
+        return format!("{v}");
+    }
+    let digits = (2 - v.abs().log10().floor() as i32).max(0) as usize;
+    format!("{v:.digits$}")
 }
 
 /// A clickable chip label (for menus without a menu).

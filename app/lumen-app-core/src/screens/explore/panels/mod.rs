@@ -1,11 +1,13 @@
-//! Explore's panels, in the side docks: Layers on the left, the studio on the right (Affinity
-//! style: groups stacked top to bottom, each with its tabs, all on screen at once).
+//! Explore's side panels: one at a time beside the right rail (dsp-kitchen's layout), each an
+//! icon on the rail — Layers, Display, Histology, then Results, Selection, Notes, Navigator,
+//! History.
 
 pub mod annotations;
 pub mod display;
 pub mod histology;
 pub mod history;
 pub mod layers;
+pub mod metadata;
 pub mod navigator;
 pub mod notes;
 pub mod results;
@@ -23,6 +25,7 @@ pub enum Tab {
     Navigator,
     History,
     Histology,
+    Metadata,
 }
 
 impl Tab {
@@ -44,24 +47,26 @@ impl Tab {
             Tab::Navigator => "navigator",
             Tab::History => "history",
             Tab::Histology => "histology",
+            Tab::Metadata => "metadata",
         }
     }
 
     pub fn from_key(k: &str) -> Option<Tab> {
-        [Tab::Layers, Tab::Annotations].iter().chain(Tab::RIGHT_GROUPS.iter().flat_map(|g| g.iter())).copied().find(|t| t.key() == k)
+        [Tab::Layers, Tab::Annotations, Tab::Metadata].iter().chain(Tab::RIGHT_GROUPS.iter().flat_map(|g| g.iter())).copied().find(|t| t.key() == k)
     }
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Layers => "Layers",
             Tab::Display => "Display",
-            Tab::Annotations => "Annotations",
+            Tab::Annotations => "Shapes",
             Tab::Results => "Results",
             Tab::Selection => "Selection",
             Tab::Notes => "Notes",
             Tab::Navigator => "Navigator",
             Tab::History => "History",
             Tab::Histology => "Histology",
+            Tab::Metadata => "Metadata",
         }
     }
 
@@ -72,11 +77,12 @@ impl Tab {
             Tab::Display => IconName::SlidersHorizontal,
             Tab::Annotations => IconName::Shapes,
             Tab::Results => IconName::ChartColumn,
-            Tab::Selection => IconName::Info,
+            Tab::Selection => IconName::SquareMousePointer,
             Tab::Notes => IconName::StickyNote,
             Tab::Navigator => IconName::Map,
             Tab::History => IconName::Clock,
             Tab::Histology => IconName::Microscope,
+            Tab::Metadata => IconName::Info,
         }
     }
 }

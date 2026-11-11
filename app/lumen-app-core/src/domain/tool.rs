@@ -8,6 +8,8 @@ pub enum Tool {
     /// Select and move annotations.
     #[default]
     Select,
+    /// Region select (the marquee): drag a box; every shape and cell inside it is selected.
+    Marquee,
     Hand,
     Zoom,
     Rect,
@@ -32,8 +34,9 @@ pub enum Tool {
 
 impl Tool {
     /// Tool bar order; `None` marks a separator.
-    pub const BAR: [Option<Tool>; 19] = [
+    pub const BAR: [Option<Tool>; 20] = [
         Some(Tool::Select),
+        Some(Tool::Marquee),
         Some(Tool::Hand),
         Some(Tool::Zoom),
         None,
@@ -57,6 +60,7 @@ impl Tool {
     pub fn name(self) -> &'static str {
         match self {
             Tool::Select => "Select",
+            Tool::Marquee => "Region select",
             Tool::Hand => "Hand",
             Tool::Zoom => "Zoom",
             Tool::Rect => "Rectangle",
@@ -78,9 +82,10 @@ impl Tool {
     pub fn key(self) -> &'static str {
         match self {
             Tool::Select => "v",
+            Tool::Marquee => "m",
             Tool::Hand => "h",
             Tool::Zoom => "z",
-            Tool::Rect => "m",
+            Tool::Rect => "u",
             Tool::Ellipse => "o",
             Tool::Polygon => "p",
             Tool::Lasso => "l",
@@ -102,6 +107,7 @@ impl Tool {
     pub fn icon(self) -> IconName {
         match self {
             Tool::Select => IconName::MousePointer2,
+            Tool::Marquee => IconName::SquareDashed,
             Tool::Hand => IconName::Hand,
             Tool::Zoom => IconName::ZoomIn,
             Tool::Rect => IconName::Square,
@@ -123,6 +129,7 @@ impl Tool {
     pub fn hint(self) -> &'static str {
         match self {
             Tool::Select => "Click an annotation to select it, drag to move it; Shift adds to the selection",
+            Tool::Marquee => "Drag a box: every shape and cell inside it is selected; Shift adds",
             Tool::Hand => "Drag to move the image (or hold Space with any tool)",
             Tool::Zoom => "Click to zoom in, Alt+click to zoom out",
             Tool::Rect => "Drag a rectangle",

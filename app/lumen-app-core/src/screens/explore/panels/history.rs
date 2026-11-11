@@ -1,5 +1,9 @@
 //! History (Affinity's): every change of the project, oldest first; a click goes back (or
 //! forward) to just after that change. Changes undone stay listed, dimmed, until a new change.
+//!
+//! Then the **session**: the analysis steps recorded (tissue, cells, classes, scores, exports)
+//! with their settings — `session.json` next to the project, which `lumen session run` runs
+//! again on other images without the app.
 
 use gpui_kit::component::v_flex;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -37,5 +41,26 @@ pub fn panel(store: &Entity<Store>, cx: &App) -> AnyElement {
     for (j, label) in undone.iter().enumerate() {
         list = list.child(row(n + j + 1, (*label).clone(), false, true));
     }
-    v_flex().id("history-panel").size_full().overflow_y_scroll().p(px(theme::SM)).child(list).into_any_element()
+    // The session: what the analysis did, replayable headless
+    let steps = &s.hist.session.steps;
+    let mut session = v_flex()
+        .gap(px(2.))
+        .pt(px(theme::LG))
+        .child(div().text_base().font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Session"))
+        .child(div().text_xs().text_color(color::text_muted()).child(if steps.is_empty() { "The analysis steps you run are recorded here.".to_string() } else { format!("{} step(s) · session.json · lumen session run session.json <images…>", steps.len()) }));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    for st in steps.iter().rev().take(200) {
+        let ago = now.saturating_sub(st.at);
+        let when = if ago < 60 { "now".to_string() } else if ago < 3600 { format!("{} min ago", ago / 60) } else if ago < 86_400 { format!("{} h ago", ago / 3600) } else { format!("{} d ago", ago / 86_400) };
+        session = session.child(
+            gpui_kit::component::h_flex()
+                .h(px(24.))
+                .px(px(theme::SM))
+                .gap(px(theme::SM))
+                .child(div().flex_1().min_w_0().truncate().text_sm().child(st.action.title()))
+                .child(div().flex_none().max_w(px(120.)).truncate().text_xs().text_color(color::text_muted()).child(st.image.clone()))
+                .child(div().flex_none().text_xs().text_color(color::text_muted()).child(when)),
+        );
+    }
+    v_flex().id("history-panel").size_full().overflow_y_scroll().p(px(theme::SM)).child(list).child(session).into_any_element()
 }

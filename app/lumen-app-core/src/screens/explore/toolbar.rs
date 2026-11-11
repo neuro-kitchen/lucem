@@ -4,7 +4,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::{h_flex, v_flex, Icon, Selectable as _, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{div, px, App, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _};
 
@@ -73,6 +73,42 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
     let hist = img.as_ref().and_then(|i| s.histograms.get(&i.id)).and_then(|h| h.get(t.threshold_channel).cloned());
     let mut bar = h_flex().id("options-bar").flex_none().h(px(theme::OPTIONS_BAR_H)).px(px(theme::MD)).gap(px(theme::SM)).items_center().bg(color::panel()).border_b_1().border_color(color::border());
     bar = bar.child(Icon::new(t.tool.icon()).small().text_color(color::text_muted())).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t.tool.name())).child(divider_v());
+    // Combine (Affinity's context toolbar): only while masks or classes are selected in Layers
+    let masks = s.selected_masks().len();
+    if masks > 0 {
+        use crate::data::store::MaskOperation;
+        let r = s.mask_radius;
+        let op = |id: &'static str, icon: IconName, tip: String, need: usize, o: MaskOperation| {
+            let st = store.clone();
+            Button::new(id).ghost().xsmall().icon(Icon::new(icon)).tooltip(tip).disabled(masks < need).on_click(move |_, _, cx| st.update(cx, |s, cx| s.apply_mask_operation(o.clone(), cx)))
+        };
+        bar = bar
+            .child(label("Combine"))
+            .child(op("ctx-union", IconName::SquaresUnite, "Union: on where any is on".into(), 2, MaskOperation::Union))
+            .child(op("ctx-intersect", IconName::SquaresIntersect, "Intersect: on where all are on".into(), 2, MaskOperation::Intersect))
+            .child(op("ctx-subtract", IconName::SquaresSubtract, "Subtract the others from the first".into(), 2, MaskOperation::Subtract))
+            .child(op("ctx-invert", IconName::Contrast, "Invert the first".into(), 1, MaskOperation::Invert))
+            .child(op("ctx-grow", IconName::Expand, format!("Grow the first by {r} px"), 1, MaskOperation::Op(lumen_pipeline::Op::Dilate { radius: r })))
+            .child(op("ctx-shrink", IconName::Shrink, format!("Shrink the first by {r} px"), 1, MaskOperation::Op(lumen_pipeline::Op::Erode { radius: r })))
+            .child(divider_v());
+    }
+    // Shapes (Affinity's Add, Subtract, Intersect, Xor): while two or more regions are selected
+    let regions = s.doc.active_image.as_ref().map_or(0, |img| s.doc.annotations_of(img).filter(|a| s.selection.contains(&a.id) && a.shape.is_region()).count());
+    if regions >= 2 {
+        use crate::domain::boolean::ShapeOp;
+        bar = bar.child(label("Shapes"));
+        for op in ShapeOp::ALL {
+            let st = store.clone();
+            let icon = match op {
+                ShapeOp::Add => IconName::SquaresUnite,
+                ShapeOp::Subtract => IconName::SquaresSubtract,
+                ShapeOp::Intersect => IconName::SquaresIntersect,
+                ShapeOp::Xor => IconName::SquaresExclude,
+            };
+            bar = bar.child(Button::new(SharedString::from(format!("ctx-shape-{}", op.title().to_lowercase()))).ghost().xsmall().icon(Icon::new(icon)).tooltip(op.hint()).on_click(move |_, _, cx| st.update(cx, |s, cx| s.combine_shapes(op, cx))));
+        }
+        bar = bar.child(divider_v());
+    }
 
     let class_picker = || {
         let st = store.clone();
@@ -211,6 +247,13 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
                 b.child(Button::new("options-delete").ghost().small().icon(Icon::new(IconName::Trash)).label("Delete").on_click(move |_, _, cx| st.update(cx, |s, cx| s.delete_selection(cx))))
             });
         }
+        Tool::Marquee => {
+            let objects = s.selected_objects.len();
+            let st = store.clone();
+            bar = bar.child(hint(if selected + objects == 0 { "Drag a box around shapes or cells; Shift adds".to_string() } else { format!("{selected} shape(s), {objects} object(s) selected") })).when(selected > 0, |b| {
+                b.child(Button::new("options-delete").ghost().small().icon(Icon::new(IconName::Trash)).label("Delete").on_click(move |_, _, cx| st.update(cx, |s, cx| s.delete_selection(cx))))
+            });
+        }
         Tool::Zoom => bar = bar.child(hint("Click to zoom in · Alt+click to zoom out")),
         Tool::Hand | Tool::Probe => bar = bar.child(hint(t.tool.hint())),
     }
@@ -250,8 +293,8 @@ pub fn overlay_toggles(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: 
             })
     };
     let cv = canvas.clone();
-    let opacity = crate::ui::widgets::scrub_label("ov-opacity", format!("{:.0} %", o.opacity * 100.0), move |d, _, cx| {
-        cv.update(cx, |c, cx| c.toggle_overlay(move |o| o.opacity = (o.opacity + d * 0.05).clamp(0.0, 1.0), cx))
+    let opacity = crate::ui::widgets::slider("ov-opacity", o.opacity, (0.0, 1.0), |v| format!("{:.0} %", v * 100.0), move |v, _, _, cx| {
+        cv.update(cx, |c, cx| c.toggle_overlay(move |o| o.opacity = v, cx))
     });
     h_flex()
         .flex_none()
@@ -259,15 +302,16 @@ pub fn overlay_toggles(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: 
         .items_center()
         .child(scope)
         .child(divider_v())
-        .child(toggle("ov-annotations", IconName::Shapes, "Annotations (A)", o.annotations, |o| o.annotations = !o.annotations))
+        .child(toggle("ov-annotations", IconName::Shapes, "Shapes (A)", o.annotations, |o| o.annotations = !o.annotations))
         .child(toggle("ov-fill", IconName::PaintBucket, "Fill regions (Shift+F)", o.fill, |o| o.fill = !o.fill))
         .child(toggle("ov-names", IconName::Type, "Names (Shift+N)", o.names, |o| o.names = !o.names))
         .child(toggle("ov-results", IconName::ChartColumn, "Pipeline results", o.results, |o| o.results = !o.results))
         .child(toggle("ov-crosshair", IconName::Crosshair, "Crosshair (3D cursor)", o.crosshair, |o| o.crosshair = !o.crosshair))
         .child(toggle("ov-rulers", IconName::Ruler, "Rulers (Ctrl+R)", o.rulers, |o| o.rulers = !o.rulers))
         .child(divider_v())
-        .child(div().flex_none().text_xs().text_color(color::text_muted()).pr(px(2.)).child("Opacity"))
-        .child(div().flex_none().w(px(44.)).text_xs().font_family("monospace").child(opacity))
+        .child(div().flex_none().text_xs().text_color(color::text_muted()).pl(px(theme::XS)).pr(px(theme::SM)).child("Opacity"))
+        // One line, fixed width: never wraps
+        .child(div().flex_none().w(px(150.)).child(opacity))
 }
 
 fn trim(v: f32) -> String {

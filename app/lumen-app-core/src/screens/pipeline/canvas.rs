@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     canvas, div, fill, img, point, px, size, App, ObjectFit, StyledImage as _, Bounds, Context, Entity, EventEmitter, FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
@@ -676,14 +676,15 @@ impl GraphCanvas {
             }))
             .child(b("zoom-in", IconName::ZoomIn, "Zoom in (Ctrl +)", |c, cx| c.zoom_by(1.25, None, cx)))
             .child(b("fit", IconName::Maximize, "Fit the graph (F)", |c, cx| c.fit(cx)))
+            // Toggles show whether they are on
             .child(b("grid", IconName::LayoutGrid, "Dot grid", |c, cx| {
                 c.show_grid = !c.show_grid;
                 cx.notify();
-            }))
+            }).selected(self.show_grid))
             .child(b("minimap", IconName::Map, "Minimap", |c, cx| {
                 c.show_minimap = !c.show_minimap;
                 cx.notify();
-            }))
+            }).selected(self.show_minimap))
     }
 
     fn minimap(&self, g: &GraphDoc, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -879,7 +880,7 @@ impl Render for GraphCanvas {
                 .child(div().text_sm().text_color(color::text_muted()).child("Drag a source and operations from the library on the left, or apply an operation in Explore."))
         });
         // Never over a pane too small to work around it (the Pipeline docked under the views)
-        let roomy = { let b = self.bounds.get().size; b.height.as_f32() > 3.0 * MAP_H && b.width.as_f32() > 3.0 * MAP_W };
+        let roomy = { let b = self.bounds.get().size; b.height.as_f32() > 2.0 * MAP_H && b.width.as_f32() > 2.0 * MAP_W };
         let minimap = if self.show_minimap && roomy { self.minimap(&g, cx).map(IntoElement::into_any_element) } else { None };
         if self.fit_pending && self.bounds.get().size.width.as_f32() > 10.0 {
             self.fit_pending = false;

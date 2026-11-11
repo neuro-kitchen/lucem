@@ -446,7 +446,11 @@ impl ImageCanvas {
         CanvasStatus {
             position,
             values,
-            level: Some(format!("level {l}/{} · {}×", v.pyramid.levels.len() - 1, trim(v.pyramid.levels[l].downsample))),
+            // Plain: the scale shown ("1:4"), not the pyramid's internals
+            level: Some({
+                let ds = v.pyramid.levels[l].downsample;
+                if (ds - ds.round()).abs() < 0.05 { format!("1:{}", ds.round() as i64) } else { format!("1:{ds:.1}") }
+            }),
             zoom: self.zoom,
             cached_mb: v.service.cached_bytes() / (1024 * 1024),
         }
@@ -627,8 +631,11 @@ impl ImageCanvas {
         };
         let s = self.store.read(cx);
         let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
-        let cells: Vec<lumen_hist::HistObject> = if s.hist.show && ov.annotations { s.hist.cells.get(&v.image).cloned().unwrap_or_default() } else { Vec::new() };
-        let key = format!("{}/{}/{}", v.image, s.hist.rev, ov.opacity);
+        let cells: Vec<lumen_hist::HistObject> = if s.hist.show && ov.annotations { s.hist.cells.get(&v.image).into_iter().chain(s.hist.tiles.get(&v.image)).flatten().cloned().collect() } else { Vec::new() };
+        let key = format!("{}/{}/{}/{}", v.image, s.hist.rev, ov.opacity, s.selected_objects.join(","));
+        // Selected objects, by their index in the list drawn (cells, then tiles)
+        let n_cells = s.hist.cells.get(&v.image).map_or(0, Vec::len);
+        let selected: std::collections::HashSet<usize> = cells.iter().enumerate().filter(|(i, o)| s.selected_objects.contains(&format!("{}{}", if *i < n_cells { "c" } else { "t" }, o.id))).map(|(i, _)| i).collect();
         let (iw, ih) = (v.pyramid.width() as f64, v.pyramid.height() as f64);
         let view = self.visible();
         let ds_view = 1.0 / self.zoom.max(1e-9);
@@ -659,7 +666,7 @@ impl ImageCanvas {
         }
         let color = s.hist_color();
         let alpha = ov.opacity;
-        let work = cx.background_spawn(async move { crate::data::hist::cells_raster(&cells, &color, rect, ds, alpha) });
+        let work = cx.background_spawn(async move { crate::data::hist::cells_raster(&cells, &color, rect, ds, alpha, &selected) });
         self.cells_task = Some(cx.spawn(async move |this, cx| {
             let image = work.await;
             let _ = this.update(cx, |c, cx| {
@@ -876,6 +883,14 @@ impl ImageCanvas {
         let active = self.image_id(s);
         let pyramid = active.as_ref().and_then(|id| s.pyramids.get(id).cloned());
         let mut docs: Vec<ChannelDoc> = active.as_ref().and_then(|id| s.doc.image(id)).map(|i| i.channels.clone()).unwrap_or_default();
+        // A channel shown processed is drawn by its result, not raw (non-destructive processing)
+        if let Some(id) = &active {
+            for c in s.processed_channels(id).keys() {
+                if let Some(d) = docs.get_mut(*c) {
+                    d.visible = false;
+                }
+            }
+        }
         // A cell of the Channels view draws its one channel
         if let Some(only) = self.channel {
             for (i, d) in docs.iter_mut().enumerate() {
@@ -1166,14 +1181,27 @@ impl ImageCanvas {
                         self.gesture = Some(Gesture::Move { start: p, now: p, moved: false });
                     }
                     None => {
-                        if !e.modifiers.shift {
-                            self.store.update(cx, |st, cx| st.select([], cx));
+                        // A detected cell (or tile) under the pointer: select it
+                        let object = self.store.read(cx).object_at(p);
+                        match object {
+                            Some(key) => self.store.update(cx, |st, cx| {
+                                if !e.modifiers.shift {
+                                    st.select([], cx);
+                                }
+                                st.select_object(key, e.modifiers.shift, cx)
+                            }),
+                            None if !e.modifiers.shift => self.store.update(cx, |st, cx| {
+                                st.select([], cx);
+                                st.selected_objects.clear();
+                                cx.notify();
+                            }),
+                            None => {}
                         }
                         self.gesture = Some(Gesture::Pan { mouse: local, center: self.center });
                     }
                 }
             }
-            Tool::Rect | Tool::Ellipse | Tool::Ruler | Tool::Segment => self.gesture = Some(Gesture::Drag { tool, a: p, b: p }),
+            Tool::Rect | Tool::Ellipse | Tool::Ruler | Tool::Segment | Tool::Marquee => self.gesture = Some(Gesture::Drag { tool, a: p, b: p }),
             Tool::Lasso => self.gesture = Some(Gesture::Path { tool, points: vec![p], radius: 0.0 }),
             Tool::Brush | Tool::Eraser => {
                 let radius = self.brush_radius(cx);
@@ -1280,7 +1308,11 @@ impl ImageCanvas {
             Gesture::Drag { tool, a, b } => {
                 let (x0, y0, x1, y1) = (a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1]));
                 let tiny = (x1 - x0) * self.zoom < 3.0 && (y1 - y0) * self.zoom < 3.0;
-                if !tiny {
+                if tool == Tool::Marquee {
+                    // A box selects what is inside it; a click (no box) clears the selection
+                    let add = e.modifiers.shift;
+                    self.store.update(cx, |s, cx| s.select_in_rect(if tiny { None } else { Some([x0, y0, x1, y1]) }, add, cx));
+                } else if !tiny {
                     let shape = match tool {
                         Tool::Rect => Shape::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 },
                         Tool::Ellipse => Shape::Ellipse { cx: (x0 + x1) / 2.0, cy: (y0 + y1) / 2.0, rx: (x1 - x0) / 2.0, ry: (y1 - y0) / 2.0 },
@@ -1482,11 +1514,11 @@ impl ImageCanvas {
             Some(Gesture::Drag { tool, a, b }) => {
                 let (x0, y0, x1, y1) = (a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1]));
                 let shape = match tool {
-                    Tool::Rect | Tool::Segment => Shape::Rect { x: x0, y: y0, w: (x1 - x0).max(1e-6), h: (y1 - y0).max(1e-6) },
+                    Tool::Rect | Tool::Segment | Tool::Marquee => Shape::Rect { x: x0, y: y0, w: (x1 - x0).max(1e-6), h: (y1 - y0).max(1e-6) },
                     Tool::Ellipse => Shape::Ellipse { cx: (x0 + x1) / 2.0, cy: (y0 + y1) / 2.0, rx: (x1 - x0).max(1e-6) / 2.0, ry: (y1 - y0).max(1e-6) / 2.0 },
                     _ => Shape::Line { x0: a[0], y0: a[1], x1: b[0], y1: b[1] },
                 };
-                out.push(stroke_of(&shape, if *tool == Tool::Ruler { gpui_kit::white() } else { live }, true, zoom, |p| self.to_screen(p)));
+                out.push(stroke_of(&shape, if matches!(tool, Tool::Ruler | Tool::Marquee) { gpui_kit::white() } else { live }, true, zoom, |p| self.to_screen(p)));
             }
             // Brush and eraser strokes in progress are the live raster
             Some(Gesture::Path { tool: Tool::Lasso, points, .. }) => {
@@ -1628,7 +1660,9 @@ fn stroke_of(shape: &Shape, color: Hsla, selected: bool, _zoom: f32, to_screen: 
         Shape::Line { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: false },
         // A selected stroke: its path (the paint itself is a raster)
         Shape::Stroke { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: false },
-        _ => Stroke { points, closed: true, fill: Some(Fill::Area(if selected { 0.22 } else { 0.12 })), width: if selected { 2.0 } else { 1.5 }, color, selected, dot: false },
+        // Faint fills (≤ 15 %): the image under a region stays readable; the selection is
+        // its thicker outline and handles (`simultaneous-contrast`)
+        _ => Stroke { points, closed: true, fill: Some(Fill::Area(if selected { 0.14 } else { 0.10 })), width: if selected { 2.0 } else { 1.5 }, color, selected, dot: false },
     }
 }
 
@@ -1727,6 +1761,15 @@ impl Render for ImageCanvas {
                     && let Some(l) = &r.layer {
                         overlays.push((r.rect, l.clone()));
                     }
+            }
+        }
+        // Histology: class map, density map, then cells and tiles
+        if let Some(img) = image.as_ref().filter(|_| s.hist.show_maps && tool.show_results) {
+            if let Some(m) = s.hist.class_maps.get(img) {
+                overlays.push((m.rect, m.image.clone()));
+            }
+            if let Some(d) = s.hist.density_maps.get(img) {
+                overlays.push((d.rect, d.image.clone()));
             }
         }
         if let Some(p) = &self.cells

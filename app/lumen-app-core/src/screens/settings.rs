@@ -11,7 +11,8 @@ use gpui_kit::{div, px, AnyElement, App, Context, Entity, FontWeight, Interactiv
 use crate::data::prefs::Prefs;
 use crate::data::store::Store;
 use crate::ui::theme::{self, color, ACCENTS, PASTEBOARDS};
-use crate::ui::widgets::stepper;
+use crate::ui::widgets::{stepper, MenuSelect};
+use gpui_kit::prelude::FluentBuilder as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -79,13 +80,15 @@ impl SettingsView {
             .child(
                 v_flex()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(180.))
                     .gap(px(2.))
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
                     .child(div().text_xs().text_color(color::text_muted()).child(what.to_string()))
-                    .child(div().text_xs().text_color(color::text_disabled()).child(format!("Default: {default}"))),
+                    // Only a real default is worth a line
+                    .when(!default.is_empty() && default != "—", |d| d.child(div().text_xs().text_color(color::text_disabled()).child(format!("Default: {default}")))),
             )
-            .child(div().flex_none().child(control))
+            // Wide controls (a row of choices) wrap instead of squeezing the text
+            .child(div().flex_shrink_0().max_w(px(420.)).child(control))
     }
 
     /// Mutually exclusive choices as one row of buttons.
@@ -152,32 +155,51 @@ impl SettingsView {
     fn compute(&self, p: &Prefs, cx: &App) -> AnyElement {
         let s = self.store.read(cx);
         let targets: Vec<lumen_core::ComputeTarget> = lumen_core::ComputeTarget::available();
-        let mut names: Vec<String> = vec!["Automatic".into()];
-        names.extend(targets.iter().map(|t| match t.name() {
-            "wgpu" => "wgpu (Vulkan, Metal, DX12)".to_string(),
-            "cuda" => "CUDA".to_string(),
-            "cpu" => "CPU".to_string(),
-            "hip" => "HIP (ROCm)".to_string(),
-            other => other.to_string(),
+        // A dropdown with short names; a runtime that cannot run here says why in its entry
+        let mut names: Vec<SharedString> = vec!["Automatic".into()];
+        names.extend(targets.iter().map(|t| {
+            let name = match t.name() {
+                "wgpu" => "GPU · Vulkan / Metal",
+                "cuda" => "GPU · CUDA",
+                "cpu" => "CPU",
+                "hip" => "GPU · ROCm",
+                other => other,
+            };
+            SharedString::from(match t.unusable_reason() {
+                Some(why) => format!("{name} ({why})"),
+                None => name.to_string(),
+            })
         }));
         let current = p.runtime.as_deref().and_then(|r| targets.iter().position(|t| t.name() == r)).map_or(0, |i| i + 1);
-        let options: Vec<&str> = names.iter().map(String::as_str).collect();
         let (st, keys) = (self.store.clone(), targets.iter().map(|t| t.name().to_string()).collect::<Vec<_>>());
-        let pick = Self::choices_owned("set-runtime", &options, current, move |i, _, cx| {
+        let pick = MenuSelect::new("set-runtime", names, Some(current), move |i, _, cx| {
             let r = if i == 0 { None } else { keys.get(i - 1).cloned() };
             st.update(cx, |s, cx| s.set_runtime(r, cx));
         });
-        let device = match (&s.device, s.prefs.runtime.as_deref()) {
-            (Some(d), _) => d.label.clone(),
-            (None, _) => "Not started (it starts when a result or the 3D view needs it)".to_string(),
+        // The chosen one cannot run here: said right under it (`proximity`)
+        let chosen_problem = p.runtime.as_deref().and_then(|r| lumen_core::ComputeTarget::parse(r).ok()).and_then(|t| t.unusable_reason().map(|why| format!("{} cannot run here: {why}. The first runtime that runs is used instead.", t.name().to_uppercase())));
+        // The device as a status: a dot and words (the dot never alone)
+        let (dot, words) = match (&s.device, s.prefs.runtime.as_deref()) {
+            (Some(d), _) => (color::success(), d.label.clone()),
+            (None, _) => (color::text_muted(), "Idle · starts when a result or the 3D view needs it".to_string()),
         };
         let st = self.store.clone();
-        let test = Button::new("set-test-device").outline().small().icon(Icon::new(IconName::Play)).label("Test").on_click(move |_, _, cx| st.update(cx, |s, cx| s.test_device(cx)));
+        let st2 = self.store.clone();
+        let test = h_flex()
+            .gap(px(theme::SM))
+            .child(Button::new("set-test-device").outline().small().icon(Icon::new(IconName::Play)).label("Test").on_click(move |_, _, cx| st.update(cx, |s, cx| s.test_device(cx))))
+            .child(Button::new("set-restart-device").ghost().small().icon(Icon::new(IconName::RotateCcw)).label("Restart").tooltip("Close the device and open it again (after it stopped responding)").on_click(move |_, _, cx| st2.update(cx, |s, cx| {
+                s.drop_device(cx);
+                s.ensure_device(cx);
+            })));
         v_flex()
-            .child(Self::row("Backend", "Where images are computed. Switching takes effect at once: results are computed again on the new device.", "Automatic (the first that starts: GPU first)", pick))
-            .child(Self::row("Device", &device, "—", div()))
-            .child(Self::row("Test", "A blur on the device, read back and checked (a wrong or all-zero result is reported, never trusted).", "—", test))
-            .child(div().pt(px(theme::SM)).text_xs().text_color(color::text_muted()).child(format!("Compiled in: {}. The command line and plugins also read LUMEN_RUNTIME.", targets.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))))
+            .child(
+                v_flex()
+                    .child(Self::row("Backend", "Where images are computed. Switching applies at once: results are computed again.", "Automatic", pick))
+                    .children(chosen_problem.map(|t| div().pb(px(theme::SM)).text_xs().text_color(color::warning()).child(t))),
+            )
+            .child(Self::row("Device", "", "", h_flex().gap(px(theme::SM)).child(div().size(px(8.)).rounded_full().bg(dot)).child(div().text_sm().child(words))))
+            .child(Self::row("Check", "Run a quick check on the device.", "", test))
             .into_any_element()
     }
 
@@ -221,6 +243,14 @@ impl SettingsView {
                     Button::new(SharedString::from(format!("set-ml-runtime-{pi}"))).small().primary().icon(Icon::new(IconName::Download)).label("Install runtime").disabled(busy.is_some()).on_click(move |_, _, cx| st.update(cx, |s, cx| s.install_model(program.clone(), lumen_ml::RUNTIME_ID.to_string(), cx))),
                 ));
             }
+            if let Some(g) = &plugin.runtime.gpu {
+                let mut line = h_flex().gap(px(theme::SM)).child(div().flex_1().text_xs().text_color(if g.installed && !g.usable { color::warning() } else { color::text_muted() }).child(g.detail.clone()));
+                if !g.installed {
+                    let (st, program) = (self.store.clone(), plugin.program.clone());
+                    line = line.child(Button::new(SharedString::from(format!("set-ml-gpu-{pi}"))).small().outline().icon(Icon::new(IconName::Download)).label(format!("Install GPU runtime ({:.0} MB)", g.bytes as f64 / 1e6)).disabled(busy.is_some()).on_click(move |_, _, cx| st.update(cx, |s, cx| s.install_model(program.clone(), lumen_ml::RUNTIME_CUDA_ID.to_string(), cx))));
+                }
+                card = card.child(line);
+            }
             for (mi, m) in plugin.models.iter().enumerate() {
                 let size = if m.download_bytes() > 0 { format!(" · {:.0} MB", m.download_bytes() as f64 / 1e6) } else { String::new() };
                 let (st, program, id) = (self.store.clone(), plugin.program.clone(), m.id.clone());
@@ -247,13 +277,6 @@ impl SettingsView {
     }
 
     /// [`Self::choices`] for labels made at run time.
-    fn choices_owned(id: &'static str, options: &[&str], current: usize, on_pick: impl Fn(usize, &mut Window, &mut App) + 'static) -> impl IntoElement {
-        let on_pick = Rc::new(on_pick);
-        h_flex().flex_wrap().gap(px(2.)).p(px(2.)).rounded(px(6.)).bg(color::control()).children(options.iter().enumerate().map(|(i, o)| {
-            let f = on_pick.clone();
-            Button::new(SharedString::from(format!("{id}-{i}"))).ghost().small().label(o.to_string()).selected(i == current).on_click(move |_, w, cx| f(i, w, cx))
-        }))
-    }
 
     fn performance(&self, p: &Prefs) -> AnyElement {
         let st = self.store.clone();
@@ -283,6 +306,12 @@ impl SettingsView {
         v_flex()
             .child(Self::row("Lumen", "GPU workstation for histology and radiology images.", env!("CARGO_PKG_VERSION"), div()))
             .child(Self::row("Settings file", &path, "per user", div()))
+            .child(Self::row(
+                "Compute runtimes",
+                &format!("Compiled in: {}. The command line and plugins also read LUMEN_RUNTIME.", lumen_core::ComputeTarget::available().iter().map(|t| t.name()).collect::<Vec<_>>().join(", ")),
+                "",
+                div(),
+            ))
             .child(Self::row("Reset", "Every setting back to its default (recent files stay).", "—", reset))
             .into_any_element()
     }
@@ -291,11 +320,24 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let prefs = self.store.read(cx).prefs.clone();
+        // Left-aligned, icon then name (`jakobs-law`, `text-alignment`)
         let nav = v_flex().flex_none().w(px(190.)).h_full().p(px(theme::SM)).gap(px(2.)).bg(color::chrome()).border_r_1().border_color(color::border()).children(Section::ALL.into_iter().map(|sec| {
-            Button::new(SharedString::from(format!("settings-{}", sec.title()))).ghost().small().w_full().icon(Icon::new(sec.icon())).label(sec.title()).selected(sec == self.section).on_click(cx.listener(move |this, _, _, cx| {
-                this.section = sec;
-                cx.notify();
-            }))
+            let on = sec == self.section;
+            h_flex()
+                .id(SharedString::from(format!("settings-{}", sec.title())))
+                .h(px(30.))
+                .px(px(theme::SM))
+                .gap(px(theme::SM))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(color::control()))
+                .when(!on, |d| d.hover(|d| d.bg(color::hover())))
+                .child(Icon::new(sec.icon()).small().text_color(if on { color::accent_hover() } else { color::text_muted() }))
+                .child(div().text_sm().child(sec.title()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.section = sec;
+                    cx.notify();
+                }))
         }));
         let body = match self.section {
             Section::Appearance => self.appearance(&prefs),

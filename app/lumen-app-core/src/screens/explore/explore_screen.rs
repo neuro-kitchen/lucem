@@ -13,11 +13,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::dock::{DockArea, DockEvent, DockLayout, DockPlacement, InsertTarget, Panel as BasePanel, PanelEvent, PanelId, PanelInfo, PanelState};
+use gpui_kit::base::dock::{DockArea, DockLayout, DockPlacement, InsertTarget, Panel as BasePanel, PanelEvent, PanelId, PanelInfo, PanelState};
 use gpui_kit::base::Placement;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{panel_handle, DockSkin, Panel};
-use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, AnyElement, App, AppContext as _, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
@@ -33,12 +33,11 @@ use super::canvas::ImageCanvas;
 use super::panels::display::DisplayPanel;
 use super::panels::navigator::Navigator;
 use super::panels::notes::NotesPanel;
-use super::panels::{annotations, histology, history, layers, results, selection, Tab};
+use super::panels::{annotations, histology, history, layers, metadata, results, selection, Tab};
 use super::toolbar::{options_bar, overlay_toggles, tool_bar};
 use super::view_panel::{PipelinePanel, ViewPanel};
 
 /// Widths of the side docks and the Pipeline's height when first shown (px).
-const LEFT_W: f32 = 280.;
 const RIGHT_W: f32 = 300.;
 const PIPELINE_H: f32 = 320.;
 
@@ -68,73 +67,30 @@ pub struct ExploreView {
     dialog: bool,
     dialog_focus: FocusHandle,
     dialog_cursor: usize,
-    /// Bumped on every dock layout change; the layout is saved once it stops changing.
-    layout_gen: u64,
-    /// The panels of the first group of each side: their tab bar holds the side's hide button.
-    edge_tabs: Vec<(Tab, DockPlacement)>,
+    /// The side panel shown beside the right rail (`None`: hidden), the last one shown, and its
+    /// width (dragged).
+    side: Option<Tab>,
+    last_side: Tab,
+    side_w: f32,
     _subs: Vec<Subscription>,
 }
 
-/// One side dock as saved: its tree and its width.
-fn saved_side(sides: &serde_json::Value, key: &str) -> Option<(PanelState, gpui_kit::Pixels)> {
-    let d = sides.get(key)?;
-    Some((serde_json::from_value(d.get("panel")?.clone()).ok()?, serde_json::from_value(d.get("size")?.clone()).ok()?))
-}
+/// The right rail's panels, top to bottom (dsp-kitchen's rail: one icon per panel), and where a
+/// divider goes (after the first three: what is used most).
+const RAIL: [Tab; 6] = [Tab::Layers, Tab::Histology, Tab::Metadata, Tab::Selection, Tab::Notes, Tab::History];
+const RAIL_SPLIT: usize = 3;
+/// The Navigator's height at the bottom of the Layers panel (open).
+const NAVIGATOR_H: f32 = 170.;
+const RAIL_W: f32 = 36.;
 
-/// The studio panel a saved panel state names (each tab once).
-fn studio_of(state: &PanelState, pool: &[Entity<StudioPanel>], used: &mut Vec<Tab>, cx: &App) -> Option<Entity<StudioPanel>> {
-    let PanelInfo::Panel(v) = &state.info else { return None };
-    let tab = Tab::from_key(v.get("tab")?.as_str()?)?;
-    if used.contains(&tab) {
-        return None;
-    }
-    let p = pool.iter().find(|p| p.read(cx).tab == tab)?.clone();
-    used.push(tab);
-    Some(p)
-}
+/// Dragging the side panel's inner edge.
+#[derive(Clone)]
+struct SideResize;
 
-/// A side dock's layout rebuilt from its saved tree, with the studio panels of `pool`.
-fn side_from_state(state: &PanelState, pool: &[Entity<StudioPanel>], used: &mut Vec<Tab>, cx: &App) -> Option<DockLayout> {
-    match &state.info {
-        PanelInfo::Stack { sizes, axis } => {
-            let mut l = if *axis == 0 { DockLayout::h_split() } else { DockLayout::v_split() };
-            let mut any = false;
-            for (i, c) in state.children.iter().enumerate() {
-                if let Some(child) = side_from_state(c, pool, used, cx) {
-                    l = l.child(child, sizes.get(i).copied());
-                    any = true;
-                }
-            }
-            any.then_some(l)
-        }
-        PanelInfo::Tabs { active_index } => {
-            let mut l = DockLayout::tabs();
-            let mut n = 0;
-            for c in &state.children {
-                if let Some(p) = studio_of(c, pool, used, cx) {
-                    l = l.panel_view(panel_handle(p), cx);
-                    n += 1;
-                }
-            }
-            (n > 0).then(|| l.active_index((*active_index).min(n - 1)))
-        }
-        PanelInfo::Panel(_) => studio_of(state, pool, used, cx).map(|p| DockLayout::tabs().panel_view(panel_handle(p), cx)),
+impl Render for SideResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
     }
-}
-
-/// The side docks as they come: Layers on the left, the studio groups on the right.
-fn default_sides(d: &mut DockArea, pool: &[Entity<StudioPanel>], window: &mut Window, cx: &mut Context<DockArea>) {
-    let find = |t: Tab, cx: &App| pool.iter().find(|p| p.read(cx).tab == t).cloned();
-    if let Some(layers) = find(Tab::Layers, cx) {
-        d.set_dock(DockPlacement::Left, DockLayout::tabs().panel_view(panel_handle(layers), cx), window, cx);
-    }
-    d.set_dock_size(DockPlacement::Left, px(LEFT_W), window, cx);
-    let groups = Tab::RIGHT_GROUPS.iter().zip(Tab::RIGHT_SIZES).fold(DockLayout::v_split(), |l, (g, size)| {
-        let tabs = g.iter().filter_map(|t| find(*t, cx)).fold(DockLayout::tabs(), |t, p| t.panel_view(panel_handle(p), cx));
-        l.child(tabs, size.map(px))
-    });
-    d.set_dock(DockPlacement::Right, groups, window, cx);
-    d.set_dock_size(DockPlacement::Right, px(RIGHT_W), window, cx);
 }
 
 impl ExploreView {
@@ -161,39 +117,12 @@ impl ExploreView {
         });
         let pipeline = cx.new(|cx| PipelinePanel::new(pipeline, me.clone(), cx));
         let studio_panel = |tab: Tab, cx: &mut Context<Self>| cx.new(|cx| StudioPanel::new(tab, store.clone(), me.clone(), cx));
-        let studio: Vec<Entity<StudioPanel>> = std::iter::once(Tab::Layers).chain(Tab::RIGHT_GROUPS.iter().flat_map(|g| g.iter().copied())).map(|t| studio_panel(t, cx)).collect();
+        let studio: Vec<Entity<StudioPanel>> = RAIL.iter().copied().map(|t| studio_panel(t, cx)).collect();
         let prefs = store.read(cx).prefs.clone();
         dock.update(cx, |d, cx| {
             d.set_center(DockLayout::tabs().panel_view(panel_handle(first.clone()), cx), window, cx);
-            // The sides as the user left them, when the saved arrangement still has every panel
-            let saved = prefs.dock_sides.as_ref().and_then(|v| Some((saved_side(v, "left")?, saved_side(v, "right")?)));
-            let restored = saved.and_then(|((left, lw), (right, rw))| {
-                let mut used = Vec::new();
-                let l = side_from_state(&left, &studio, &mut used, cx)?;
-                let r = side_from_state(&right, &studio, &mut used, cx)?;
-                (used.len() == studio.len()).then_some((l, lw, r, rw))
-            });
-            match restored {
-                Some((l, lw, r, rw)) => {
-                    d.set_dock(DockPlacement::Left, l, window, cx);
-                    d.set_dock_size(DockPlacement::Left, lw, window, cx);
-                    d.set_dock(DockPlacement::Right, r, window, cx);
-                    d.set_dock_size(DockPlacement::Right, rw, window, cx);
-                }
-                None => default_sides(d, &studio, window, cx),
-            }
-            for (side, open) in [(DockPlacement::Left, prefs.left_open), (DockPlacement::Right, prefs.right_open)] {
-                if d.is_dock_open(side) != open {
-                    d.toggle_dock(side, window, cx);
-                }
-            }
         });
         let subs = vec![
-            cx.subscribe(&dock, |this: &mut Self, _, e: &DockEvent, cx| {
-                if matches!(e, DockEvent::LayoutChanged) {
-                    this.layout_changed(cx);
-                }
-            }),
             cx.subscribe_in(&store, window, |this: &mut Self, _, e: &AppEvent, window, cx| {
             if let AppEvent::View(req) = e {
                 this.on_request(*req, window, cx);
@@ -224,11 +153,11 @@ impl ExploreView {
             dialog: false,
             dialog_focus: cx.focus_handle(),
             dialog_cursor: 0,
-            layout_gen: 0,
-            edge_tabs: Vec::new(),
+            side: prefs.right_open.then(|| prefs.right_tab.as_deref().and_then(Tab::from_key).filter(|t| RAIL.contains(t)).unwrap_or(Tab::Layers)),
+            last_side: prefs.right_tab.as_deref().and_then(Tab::from_key).filter(|t| RAIL.contains(t)).unwrap_or(Tab::Layers),
+            side_w: RIGHT_W,
             _subs: subs,
         };
-        this.refresh_edge_tabs(cx);
         if prefs.pipeline_dock {
             this.set_pipeline(true, window, cx);
         }
@@ -250,86 +179,18 @@ impl ExploreView {
                 self.set_pipeline(on, window, cx);
             }
             ViewRequest::ToggleLink => self.store.update(cx, |s, cx| s.update_prefs(|p| p.link_views = !p.link_views, cx)),
-            ViewRequest::ToggleLeft => self.toggle_side(DockPlacement::Left, window, cx),
-            ViewRequest::ToggleRight => self.toggle_side(DockPlacement::Right, window, cx),
+            ViewRequest::ToggleLeft => self.show_side(Tab::Layers, cx),
+            ViewRequest::ToggleRight | ViewRequest::ToggleSides => {
+                let t = self.last_side;
+                self.show_side(t, cx)
+            }
             ViewRequest::ResetLayout => {
-                let studio = self.studio.clone();
-                self.dock.update(cx, |d, cx| default_sides(d, &studio, window, cx));
+                self.side_w = RIGHT_W;
+                self.side = None;
+                self.show_side(Tab::Layers, cx);
                 self.store.update(cx, |s, cx| s.update_prefs(|p| p.dock_sides = None, cx));
             }
-            ViewRequest::ToggleSides => {
-                let d = self.dock.read(cx);
-                let any = d.is_dock_open(DockPlacement::Left) || d.is_dock_open(DockPlacement::Right);
-                for side in [DockPlacement::Left, DockPlacement::Right] {
-                    if self.dock.read(cx).is_dock_open(side) == any {
-                        self.toggle_side(side, window, cx);
-                    }
-                }
-            }
         }
-    }
-
-    /// The dock changed: save its sides once it has stopped changing for a moment (a divider
-    /// drag changes it on every frame).
-    fn layout_changed(&mut self, cx: &mut Context<Self>) {
-        self.refresh_edge_tabs(cx);
-        self.layout_gen += 1;
-        let stamp = self.layout_gen;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(600)).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.layout_gen == stamp {
-                    this.save_layout(cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Which panels carry their side's hide button: those of the first group of each side.
-    fn refresh_edge_tabs(&mut self, cx: &mut Context<Self>) {
-        fn first_group(state: &PanelState) -> Vec<Tab> {
-            let tab = |p: &PanelState| match &p.info {
-                PanelInfo::Panel(v) => v.get("tab").and_then(|t| t.as_str()).and_then(Tab::from_key),
-                _ => None,
-            };
-            match &state.info {
-                PanelInfo::Stack { .. } => state.children.first().map(first_group).unwrap_or_default(),
-                PanelInfo::Tabs { .. } => state.children.iter().filter_map(tab).collect(),
-                PanelInfo::Panel(_) => tab(state).into_iter().collect(),
-            }
-        }
-        let state = self.dock.read(cx).dump(cx);
-        let side = |d: &Option<gpui_kit::base::dock::DockState>| d.as_ref().and_then(|d| serde_json::to_value(d).ok()).and_then(|v| serde_json::from_value::<PanelState>(v.get("panel")?.clone()).ok());
-        let mut edge = Vec::new();
-        for (d, placement) in [(&state.left_dock, DockPlacement::Left), (&state.right_dock, DockPlacement::Right)] {
-            if let Some(p) = side(d) {
-                edge.extend(first_group(&p).into_iter().map(|t| (t, placement)));
-            }
-        }
-        if edge != self.edge_tabs {
-            self.edge_tabs = edge;
-            for p in &self.studio {
-                p.update(cx, |_, cx| cx.notify());
-            }
-        }
-    }
-
-    /// The side whose hide button the panel `tab` shows, if it is in the first group of a side.
-    pub fn edge_of(&self, tab: Tab) -> Option<DockPlacement> {
-        self.edge_tabs.iter().find(|(t, _)| *t == tab).map(|(_, p)| *p)
-    }
-
-    fn save_layout(&mut self, cx: &mut Context<Self>) {
-        let state = self.dock.read(cx).dump(cx);
-        let side = |d: &Option<gpui_kit::base::dock::DockState>| d.as_ref().and_then(|d| serde_json::to_value(d).ok());
-        let (Some(left), Some(right)) = (side(&state.left_dock), side(&state.right_dock)) else { return };
-        let v = serde_json::json!({ "left": left, "right": right });
-        self.store.update(cx, |s, cx| {
-            if s.prefs.dock_sides.as_ref() != Some(&v) {
-                s.update_prefs(|p| p.dock_sides = Some(v), cx);
-            }
-        });
     }
 
     /// The focused view (the first when none is).
@@ -491,17 +352,16 @@ impl ExploreView {
         }
     }
 
-    /// Shows or hides a side dock (and remembers it).
-    fn toggle_side(&mut self, side: DockPlacement, window: &mut Window, cx: &mut Context<Self>) {
-        let open = self.dock.update(cx, |d, cx| {
-            d.toggle_dock(side, window, cx);
-            d.is_dock_open(side)
-        });
+    /// Shows `tab` beside the right rail, or hides it when it is the one shown (remembered).
+    pub fn show_side(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.side = if self.side == Some(tab) { None } else { Some(tab) };
+        self.last_side = tab;
+        let open = self.side.is_some();
         self.store.update(cx, |s, cx| {
             s.update_prefs(
-                |p| match side {
-                    DockPlacement::Left => p.left_open = open,
-                    _ => p.right_open = open,
+                |p| {
+                    p.right_tab = Some(tab.key().to_string());
+                    p.right_open = open;
                 },
                 cx,
             )
@@ -512,7 +372,36 @@ impl ExploreView {
     /// What a studio panel shows.
     fn tab_body(&self, tab: Tab, cx: &App) -> AnyElement {
         match tab {
-            Tab::Layers => layers::panel(&self.store, &self.canvas, cx),
+            Tab::Layers => {
+                // Editor of the selected layer, the tree, then the Navigator (folds)
+                let open = !self.store.read(cx).layers_collapsed.contains("navigator");
+                let st = self.store.clone();
+                v_flex()
+                    .size_full()
+                    .child(div().id("layers-editor-scroll").flex_none().max_h(gpui_kit::relative(0.55)).overflow_y_scroll().border_b_1().border_color(color::border()).child(self.display.clone()))
+                    .child(div().flex_1().min_h_0().child(layers::panel(&self.store, &self.canvas, cx)))
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .border_t_1()
+                            .border_color(color::border())
+                            .child(
+                                h_flex()
+                                    .id("navigator-fold")
+                                    .h(px(28.))
+                                    .px(px(theme::SM))
+                                    .gap(px(theme::XS))
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(color::control()))
+                                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small())
+                                    .child(Icon::new(IconName::Map).small().text_color(color::text_muted()))
+                                    .child(div().text_sm().child("Navigator"))
+                                    .on_click(move |_, _, cx| st.update(cx, |s, cx| s.toggle_layer_open("navigator", cx))),
+                            )
+                            .when(open, |d| d.child(div().h(px(NAVIGATOR_H)).child(self.navigator.clone()))),
+                    )
+                    .into_any_element()
+            }
             Tab::Display => self.display.clone().into_any_element(),
             Tab::Annotations => annotations::panel(&self.store, &self.canvas, cx),
             Tab::Results => results::panel(&self.store, cx),
@@ -521,6 +410,7 @@ impl ExploreView {
             Tab::Navigator => self.navigator.clone().into_any_element(),
             Tab::History => history::panel(&self.store, cx),
             Tab::Histology => histology::panel(&self.store, cx),
+            Tab::Metadata => metadata::panel(&self.store, cx),
         }
     }
 
@@ -686,32 +576,48 @@ impl Render for ExploreView {
                 .into_any_element();
         }
         let toggles = overlay_toggles(&self.store, &self.canvas, cx).into_any_element();
-        // A hidden side leaves a slim strip at its edge with the button that shows it again
-        let rail = |side: DockPlacement, cx: &mut Context<Self>| {
-            let (icon, tip, id) = match side {
-                DockPlacement::Left => (IconName::PanelLeftOpen, "Show Layers (Ctrl+[)", "rail-left"),
-                _ => (IconName::PanelRightOpen, "Show the studio panels (Ctrl+])", "rail-right"),
+        // The right rail (dsp-kitchen's): an icon per panel; the selected one shows beside it
+        let me = cx.entity().downgrade();
+        let mut rail = v_flex().flex_none().w(px(RAIL_W)).h_full().py(px(theme::XS)).gap(px(2.)).items_center().bg(color::panel()).border_l_1().border_color(color::border());
+        for (i, tab) in RAIL.iter().copied().enumerate() {
+            if i == RAIL_SPLIT {
+                rail = rail.child(div().w(px(18.)).h(px(1.)).my(px(theme::XS)).bg(color::border()));
+            }
+            let me = me.clone();
+            let on = self.side == Some(tab);
+            let tip = match tab {
+                Tab::Layers => "Layers (Ctrl+[)".to_string(),
+                t => t.title().to_string(),
             };
-            let me = cx.entity().downgrade();
+            rail = rail.child(Button::new(SharedString::from(format!("rail-{}", tab.key()))).ghost().icon(Icon::new(tab.icon())).tooltip(tip).selected(on).on_click(move |_, _, cx| {
+                let _ = me.update(cx, |e, cx| e.show_side(tab, cx));
+            }));
+        }
+        let side_panel = self.side.and_then(|t| self.studio.iter().find(|p| p.read(cx).tab == t).cloned()).map(|p| {
+            let title = p.read(cx).tab.title();
             v_flex()
+                .relative()
                 .flex_none()
-                .w(px(30.))
+                .w(px(self.side_w))
                 .h_full()
-                .py(px(theme::XS))
-                .items_center()
-                .bg(color::panel())
-                .map(|d| if side == DockPlacement::Left { d.border_r_1() } else { d.border_l_1() })
+                .border_l_1()
                 .border_color(color::border())
-                .child(Button::new(id).ghost().small().icon(Icon::new(icon)).tooltip(tip).on_click(move |_, window, cx| {
-                    let _ = me.update(cx, |e, cx| e.toggle_side(side, window, cx));
-                }))
-        };
-        let (left_open, right_open) = {
-            let d = self.dock.read(cx);
-            (d.is_dock_open(DockPlacement::Left), d.is_dock_open(DockPlacement::Right))
-        };
-        let left_rail = (!left_open).then(|| rail(DockPlacement::Left, cx));
-        let right_rail = (!right_open).then(|| rail(DockPlacement::Right, cx));
+                .bg(color::panel())
+                .child(h_flex().flex_none().h(px(30.)).px(px(theme::MD)).items_center().border_b_1().border_color(color::border()).child(div().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(color::text_muted()).child(title.to_uppercase())))
+                .child(div().flex_1().min_h_0().child(p))
+                // Its inner edge resizes it
+                .child(
+                    div()
+                        .id("side-resize")
+                        .absolute()
+                        .left(px(-3.))
+                        .top_0()
+                        .h_full()
+                        .w(px(6.))
+                        .cursor(gpui_kit::CursorStyle::ResizeLeftRight)
+                        .on_drag(SideResize, |_, _, _, cx| cx.new(|_| SideResize)),
+                )
+        });
         v_flex()
             .size_full()
             .relative()
@@ -721,8 +627,12 @@ impl Render for ExploreView {
                     .flex_1()
                     .min_h_0()
                     .w_full()
+                    .on_drag_move(cx.listener(|this, e: &gpui_kit::DragMoveEvent<SideResize>, _, cx| {
+                        let w = f32::from(e.bounds.right() - e.event.position.x) - RAIL_W;
+                        this.side_w = w.clamp(220., 720.);
+                        cx.notify();
+                    }))
                     .child(tool_bar(&self.store, &self.canvas, cx))
-                    .children(left_rail)
                     .child(
                         v_flex()
                             .flex_1()
@@ -730,7 +640,8 @@ impl Render for ExploreView {
                             .h_full()
                             .child(div().relative().flex_1().min_h_0().w_full().child(self.dock.clone()).when(self.dialog, |d| d.child(self.dialog(cx)))),
                     )
-                    .children(right_rail),
+                    .children(side_panel)
+                    .child(rail),
             )
             .into_any_element()
     }
@@ -828,15 +739,5 @@ impl Panel for StudioPanel {
     /// No zoom control: with nothing else in it, the tab bar shows no "⋯".
     fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
         None
-    }
-
-    /// The first group of a side holds the button that hides the side (dsp-kitchen's panels).
-    fn toolbar_buttons(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<Vec<Button>> {
-        let ex = self.explore.clone();
-        let side = ex.upgrade()?.read(cx).edge_of(self.tab)?;
-        let (icon, tip) = if side == DockPlacement::Left { (IconName::PanelLeftClose, "Hide Layers (Ctrl+[)") } else { (IconName::PanelRightClose, "Hide the studio panels (Ctrl+])") };
-        Some(vec![Button::new(SharedString::from(format!("hide-side-{}", self.tab.key()))).ghost().xsmall().icon(Icon::new(icon)).tooltip(tip).on_click(move |_, window, cx| {
-            let _ = ex.update(cx, |e, cx| e.toggle_side(side, window, cx));
-        })])
     }
 }
