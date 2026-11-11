@@ -17,6 +17,11 @@ No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 - **CI:** `.github/workflows/docs.yml` builds the site with Bun on pull requests, and deploys it
   to GitHub Pages from `main` once the repository is public.
 
+### Supply chain (2026-11-11)
+
+- RUSTSEC-2026-0194 and -0195 (quick-xml, reached only through polars' `object_store`) are
+  recorded as accepted advisories in `deny.toml` until polars moves to `object_store` 0.14.
+
 ### Architecture (2026-11-11)
 
 - **One engine for histology steps.** `lumen-hist::engine::apply(ctx, analysis, action)` is the
