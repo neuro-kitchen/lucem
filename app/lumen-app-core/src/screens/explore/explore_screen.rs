@@ -52,7 +52,7 @@ pub struct ExploreView {
     notes: Entity<NotesPanel>,
     navigator: Entity<Navigator>,
     dock: Entity<DockArea>,
-    panels: Vec<Entity<ViewPanel>>,
+    pub(crate) panels: Vec<Entity<ViewPanel>>,
     studio: Vec<Entity<StudioPanel>>,
     /// How many views there are (the views read it to refuse closing the last one).
     count: Rc<Cell<usize>>,
@@ -61,6 +61,9 @@ pub struct ExploreView {
     pipeline_shown: bool,
     /// "Add view or container" is open; its keyboard focus and highlighted row.
     dialog: Option<(Entity<AddViewDialog>, Subscription)>,
+    /// The project layout restored last (the Store's `layout_rev`), and the views saved last.
+    layout_seen: u64,
+    layout_saved: Option<Vec<String>>,
     /// The side panel shown beside the right rail (`None`: hidden), the last one shown, and its
     /// width (dragged).
     side: Option<Tab>,
@@ -137,6 +140,8 @@ impl ExploreView {
             pipeline,
             pipeline_shown: false,
             dialog: None,
+            layout_seen: 0,
+            layout_saved: None,
             side: prefs.right_open.then(|| prefs.right_tab.as_deref().and_then(Tab::from_key).filter(|t| RAIL.contains(t)).unwrap_or(Tab::Layers)),
             last_side: prefs.right_tab.as_deref().and_then(Tab::from_key).filter(|t| RAIL.contains(t)).unwrap_or(Tab::Layers),
             side_w: RIGHT_W,
@@ -425,8 +430,44 @@ impl ExploreView {
 
 }
 
+impl ExploreView {
+    /// The views a project saved: the first view shows the first kind, one view is added for
+    /// each of the others; views beyond them close.
+    fn restore_layout(&mut self, kinds: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let kinds: Vec<ViewKind> = kinds.iter().filter_map(|t| ViewKind::ALL.iter().copied().find(|k| k.title() == t)).collect();
+        let Some(first) = kinds.first().copied() else { return };
+        for extra in self.panels.iter().skip(1).cloned().collect::<Vec<_>>() {
+            self.dock.update(cx, |d, cx| d.remove_panel(extra.clone(), window, cx));
+            self.removed(extra.entity_id(), cx);
+        }
+        if let Some(p) = self.panels.first().cloned() {
+            p.update(cx, |p, cx| p.set_kind(first, cx));
+        }
+        // Its kind kept even while the image is still opening (adding by hand falls back to a
+        // Plane when the image has no depth; a restored view says so itself when it has none)
+        for kind in kinds.into_iter().skip(1) {
+            self.add_view(kind, window, cx);
+            if let Some(p) = self.panels.last().cloned() {
+                p.update(cx, |p, cx| p.set_kind(kind, cx));
+            }
+        }
+    }
+}
+
 impl Render for ExploreView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A project brought its own views; otherwise the views, when changed, are saved
+        let (rev, saved) = (self.store.read(cx).layout_rev, self.store.read(cx).layout.explore.views.clone());
+        if rev != self.layout_seen {
+            self.layout_seen = rev;
+            self.layout_saved = Some(saved.clone());
+            self.restore_layout(saved, window, cx);
+        }
+        let now: Vec<String> = self.panels.iter().map(|p| p.read(cx).kind.title().to_string()).collect();
+        if self.layout_saved.as_ref() != Some(&now) {
+            self.layout_saved = Some(now.clone());
+            self.store.update(cx, |s, _| s.set_layout(|l| l.explore.views = now));
+        }
         let s = self.store.read(cx);
         if s.doc.images.is_empty() && s.opening.is_empty() {
             return v_flex()

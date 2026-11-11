@@ -233,7 +233,7 @@ struct Step {
 
 /// A kind of plot view.
 #[derive(Clone, Copy, PartialEq)]
-enum Plot {
+pub(crate) enum Plot {
     Histogram,
     Scatter,
     Box,
@@ -279,7 +279,7 @@ impl Plot {
 
 /// A plot view of the table: it draws the rows the table shows (filters and search applied).
 #[derive(Clone)]
-struct PlotView {
+pub(crate) struct PlotView {
     id: usize,
     kind: Plot,
     x: Option<String>,
@@ -322,13 +322,13 @@ pub struct AnalyzeView {
     pending: HashSet<String>,
     preview_task: Option<Task<()>>,
     /// The plot views (each a panel of the dock).
-    plots: Vec<PlotView>,
+    pub(crate) plots: Vec<PlotView>,
     next_plot: usize,
     /// Explore's container: the table and the plots are views in this dock, dragged into tabs
     /// and splits; the table's panel (when shown) and each plot's.
-    dock: Entity<DockArea>,
-    table_panel: Option<Entity<AnalyzePanel>>,
-    plot_panels: Vec<(usize, Entity<AnalyzePanel>)>,
+    pub(crate) dock: Entity<DockArea>,
+    pub(crate) table_panel: Option<Entity<AnalyzePanel>>,
+    pub(crate) plot_panels: Vec<(usize, Entity<AnalyzePanel>)>,
     /// The hierarchy (left) and the side pane (right) shown.
     show_hierarchy: bool,
     show_side: bool,
@@ -336,6 +336,9 @@ pub struct AnalyzeView {
     note: String,
     /// "Add view or container" open.
     dialog: Option<(Entity<AddViewDialog>, Subscription)>,
+    /// The project layout restored last (the Store's `layout_rev`), and the views saved last.
+    layout_seen: u64,
+    layout_saved: Option<crate::data::layout::AnalyzeLayout>,
     // Code on the table
     code_open: bool,
     lang: Language,
@@ -373,6 +376,8 @@ impl AnalyzeView {
             show_side: true,
             note: String::new(),
             dialog: None,
+            layout_seen: 0,
+            layout_saved: None,
             store,
             tab: None,
             scope: None,
@@ -890,8 +895,8 @@ impl AnalyzeView {
             self.request_previews(shapes, cx);
         }
         let s = self.store.read(cx);
-        let selected = s.selection.clone();
-        let picked_objects = s.selected_objects.clone();
+        let selected = s.sel.shapes.clone();
+        let picked_objects = s.sel.objects.clone();
         let row_w = pw + m.names.len() as f32 * COL_W;
         let mut out = Vec::new();
         for i in range {
@@ -940,7 +945,7 @@ impl AnalyzeView {
     /// A histogram of a column, or two columns against each other, over the rows shown.
     /// Adds a plot view of `kind`, its columns chosen from the table.
     /// A new plot view: under the table for the first, then to the right of the last plot.
-    fn add_plot(&mut self, kind: Plot, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_plot(&mut self, kind: Plot, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_plot;
         self.next_plot += 1;
         self.plots.push(PlotView { id, kind, x: None, y: None, group: None });
@@ -952,7 +957,7 @@ impl AnalyzeView {
     }
 
     /// The table view back (after it was closed), to the left of the plots.
-    fn add_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.table_panel.is_some() {
             return;
         }
@@ -995,7 +1000,7 @@ impl AnalyzeView {
     }
 
     /// Lays the views out as `how`: the table, then the plots.
-    fn arrange(&mut self, how: crate::data::store::Arrangement, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn arrange(&mut self, how: crate::data::store::Arrangement, window: &mut Window, cx: &mut Context<Self>) {
         let panels: Vec<Entity<AnalyzePanel>> = self.table_panel.iter().cloned().chain(self.plot_panels.iter().map(|(_, p)| p.clone())).collect();
         if panels.is_empty() {
             return;
@@ -1006,7 +1011,7 @@ impl AnalyzeView {
     }
 
     /// A view left the dock (closed from its tab).
-    fn removed(&mut self, kind: PanelKind, cx: &mut Context<Self>) {
+    pub(crate) fn removed(&mut self, kind: PanelKind, cx: &mut Context<Self>) {
         match kind {
             PanelKind::Table => self.table_panel = None,
             PanelKind::Plot(id) => {
@@ -1127,6 +1132,45 @@ impl AnalyzeView {
             })
         };
         h_flex().gap(px(2.)).child(edit).child(table).child(view).into_any_element()
+    }
+
+    /// Its views as `layout.json` keeps them.
+    fn layout(&self) -> crate::data::layout::AnalyzeLayout {
+        crate::data::layout::AnalyzeLayout {
+            table: self.table_panel.is_some(),
+            plots: self.plots.iter().map(|p| crate::data::layout::PlotLayout { kind: p.kind.title().into(), x: p.x.clone(), y: p.y.clone(), group: p.group.clone() }).collect(),
+            hierarchy: self.show_hierarchy,
+            side: self.show_side,
+        }
+    }
+
+    /// The views a project saved: its plots (with their columns), the table, the side panels.
+    fn restore_layout(&mut self, l: crate::data::layout::AnalyzeLayout, window: &mut Window, cx: &mut Context<Self>) {
+        let old: Vec<Entity<AnalyzePanel>> = self.plot_panels.drain(..).map(|(_, p)| p).collect();
+        self.plots.clear();
+        self.dock.update(cx, |d, cx| {
+            for p in old {
+                d.remove_panel(p, window, cx);
+            }
+        });
+        for spec in &l.plots {
+            let Some(kind) = Plot::ALL.iter().copied().find(|k| k.title() == spec.kind) else { continue };
+            self.add_plot(kind, window, cx);
+            if let Some(p) = self.plots.last_mut() {
+                (p.x, p.y, p.group) = (spec.x.clone(), spec.y.clone(), spec.group.clone());
+            }
+        }
+        match (&self.table_panel, l.table) {
+            (Some(t), false) if !self.plot_panels.is_empty() => {
+                let t = t.clone();
+                self.dock.update(cx, |d, cx| d.remove_panel(t, window, cx));
+                self.table_panel = None;
+            }
+            (None, true) => self.add_table(window, cx),
+            _ => {}
+        }
+        (self.show_hierarchy, self.show_side) = (l.hierarchy, l.side);
+        cx.notify();
     }
 
     /// A plot's tab title: its kind and columns.
@@ -1487,6 +1531,18 @@ fn preview(py: &Pyramid, displays: &[ChannelDisplay], a: &Annotation, outline: [
 
 impl Render for AnalyzeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A project brought its own views; otherwise the views, when changed, are saved
+        let (rev, saved) = (self.store.read(cx).layout_rev, self.store.read(cx).layout.analyze.clone());
+        if rev != self.layout_seen {
+            self.layout_seen = rev;
+            self.layout_saved = Some(saved.clone());
+            self.restore_layout(saved, window, cx);
+        }
+        let now = self.layout();
+        if self.layout_saved.as_ref() != Some(&now) {
+            self.layout_saved = Some(now.clone());
+            self.store.update(cx, |s, _| s.set_layout(|l| l.analyze = now));
+        }
         let s = self.store.read(cx);
         if s.doc.images.is_empty() {
             return div().size_full().child(EmptyState::new(IconName::Table2, "Nothing to measure yet", "Open an image, draw annotations or add a Measure operation: their tables show here.")).into_any_element();
@@ -1607,7 +1663,7 @@ impl Render for AnalyzeView {
         }).flatten();
         let has_selection = {
             let s = self.store.read(cx);
-            !s.selection.is_empty() || !s.selected_objects.is_empty()
+            !s.sel.shapes.is_empty() || !s.sel.objects.is_empty()
         };
         // The steps run so far
         let steps = (!self.steps.is_empty()).then(|| {

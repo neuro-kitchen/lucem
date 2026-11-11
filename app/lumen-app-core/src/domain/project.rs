@@ -4,6 +4,16 @@
 //! A project holds its images (where they are and how each channel is shown), the processing
 //! graph, the annotations and their classes, and notes. It changes only through
 //! [`crate::domain::command::Command`]s; the app saves it after each change.
+//!
+//! A project folder (format 2):
+//! ```text
+//! project.lumen.json   this document, without its graph
+//! pipeline.json        the processing graph: what is shared and run headless
+//! session.json         the analysis steps run (lumen-hist)
+//! layout.json          the views of each workspace (view state: not undone, not diffed)
+//! histology/           histology settings and objects
+//! ```
+//! Format 1 (the graph inside the project file) is read and written as format 2 on the next save.
 
 use std::path::{Path, PathBuf};
 
@@ -13,8 +23,19 @@ use serde::{Deserialize, Serialize};
 use super::annotation::{default_classes, Annotation, ClassDoc};
 use super::graph::GraphDoc;
 
-/// The document version this app reads and writes (`lumen_project` field).
-pub const PROJECT_VERSION: u32 = 1;
+/// The document version this app writes (`lumen_project` field); it also reads format 1.
+pub const PROJECT_VERSION: u32 = 2;
+
+/// The graph's file, next to the project file.
+pub const PIPELINE_FILE: &str = "pipeline.json";
+
+/// What `pipeline.json` holds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipelineFile {
+    /// Its format version.
+    pub lumen_pipeline: u32,
+    pub graph: GraphDoc,
+}
 
 /// File name of a project inside its folder.
 pub const PROJECT_FILE: &str = "project.lumen.json";
@@ -119,30 +140,42 @@ pub enum ProjectError {
 
 impl ProjectDoc {
     pub fn from_json(text: &str) -> Result<Self, ProjectError> {
-        let doc: Self = serde_json::from_str(text).map_err(|e| ProjectError::Parse(e.to_string()))?;
-        if doc.lumen_project != PROJECT_VERSION {
+        let mut doc: Self = serde_json::from_str(text).map_err(|e| ProjectError::Parse(e.to_string()))?;
+        if !(1..=PROJECT_VERSION).contains(&doc.lumen_project) {
             return Err(ProjectError::Version(doc.lumen_project));
         }
+        // Format 1 is taken as it is (its graph inline) and written as format 2
+        doc.lumen_project = PROJECT_VERSION;
         Ok(doc)
     }
 
+    /// Reads a project file and, next to it, its `pipeline.json` (format 2).
     pub fn load(path: &Path) -> Result<Self, ProjectError> {
         let text = std::fs::read_to_string(path).map_err(|e| ProjectError::Io(format!("{}: {e}", path.display())))?;
-        Self::from_json(&text)
+        let mut doc = Self::from_json(&text)?;
+        let pipeline = path.with_file_name(PIPELINE_FILE);
+        if pipeline.is_file() {
+            let text = std::fs::read_to_string(&pipeline).map_err(|e| ProjectError::Io(format!("{}: {e}", pipeline.display())))?;
+            let p: PipelineFile = serde_json::from_str(&text).map_err(|e| ProjectError::Parse(format!("{}: {e}", pipeline.display())))?;
+            doc.graph = p.graph;
+        }
+        Ok(doc)
     }
 
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("a project always serializes")
     }
 
-    /// Writes the JSON through a temporary file, so a reader never sees half of it.
+    /// Writes the project file and its `pipeline.json` (format 2), each through a temporary
+    /// file so a reader never sees half of one.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, self.to_json())?;
-        std::fs::rename(tmp, path)
+        let without_graph = Self { graph: GraphDoc::default(), ..self.clone() };
+        write_atomic(path, &without_graph.to_json())?;
+        let pipeline = PipelineFile { lumen_pipeline: 1, graph: self.graph.clone() };
+        write_atomic(&path.with_file_name(PIPELINE_FILE), &serde_json::to_string_pretty(&pipeline).expect("a graph always serializes"))
     }
 
     /// JSON Schema of the document (for agents and editors).
@@ -204,9 +237,37 @@ fn fresh(prefix: &str, taken: impl Fn(&str) -> bool) -> String {
     (1..).map(|i| format!("{prefix}{i}")).find(|id| !taken(id)).expect("ids are unbounded")
 }
 
+/// Writes `text` to `path` through a temporary file.
+pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A format-1 project (its graph inline) opens; saved, the graph moves to pipeline.json and
+    /// reads back the same.
+    #[test]
+    fn format_1_opens_and_saves_as_project_and_pipeline() {
+        let dir = std::env::temp_dir().join(format!("lumen-project-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = ProjectDoc::default();
+        d.graph.nodes.push(crate::domain::graph::GraphNode { id: "n1".into(), kind: crate::domain::graph::NodeKind::Annotations { image: "img1".into(), class: None }, x: 0.0, y: 0.0 });
+        let v1 = d.to_json().replacen(&format!("\"lumen_project\": {PROJECT_VERSION}"), "\"lumen_project\": 1", 1);
+        let file = dir.join(PROJECT_FILE);
+        std::fs::write(&file, v1).unwrap();
+        let opened = ProjectDoc::load(&file).unwrap();
+        assert_eq!(opened.graph, d.graph, "the inline graph is read");
+        opened.save(&file).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("\"graph\""), "the project file no longer holds the graph");
+        assert!(dir.join(PIPELINE_FILE).is_file());
+        assert_eq!(ProjectDoc::load(&file).unwrap(), opened);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn round_trip_and_version() {
@@ -214,6 +275,7 @@ mod tests {
         assert_eq!(ProjectDoc::from_json(&d.to_json()).unwrap(), d);
         assert!(matches!(ProjectDoc::from_json(r#"{"lumen_project": 9}"#), Err(ProjectError::Version(9))));
         assert!(ProjectDoc::from_json(r#"{"lumen_project": 1, "imagez": []}"#).is_err());
+        assert!(ProjectDoc::from_json(r#"{"lumen_project": 1}"#).is_ok(), "format 1 still opens");
         assert!(ProjectDoc::json_schema().contains("lumen_project"));
     }
 
