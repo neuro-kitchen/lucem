@@ -15,6 +15,9 @@ cpu = ["lumen-core/cpu", "lumen-ops/cpu"]
 cuda = ["lumen-core/cuda", "lumen-ops/cuda"]
 
 [dependencies]
+rayon.workspace = true
+polars.workspace = true
+lumen-io.workspace = true
 cubecl.workspace = true
 lumen-core = { workspace = true, features = ["compute"] }
 lumen-ops.workspace = true

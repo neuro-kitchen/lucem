@@ -10,7 +10,7 @@
 use lumen_core::cubecl::prelude::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::cells::{detect_cells, CellDetection, CellImage};
+use crate::cells::{cells_from_nuclei, detect_cells, CellDetection, CellImage};
 use crate::error::{invalid, HistResult};
 use crate::objects::{HistObject, Polygon};
 use crate::polygon;
@@ -100,10 +100,21 @@ impl Default for Tiling {
 /// What reads the image: `(x0, y0, w, h)` in pixels of the level → one plane per channel.
 pub type ReadTile<'a> = dyn FnMut(usize, usize, usize, usize) -> HistResult<Vec<Vec<f32>>> + 'a;
 
+/// Nucleus labels of one tile from a model: the tile's raw channels, its width and height →
+/// labels (`0`: none) of the same size.
+pub type Labeller<'a> = dyn FnMut(&[Vec<f32>], usize, usize) -> HistResult<Vec<u32>> + 'a;
+
 /// Detects the cells of a region, tile by tile; `progress(done, total)` after each tile. Cell
 /// ids run `1..` over the whole region.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_cells_in_region(client: &Client, read: &mut ReadTile, names: &[String], ranges: &[f32], staining: &Staining, region: &SlideRegion, settings: &CellDetection, tiling: Tiling, progress: &mut dyn FnMut(usize, usize)) -> HistResult<Vec<HistObject>> {
+    cells_in_region(client, read, names, ranges, staining, region, settings, tiling, None, progress)
+}
+
+/// As [`detect_cells_in_region`], the nuclei found by `labeller` (a model) when given, else by
+/// the threshold of `settings`; the cells grow from them and are measured the same way.
+#[allow(clippy::too_many_arguments)]
+pub fn cells_in_region(client: &Client, read: &mut ReadTile, names: &[String], ranges: &[f32], staining: &Staining, region: &SlideRegion, settings: &CellDetection, tiling: Tiling, mut labeller: Option<&mut Labeller>, progress: &mut dyn FnMut(usize, usize)) -> HistResult<Vec<HistObject>> {
     if region.width == 0 || region.height == 0 {
         return Ok(Vec::new());
     }
@@ -125,7 +136,16 @@ pub fn detect_cells_in_region(client: &Client, read: &mut ReadTile, names: &[Str
             }
             let (detection, channels) = staining.prepare(&raw, names, ranges)?;
             let img = CellImage { width: w, height: h, detection: &detection, channels: channels.iter().map(|(n, v)| (n.clone(), v.as_slice())).collect(), origin: [rx0 as f64 * region.downsample, ry0 as f64 * region.downsample], downsample: region.downsample, pixel_um: region.pixel_um };
-            let found = detect_cells(client, &img, settings)?;
+            let found = match labeller.as_mut() {
+                Some(l) => {
+                    let nuclei = l(&raw, w, h)?;
+                    if nuclei.len() != w * h {
+                        return Err(invalid(format!("the model's labels hold {} pixels, not {w} × {h}", nuclei.len())));
+                    }
+                    cells_from_nuclei(client, &img, &nuclei, settings)?
+                }
+                None => detect_cells(client, &img, settings)?,
+            };
             let ds = region.downsample;
             let (k0x, k0y, k1x, k1y) = (cx0 as f64 * ds, cy0 as f64 * ds, cx1 as f64 * ds, cy1 as f64 * ds);
             for mut o in found.objects {

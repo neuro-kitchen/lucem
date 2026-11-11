@@ -44,14 +44,23 @@ pub struct CellDetection {
     pub threshold: f64,
     /// Touching nuclei split by their shape.
     pub split_by_shape: bool,
+    /// Split at the dark gaps between nuclei instead: seeds at each nucleus' brightest point
+    /// (of the smoothed image), boundaries along the valleys between them. Better in dense
+    /// tissue, where the threshold leaves nuclei joined in large pieces.
+    #[serde(default = "yes")]
+    pub split_by_intensity: bool,
     /// How far a nucleus grows into its cell (µm; 0: nuclei only).
     pub cell_expansion_um: f64,
 }
 
 impl Default for CellDetection {
     fn default() -> Self {
-        Self { background_radius_um: 8.0, median_radius_um: 0.0, sigma_um: 1.5, min_area_um2: 10.0, max_area_um2: 400.0, threshold: 0.1, split_by_shape: true, cell_expansion_um: 5.0 }
+        Self { background_radius_um: 8.0, median_radius_um: 0.0, sigma_um: 1.5, min_area_um2: 10.0, max_area_um2: 400.0, threshold: 0.1, split_by_shape: true, split_by_intensity: true, cell_expansion_um: 5.0 }
     }
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// A region to detect cells in: the channel nuclei are bright in, and the channels measured
@@ -121,6 +130,10 @@ pub fn detect_cells(client: &Client, img: &CellImage, s: &CellDetection) -> Hist
     let mask: Vec<u32> = smooth.iter().map(|&v| u32::from(v as f64 > s.threshold)).collect();
     let nuclei = if !mask.iter().any(|&m| m != 0) {
         vec![0u32; w * h]
+    } else if s.split_by_intensity {
+        // Seeds about a typical nucleus' radius apart (from the area range's geometric mean)
+        let typical_radius_px = ((s.min_area_um2 * s.max_area_um2).sqrt() / std::f64::consts::PI).sqrt() / px;
+        split_by_intensity(client, &smooth, &mask, w, h, typical_radius_px, s.threshold)?
     } else if s.split_by_shape {
         let min_radius_px = (s.min_area_um2 / std::f64::consts::PI).sqrt() / px;
         split_by_shape(client, &mask, w, h, min_radius_px)?
@@ -129,6 +142,55 @@ pub fn detect_cells(client: &Client, img: &CellImage, s: &CellDetection) -> Hist
         raster::components(&m8, w, h).0
     };
     cells_from_nuclei(client, img, &nuclei, s)
+}
+
+/// Touching nuclei apart at the dark gaps between them: the peaks of the smoothed image inside
+/// the mask (at least `0.6 ×` a typical radius apart, above the threshold) seed a watershed of the
+/// inverted image inside the mask.
+fn split_by_intensity(client: &Client, smooth: &[f32], mask: &[u32], w: usize, h: usize, typical_radius_px: f64, threshold: f64) -> HistResult<Vec<u32>> {
+    let shape = Shape::new([h, w]);
+    let inside: Vec<f32> = smooth.iter().zip(mask).map(|(&v, &m)| if m != 0 { v } else { f32::MIN }).collect();
+    let dev = DeviceArray::from_host(client, shape.clone(), inside)?;
+    let peaks = local_peaks(client, &dev, &LocalPeaks { min_distance: (typical_radius_px * 0.6).round().max(1.0) as usize, threshold_abs: Some(threshold), exclude_border: Some(0), ..LocalPeaks::default() })?;
+    let mut markers = vec![0u32; w * h];
+    let mut n = 0u32;
+    for p in &peaks {
+        let i = p[0] * w + p[1];
+        if mask[i] != 0 && markers[i] == 0 {
+            n += 1;
+            markers[i] = n;
+        }
+    }
+    if n == 0 {
+        let m8: Vec<u8> = mask.iter().map(|&m| m as u8).collect();
+        return Ok(raster::components(&m8, w, h).0);
+    }
+    let relief: Vec<f32> = smooth.iter().map(|v| -v).collect();
+    let relief = DeviceArray::from_host(client, shape.clone(), relief)?;
+    let markers = DeviceArray::from_host(client, shape.clone(), markers)?;
+    let mask_dev = DeviceArray::from_host(client, shape, mask.to_vec())?;
+    let mut labels = watershed(client, &relief, &markers, None, Some(&mask_dev), &WatershedOptions::default())?.to_host(client);
+    // Pieces of the mask without a seed keep their own label
+    let m8: Vec<u8> = mask.iter().map(|&m| m as u8).collect();
+    let (pieces, k) = raster::components(&m8, w, h);
+    let mut covered = vec![false; k as usize + 1];
+    for (i, &p) in pieces.iter().enumerate() {
+        if p != 0 && labels[i] != 0 {
+            covered[p as usize] = true;
+        }
+    }
+    let mut next = labels.iter().copied().max().unwrap_or(0);
+    let mut new_label = vec![0u32; k as usize + 1];
+    for (i, &p) in pieces.iter().enumerate() {
+        if p != 0 && !covered[p as usize] {
+            if new_label[p as usize] == 0 {
+                next += 1;
+                new_label[p as usize] = next;
+            }
+            labels[i] = new_label[p as usize];
+        }
+    }
+    Ok(labels)
 }
 
 /// Touching nuclei apart: the peaks of the distance to the background (at least the smallest

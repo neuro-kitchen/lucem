@@ -126,6 +126,59 @@ pub fn apply_instance_classes(objects: &mut [HistObject], model_labels: &[u32], 
     }
 }
 
+/// The nuclei a model plugin finds in one tile, sent as `instances` through `send` (the
+/// plugin's server): a 3-channel model gets RGB from the first three channels (scaled by their
+/// `ranges` to 0–255); a 1-channel model gets channel `nuclear`, its 0.1st to 99.9th percentile
+/// to 0–255 (a 16-bit channel kept dim by its range would otherwise lose its nuclei to
+/// rounding). Its labels read back (none when it found none).
+#[allow(clippy::too_many_arguments)]
+pub fn model_nuclei(send: &mut dyn FnMut(&lumen_ml::Request) -> Result<serde_json::Value, String>, model: &str, channels: usize, nuclear: usize, raw: &[Vec<f32>], ranges: &[f32], w: usize, h: usize, pixel_um: f64) -> HistResult<Vec<u32>> {
+    let rgb: Vec<u8> = if channels == 1 {
+        let v = raw.get(nuclear).ok_or_else(|| invalid(format!("no channel {nuclear}")))?;
+        let mut sorted: Vec<f32> = v.iter().copied().filter(|x| x.is_finite()).collect();
+        sorted.sort_by(f32::total_cmp);
+        let (lo, hi) = match sorted.len() {
+            0 => (0.0, 1.0),
+            n => (sorted[n / 1000], sorted[(n - 1) * 999 / 1000]),
+        };
+        let k = 255.0 / (hi - lo).max(1e-12);
+        v.iter().map(|&x| ((x - lo) * k).round().clamp(0.0, 255.0) as u8).collect()
+    } else {
+        if raw.len() < 3 {
+            return Err(invalid("this nucleus model takes RGB (brightfield) images"));
+        }
+        let scale: Vec<f32> = (0..3).map(|c| 255.0 / ranges.get(c).copied().filter(|r| *r > 0.0).unwrap_or(255.0)).collect();
+        (0..w * h).flat_map(|i| (0..3).map(move |c| (i, c))).map(|(i, c)| (raw[c][i] * scale[c]).round().clamp(0.0, 255.0) as u8).collect()
+    };
+    let channels = if channels == 1 { 1 } else { 3 };
+    let dir = std::env::temp_dir().join(format!("lumen-nuclei-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
+    std::fs::create_dir_all(&dir).map_err(|e| invalid(e.to_string()))?;
+    let path = dir.join("tile.rgb");
+    std::fs::write(&path, &rgb).map_err(|e| invalid(e.to_string()))?;
+    let req = lumen_ml::Request::Instances {
+        model: model.to_string(),
+        image: lumen_ml::RasterRef { path: path.to_string_lossy().into_owned(), width: w as u32, height: h as u32, channels },
+        pixel_um: Some(pixel_um),
+        out_dir: dir.to_string_lossy().into_owned(),
+    };
+    let value = send(&req).map_err(invalid)?;
+    let r: lumen_ml::InstancesResult = serde_json::from_value(value).map_err(|e| invalid(format!("the plugin's answer does not read: {e}")))?;
+    if r.classes.is_empty() {
+        return Ok(vec![0; w * h]);
+    }
+    let (labels, lw, lh) = labels_from_result(&r)?;
+    if (lw, lh) != (w, h) {
+        return Err(invalid(format!("the model answered {lw} × {lh} labels for a {w} × {h} tile")));
+    }
+    Ok(labels)
+}
+
+/// The pyramid level a nucleus model reads: the coarsest whose pixels are at most 0.55 µm
+/// (models are trained at about 0.5 µm; finer is resampled by the plugin).
+pub fn model_level(downsamples: &[f64], pixel_um: f64) -> usize {
+    downsamples.iter().rposition(|d| d * pixel_um <= 0.55).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
