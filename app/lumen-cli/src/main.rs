@@ -31,9 +31,12 @@ USAGE
                                          List a server's images, or read a tile of one
   lumen hist stains | tissue | cells <image> …
                                          Histology: stain vectors, tissue, cells (lumen hist)
+  lumen session run <session.json> <image>... [--out DIR] [--runtime NAME]
+                                         Run an analysis saved by the app on many images
 ";
 
 mod hist;
+mod session;
 
 fn main() -> ExitCode {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").with_writer(std::io::stderr).try_init();
@@ -117,6 +120,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "clients" => clients(args),
         "fetch" => fetch(args),
         "hist" => hist::hist(args),
+        "session" => session::session(args),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     }
 }
@@ -159,6 +163,10 @@ fn doctor(args: Args) -> Result<(), String> {
     for target in ComputeTarget::ALL {
         if !target.is_available() {
             println!("{target}: not compiled in");
+            continue;
+        }
+        if let Some(why) = target.unusable_reason() {
+            println!("{target}: not usable ({why})");
             continue;
         }
         // A runtime without its driver panics when opened

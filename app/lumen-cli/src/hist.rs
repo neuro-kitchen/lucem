@@ -26,8 +26,10 @@ pub const USAGE: &str = "\
   lumen hist cells <image> [--region X,Y,W,H | --within FILE.geojson] [--level N]
               [--stains h-dab|h-e|h-e-dab|FILE.json | --nuclear CHANNEL]
               [--threshold T] [--sigma UM] [--expansion UM] [--min-area UM2] [--max-area UM2]
-              [--background UM] [--tile PX] [--classifier FILE.json]
+              [--background UM] [--split gaps|shape|none] [--tile PX] [--classifier FILE.json]
               [--intensity \"MEASUREMENT=T1[,T2,T3]\"] [--out FILE.tsv|.csv|.geojson]
+              [--preview FILE.png]           (the region's nuclear channel with the outlines)
+              [--model ID]                   (nuclei from a model plugin, e.g. stardist-he)
               [--runtime NAME]               Cells detected, measured, classified; a summary
 ";
 
@@ -163,7 +165,7 @@ impl<F: FnOnce(&Client) -> Result<(), String>> ComputeTask for Job<F> {
 fn cells(mut args: Args) -> Result<(), String> {
     let region = args.take_value("--region")?.map(|v| rect(&v)).transpose()?;
     let within = args.take_value("--within")?.map(|p| read_outlines(&p)).transpose()?;
-    let level: usize = number(&mut args, "--level")?.unwrap_or(0);
+    let level_given: Option<usize> = number(&mut args, "--level")?;
     let stains = args.take_value("--stains")?;
     let nuclear: Option<usize> = number(&mut args, "--nuclear")?;
     let mut s = CellDetection::default();
@@ -186,6 +188,15 @@ fn cells(mut args: Args) -> Result<(), String> {
     if let Some(v) = number(&mut args, "--background")? {
         s.background_radius_um = v;
     }
+    match args.take_value("--split")?.as_deref() {
+        None | Some("gaps") => {}
+        Some("shape") => s.split_by_intensity = false,
+        Some("none") => {
+            s.split_by_intensity = false;
+            s.split_by_shape = false;
+        }
+        Some(v) => return Err(format!("--split {v:?}: gaps, shape or none")),
+    }
     let tile: usize = number(&mut args, "--tile")?.unwrap_or(1024);
     let classifier = args.take_value("--classifier")?.map(|p| std::fs::read_to_string(&p).map_err(|e| format!("{p}: {e}")).and_then(|t| ObjectClassifier::from_json(&t).map_err(|e| e.to_string()))).transpose()?;
     let intensity = args
@@ -197,11 +208,24 @@ fn cells(mut args: Args) -> Result<(), String> {
         })
         .transpose()?;
     let out = args.take_value("--out")?;
+    let preview = args.take_value("--preview")?;
+    let model = args.take_value("--model")?;
     let runtime = args.take_value("--runtime")?;
     let a = args.positional(1)?;
     let p = Pyramid::open(Path::new(&a[0])).map_err(|e| e.to_string())?;
     let um = pixel_um(&p)?;
+    // A model reads at about its own scale unless a level is given
+    let level = level_given.unwrap_or_else(|| if model.is_some() { lumen_hist::models::model_level(&p.levels.iter().map(|l| l.downsample).collect::<Vec<_>>(), um) } else { 0 });
     let l = p.levels.get(level).ok_or(format!("--level {level}: the image has {} levels", p.levels.len()))?.clone();
+    // The model's plugin, started once for the whole run
+    let mut plugin = match &model {
+        None => None,
+        Some(id) => {
+            let program = lumen_ml::discover().into_iter().filter_map(Result::ok).find(|p| p.models.iter().any(|m| &m.id == id)).map(|p| p.program).ok_or(format!("--model {id}: no plugin offers it (lumen-ml-* programs next to lumen or on PATH)"))?;
+            eprintln!("nuclei from {id} ({program})");
+            Some(lumen_ml::PluginProcess::start(&program)?)
+        }
+    };
     let staining = match (stains, nuclear) {
         (Some(_), Some(_)) => return Err("--stains (brightfield) or --nuclear (fluorescence), not both".into()),
         (_, Some(c)) => Staining::Fluorescence { nuclear: c },
@@ -220,7 +244,7 @@ fn cells(mut args: Args) -> Result<(), String> {
     };
     // Fluorescence without a threshold: Otsu's of the region at a coarse level, above its median
     // (the background the rolling ball takes away)
-    if let (Staining::Fluorescence { nuclear }, None) = (&staining, threshold) {
+    if let (Staining::Fluorescence { nuclear }, None, None) = (&staining, threshold, &model) {
         let cl = (0..p.levels.len()).find(|&k| p.levels[k].width.max(p.levels[k].height) <= 2048).unwrap_or(p.coarsest());
         let c = &p.levels[cl];
         let (x, y) = ((r0[0] as f64 / c.downsample) as usize, (r0[1] as f64 / c.downsample) as usize);
@@ -247,11 +271,23 @@ fn cells(mut args: Args) -> Result<(), String> {
                 let (x1, y1) = (((b.2 / ds).ceil() as usize).min(l.width), ((b.3 / ds).ceil() as usize).min(l.height));
                 let region = SlideRegion { x0, y0, width: x1.saturating_sub(x0), height: y1.saturating_sub(y0), downsample: ds, pixel_um: um, within: within.as_ref().map(|_| outline.clone()) };
                 let mut read = |x: usize, y: usize, w: usize, h: usize| -> lumen_hist::HistResult<Vec<Vec<f32>>> { (0..p.channels.len()).map(|c| p.read_region_at(level, c, 0, x, y, w, h).map_err(|e| lumen_hist::HistError::Invalid(e.to_string()))).collect() };
-                let mut found = detect_cells_in_region(client, &mut read, &names, &ranges, &staining, &region, &s, Tiling { tile, overlap: 64 }, &mut |d, t| {
-                    if d == t || d % 8 == 0 {
+                let mut progress = |d: usize, t: usize| {
+                    if d == t || d.is_multiple_of(8) {
                         eprintln!("region {}: {d} / {t} tiles", k + 1);
                     }
-                })
+                };
+                let mut found = match (plugin.as_mut(), &model) {
+                    (Some(proc), Some(id)) => {
+                        let mut send = |req: &lumen_ml::Request| proc.request(req, &mut |_, _| {});
+                        let (nuclear, channels) = match &staining {
+                            Staining::Fluorescence { nuclear } => (*nuclear, 1),
+                            Staining::Brightfield { .. } => (0, 3),
+                        };
+                        let mut labeller = |raw: &[Vec<f32>], w: usize, h: usize| lumen_hist::models::model_nuclei(&mut send, id, channels, nuclear, raw, &ranges, w, h, um * ds);
+                        lumen_hist::slide::cells_in_region(client, &mut read, &names, &ranges, &staining, &region, &s, Tiling { tile: tile.max(2048), overlap: 64 }, Some(&mut labeller), &mut progress)
+                    }
+                    _ => detect_cells_in_region(client, &mut read, &names, &ranges, &staining, &region, &s, Tiling { tile, overlap: 64 }, &mut progress),
+                }
                 .map_err(|e| e.to_string())?;
                 for o in &mut found {
                     o.id += all.len() as u32;
@@ -273,7 +309,55 @@ fn cells(mut args: Args) -> Result<(), String> {
             if let Some(path) = &out {
                 write_out(path, &all, &a[0], um)?;
             }
+            if let Some(path) = &preview {
+                let channel = match &staining {
+                    Staining::Fluorescence { nuclear } => *nuclear,
+                    Staining::Brightfield { .. } => 0,
+                };
+                write_preview(path, &p, level, channel, r0, &all)?;
+                println!("preview → {path}");
+            }
             Ok(())
         }))
         .map_err(|e| e.to_string())?
+}
+
+/// The region (level-0 `x, y, w, h`, read at `level`, at most 4096 px a side) of one channel in
+/// grey (1st–99.8th percentile), nucleus outlines yellow, cell outlines cyan.
+fn write_preview(path: &str, p: &Pyramid, level: usize, channel: usize, r0: [usize; 4], cells: &[HistObject]) -> Result<(), String> {
+    let mut level = level;
+    while level < p.coarsest() && (r0[2].max(r0[3]) as f64 / p.levels[level].downsample) > 4096.0 {
+        level += 1;
+    }
+    let ds = p.levels[level].downsample;
+    let (x, y) = ((r0[0] as f64 / ds) as usize, (r0[1] as f64 / ds) as usize);
+    let (w, h) = (((r0[2] as f64 / ds).ceil() as usize).max(1), ((r0[3] as f64 / ds).ceil() as usize).max(1));
+    let v = p.read_region_at(level, channel, 0, x, y, w, h).map_err(|e| e.to_string())?;
+    let mut sorted = v.clone();
+    sorted.sort_by(f32::total_cmp);
+    let (lo, hi) = (sorted[sorted.len() / 100], sorted[(sorted.len() as f64 * 0.998) as usize].max(sorted[sorted.len() / 100] + 1e-6));
+    let mut rgb = image::RgbImage::new(w as u32, h as u32);
+    for (i, &val) in v.iter().enumerate() {
+        let g = (((val - lo) / (hi - lo)).clamp(0.0, 1.0) * 255.0) as u8;
+        rgb.put_pixel((i % w) as u32, (i / w) as u32, image::Rgb([g, g, g]));
+    }
+    let origin = [x as f64 * ds, y as f64 * ds];
+    let (mut nuc, mut cell) = (vec![0u32; w * h], vec![0u32; w * h]);
+    for (k, c) in cells.iter().enumerate() {
+        lumen_hist::polygon::fill(&c.roi, &mut cell, w, h, origin, ds, k as u32 + 1);
+        if let Some(n) = &c.nucleus {
+            lumen_hist::polygon::fill(n, &mut nuc, w, h, origin, ds, k as u32 + 1);
+        }
+    }
+    let edge = |m: &[u32], i: usize| {
+        let (px, py) = (i % w, i / w);
+        m[i] != 0 && [(px.wrapping_sub(1), py), (px + 1, py), (px, py.wrapping_sub(1)), (px, py + 1)].iter().any(|&(nx, ny)| nx >= w || ny >= h || m[ny * w + nx] != m[i])
+    };
+    for i in 0..w * h {
+        let colour = if edge(&nuc, i) { Some([255, 220, 40]) } else if edge(&cell, i) { Some([40, 200, 255]) } else { None };
+        if let Some(c) = colour {
+            rgb.put_pixel((i % w) as u32, (i / w) as u32, image::Rgb(c));
+        }
+    }
+    rgb.save(path).map_err(|e| format!("{path}: {e}"))
 }
