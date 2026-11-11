@@ -25,6 +25,7 @@ pub mod area;
 pub mod cells;
 pub mod classify;
 pub mod density;
+pub mod engine;
 pub mod error;
 pub mod export;
 pub mod features;

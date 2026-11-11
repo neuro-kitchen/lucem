@@ -47,10 +47,11 @@ pub struct Step {
 }
 
 /// Where a step looks.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(tag = "in", rename_all = "snake_case")]
 pub enum Within {
     /// The whole image.
+    #[default]
     Image,
     /// The tissue found (a `tissue` step before it, or found then).
     Tissue,
@@ -82,8 +83,13 @@ pub enum Action {
     },
     /// Intensity classes (negative, 1+, 2+, 3+).
     Intensity { thresholds: IntensityThresholds },
-    /// Every pixel classed.
-    PixelClasses { classifier: PixelClassifier, pixel_um: f64 },
+    /// Every pixel classed (inside `within`).
+    PixelClasses {
+        classifier: PixelClassifier,
+        pixel_um: f64,
+        #[serde(default)]
+        within: Within,
+    },
     /// Superpixel tiles.
     Superpixels { within: Within, settings: SuperpixelSettings, pixel_um: f64 },
     /// A density map.
@@ -153,142 +159,38 @@ pub struct RunResult {
     pub tissue: Vec<Polygon>,
     pub cells: Vec<crate::HistObject>,
     pub tiles: Vec<crate::HistObject>,
-    /// Steps skipped, and why.
+    /// What each step did (one line each).
     pub notes: Vec<String>,
 }
 
-fn read_channels(p: &lumen_io::Pyramid, level: usize, b: (f64, f64, f64, f64)) -> HistResult<(Vec<(String, Vec<f32>)>, [usize; 4], f64)> {
-    let l = &p.levels[level];
-    let ds = l.downsample;
-    let x = (b.0.max(0.0) / ds) as usize;
-    let y = (b.1.max(0.0) / ds) as usize;
-    let w = ((b.2.min(p.width() as f64) / ds).ceil() as usize).saturating_sub(x).max(1);
-    let h = ((b.3.min(p.height() as f64) / ds).ceil() as usize).saturating_sub(y).max(1);
-    let channels = p
-        .channels
-        .iter()
-        .enumerate()
-        .map(|(c, ch)| {
-            let scale = 1.0 / ch.range.1.max(1e-6);
-            p.read_region_at(level, c, 0, x, y, w, h).map(|v| (ch.label.clone(), v.into_iter().map(|v| v * scale).collect())).map_err(|e| invalid(e.to_string()))
-        })
-        .collect::<HistResult<_>>()?;
-    Ok((channels, [x, y, w, h], ds))
+/// Runs `recipe` (see [`Session::recipe`]) on one image through the engine (the same steps
+/// the app runs). Regions drawn on the image the session was recorded on become this image's
+/// tissue (`Within::Tissue`).
+pub fn run(client: &lumen_core::cubecl::prelude::Client, p: &lumen_io::Pyramid, recipe: &[&Action], progress: &mut dyn FnMut(&str)) -> HistResult<RunResult> {
+    use crate::engine::{apply, Analysis, Ctx, PluginModels};
+    let mut a = Analysis::default();
+    let mut models = PluginModels::default();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut notes = Vec::new();
+    let mut report = |what: &str, _: Option<f32>| progress(what);
+    for action in recipe {
+        let action = retarget(action);
+        let mut ctx = Ctx { client, pyramid: p, z: 0, models: &mut models, progress: &mut report, cancel: &cancel };
+        let outcome = apply(&mut ctx, &mut a, &action)?;
+        notes.push(outcome.summary());
+    }
+    Ok(RunResult { tissue: a.tissue, cells: a.cells, tiles: a.tiles, notes })
 }
 
-/// Runs `recipe` (see [`Session::recipe`]) on one image: tissue, cells (the threshold or the
-/// nucleus model named, through its plugin), classes, intensity, superpixels. Pixel classes
-/// and density maps are not run headless yet (said in `notes`).
-pub fn run(client: &lumen_core::cubecl::prelude::Client, p: &lumen_io::Pyramid, recipe: &[&Action], progress: &mut dyn FnMut(&str)) -> HistResult<RunResult> {
-    use crate::slide::{auto_threshold, cells_in_region, SlideRegion, Tiling};
-    let um = p.pixel_size_um.ok_or_else(|| invalid("the image has no pixel size (µm)"))?;
-    let (iw, ih) = (p.width() as f64, p.height() as f64);
-    let whole: Polygon = vec![[0.0, 0.0], [iw, 0.0], [iw, ih], [0.0, ih]];
-    let mut out = RunResult::default();
-    let mut plugin: Option<(lumen_ml::PluginProcess, usize)> = None;
-    for action in recipe {
-        progress(action.title());
-        match action {
-            Action::Tissue { settings } => {
-                let level = (0..p.levels.len()).find(|&l| p.levels[l].width.max(p.levels[l].height) <= 4096).unwrap_or(p.coarsest());
-                let l = p.levels[level].clone();
-                let n_ch = if settings.brightfield { 3.min(p.channels.len()) } else { p.channels.len() };
-                let planes: Vec<Vec<f32>> = (0..n_ch).map(|c| p.read_region_at(level, c, 0, 0, 0, l.width, l.height).map_err(|e| invalid(e.to_string()))).collect::<HistResult<_>>()?;
-                let scale: Vec<f32> = (0..n_ch).map(|c| if settings.brightfield { 255.0 / p.channels[c].range.1.max(1e-6) } else { 1.0 }).collect();
-                let img: Vec<f32> = (0..l.width * l.height).flat_map(|i| (0..n_ch).map(move |c| (i, c))).map(|(i, c)| planes[c][i] * scale[c]).collect();
-                let t = crate::tissue::detect(&img, n_ch, crate::raster::Grid::new(l.width, l.height, [0.0, 0.0], l.downsample), um, settings);
-                out.tissue = t.regions.into_iter().map(|r| r.roi).collect();
-            }
-            Action::Cells { within, staining, detection, auto_threshold: auto, model } => {
-                let outlines: Vec<Polygon> = match within {
-                    Within::Image => vec![whole.clone()],
-                    Within::Tissue | Within::Regions { .. } if !out.tissue.is_empty() => out.tissue.clone(),
-                    _ => {
-                        out.notes.push("cells: no tissue found first; the whole image was searched".into());
-                        vec![whole.clone()]
-                    }
-                };
-                let names: Vec<String> = p.channels.iter().map(|c| c.label.clone()).collect();
-                let ranges: Vec<f32> = p.channels.iter().map(|c| c.range.1).collect();
-                if let (Some(id), None) = (model, &plugin) {
-                    let (program, info) = lumen_ml::discover().into_iter().filter_map(Result::ok).find_map(|pl| pl.models.iter().find(|m| &m.id == id).map(|m| (pl.program.clone(), m.clone()))).ok_or_else(|| invalid(format!("no plugin offers the model {id}")))?;
-                    plugin = Some((lumen_ml::PluginProcess::start(&program).map_err(invalid)?, info.channels as usize));
-                }
-                let level = if model.is_some() { crate::models::model_level(&p.levels.iter().map(|l| l.downsample).collect::<Vec<_>>(), um) } else { 0 };
-                let ds = p.levels[level].downsample;
-                let (lw, lh) = (p.levels[level].width as f64, p.levels[level].height as f64);
-                for outline in &outlines {
-                    let (x0, y0, x1, y1) = crate::polygon::bounds(outline);
-                    let mut settings = detection.clone();
-                    if let (true, Staining::Fluorescence { nuclear }, None) = (*auto, staining, model) {
-                        let cl = (0..p.levels.len()).find(|&k| (x1 - x0).max(y1 - y0) / p.levels[k].downsample <= 2048.0).unwrap_or(p.coarsest());
-                        let c = &p.levels[cl];
-                        let (cx0, cy0) = ((x0.max(0.0) / c.downsample) as usize, (y0.max(0.0) / c.downsample) as usize);
-                        let (cw, chh) = ((((x1 - x0) / c.downsample).ceil() as usize).max(1), (((y1 - y0) / c.downsample).ceil() as usize).max(1));
-                        let v = p.read_region_at(cl, *nuclear, 0, cx0, cy0, cw, chh).map_err(|e| invalid(e.to_string()))?;
-                        settings.threshold = auto_threshold(&v, settings.background_radius_um > 0.0).0;
-                    }
-                    let (rx0, ry0) = ((x0.max(0.0) / ds).floor(), (y0.max(0.0) / ds).floor());
-                    let region = SlideRegion { x0: rx0 as usize, y0: ry0 as usize, width: ((x1 / ds).min(lw) - rx0).max(0.0).ceil() as usize, height: ((y1 / ds).min(lh) - ry0).max(0.0).ceil() as usize, downsample: ds, pixel_um: um, within: Some(outline.clone()) };
-                    let mut read = |x: usize, y: usize, w: usize, h: usize| -> HistResult<Vec<Vec<f32>>> { (0..p.channels.len()).map(|c| p.read_region_at(level, c, 0, x, y, w, h).map_err(|e| invalid(e.to_string()))).collect() };
-                    let mut tiles_done = |d: usize, t: usize| progress(&format!("Find cells: tile {d} of {t}"));
-                    let mut found = match (&mut plugin, model) {
-                        (Some((proc, channels)), Some(id)) => {
-                            let nuclear = match staining {
-                                Staining::Fluorescence { nuclear } => *nuclear,
-                                Staining::Brightfield { .. } => 0,
-                            };
-                            let channels = *channels;
-                            let mut send = |req: &lumen_ml::Request| proc.request(req, &mut |_, _| {});
-                            let mut labeller = |raw: &[Vec<f32>], w: usize, h: usize| crate::models::model_nuclei(&mut send, id, channels, nuclear, raw, &ranges, w, h, um * ds);
-                            cells_in_region(client, &mut read, &names, &ranges, staining, &region, &settings, Tiling { tile: 2048, overlap: 64 }, Some(&mut labeller), &mut tiles_done)?
-                        }
-                        _ => cells_in_region(client, &mut read, &names, &ranges, staining, &region, &settings, Tiling::default(), None, &mut tiles_done)?,
-                    };
-                    for o in &mut found {
-                        o.id += out.cells.len() as u32;
-                    }
-                    out.cells.extend(found);
-                }
-            }
-            Action::ClassifyObjects { classifier, tiles } => {
-                classifier.apply(if *tiles { &mut out.tiles } else { &mut out.cells });
-            }
-            Action::Intensity { thresholds } => {
-                crate::intensity::classify(&mut out.cells, thresholds);
-            }
-            Action::Superpixels { settings, pixel_um, .. } => {
-                let outlines = if out.tissue.is_empty() { vec![whole.clone()] } else { out.tissue.clone() };
-                for outline in &outlines {
-                    let b = crate::polygon::bounds(outline);
-                    let mut level = 0;
-                    for (k, l) in p.levels.iter().enumerate() {
-                        if l.downsample * um <= pixel_um * 1.05 {
-                            level = k;
-                        }
-                    }
-                    while level < p.coarsest() && (b.2 - b.0).max(b.3 - b.1) / p.levels[level].downsample > 4096.0 {
-                        level += 1;
-                    }
-                    let (channels, [x, y, w, h], ds) = read_channels(p, level, b)?;
-                    let refs: Vec<(String, &[f32])> = channels.iter().map(|(n, v)| (n.clone(), v.as_slice())).collect();
-                    let grid = crate::raster::Grid::new(w, h, [x as f64 * ds, y as f64 * ds], ds);
-                    let (_, objects) = crate::superpixel::superpixels(client, &refs, grid, um, settings)?;
-                    out.tiles.extend(objects.into_iter().filter(|o| crate::polygon::contains(outline, o.centroid)));
-                }
-            }
-            Action::PixelClasses { .. } => out.notes.push("pixel classes: run in the app for now (not headless yet)".into()),
-            Action::Density { .. } => out.notes.push("density map: run in the app for now (not headless yet)".into()),
-            Action::Export => {}
-        }
+/// A recorded step for another image: its drawn regions become that image's tissue.
+fn retarget(action: &Action) -> Action {
+    let to_tissue = |w: &Within| if matches!(w, Within::Regions { .. }) { Within::Tissue } else { w.clone() };
+    match action {
+        Action::Cells { within, staining, detection, auto_threshold, model } => Action::Cells { within: to_tissue(within), staining: staining.clone(), detection: detection.clone(), auto_threshold: *auto_threshold, model: model.clone() },
+        Action::Superpixels { within, settings, pixel_um } => Action::Superpixels { within: to_tissue(within), settings: settings.clone(), pixel_um: *pixel_um },
+        Action::PixelClasses { classifier, pixel_um, within } => Action::PixelClasses { classifier: classifier.clone(), pixel_um: *pixel_um, within: to_tissue(within) },
+        other => other.clone(),
     }
-    for (i, o) in out.cells.iter_mut().enumerate() {
-        o.id = i as u32 + 1;
-    }
-    for (i, o) in out.tiles.iter_mut().enumerate() {
-        o.id = i as u32 + 1;
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

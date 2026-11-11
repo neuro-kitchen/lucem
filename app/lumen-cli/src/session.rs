@@ -5,8 +5,8 @@
 //! lumen session run <session.json> <image>... [--out DIR] [--runtime NAME]
 //! ```
 //!
-//! For each image: the session's last step of each kind (tissue, cells, classes, intensity,
-//! superpixels) runs; the result goes to the image's output store (inside its OME-Zarr, else
+//! For each image: the session's last step of each kind runs through the same engine as the
+//! app (tissue, cells, classes, intensity, superpixels, pixel classes, density); the result goes to the image's output store (inside its OME-Zarr, else
 //! `DIR/<image>.lumen.zarr`): `labels/cells`, `labels/nuclei`, `lumen/cells.parquet`,
 //! `lumen/tiles.parquet`, `lumen/shapes.parquet` (GeoParquet), `lumen/provenance.json`.
 
@@ -69,7 +69,7 @@ fn run(mut args: Args) -> Result<(), String> {
             Ok((store, cells, tiles, notes)) => {
                 println!("{image}: {cells} cells, {tiles} tiles in {:.1} s → {}", t0.elapsed().as_secs_f64(), store.display());
                 for n in notes {
-                    println!("  note: {n}");
+                    println!("  {n}");
                 }
             }
             Err(e) => {
