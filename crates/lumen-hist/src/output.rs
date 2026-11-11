@@ -194,13 +194,80 @@ pub fn write_labels(store: &Path, name: &str, objects: &[HistObject], nucleus: b
     Ok(root)
 }
 
-/// Writes `lumen/provenance.json`.
-pub fn write_provenance(store: &Path, provenance: &serde_json::Value) -> HistResult<PathBuf> {
+/// Writes `lumen/provenance.json`, with the analysed image as [`image_ref`] names it (never its
+/// full path: results are shared, and a full path names the user and their folders).
+pub fn write_provenance(store: &Path, image: &Path, provenance: &serde_json::Value) -> HistResult<PathBuf> {
     let dir = store.join("lumen");
     std::fs::create_dir_all(&dir).map_err(io)?;
     let path = dir.join("provenance.json");
-    std::fs::write(&path, serde_json::to_string_pretty(provenance).map_err(io)?).map_err(io)?;
+    let mut provenance = provenance.clone();
+    if let Some(o) = provenance.as_object_mut() {
+        o.insert("image".into(), image_ref(image, store));
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&provenance).map_err(io)?).map_err(io)?;
     Ok(path)
+}
+
+/// Most `..` steps a relative image path may take before the image is named by its fingerprint
+/// instead (beyond it, the path says more about the computer's folders than about the data).
+const MAX_UP: usize = 2;
+
+/// How provenance names the analysed image:
+/// - `{"path": "../slides/case-12.ome.zarr"}`, relative to the results store, when the image is
+///   close by (the store itself, or at most [`MAX_UP`] folders up): it still resolves when the
+///   project and its data move together;
+/// - otherwise `{"name": "case-12.ome.zarr", "fingerprint": "sha256:…"}`: the file name and a
+///   hash of its metadata (and size), which identify the image without saying where it is.
+pub fn image_ref(image: &Path, store: &Path) -> serde_json::Value {
+    let abs = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (image_abs, store_abs) = (abs(image), abs(store));
+    if let Some(rel) = relative(&image_abs, &store_abs).filter(|r| r.components().filter(|c| matches!(c, std::path::Component::ParentDir)).count() <= MAX_UP) {
+        let rel = if rel.as_os_str().is_empty() { ".".to_string() } else { rel.to_string_lossy().replace('\\', "/") };
+        return serde_json::json!({ "path": rel });
+    }
+    let name = image.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    serde_json::json!({ "name": name, "fingerprint": fingerprint(&image_abs) })
+}
+
+/// `path` relative to the folder `base` (both absolute); `None` when they share no folder but
+/// the root.
+fn relative(path: &Path, base: &Path) -> Option<PathBuf> {
+    let (p, b): (Vec<_>, Vec<_>) = (path.components().collect(), base.components().collect());
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    if common <= 1 {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for _ in common..b.len() {
+        out.push("..");
+    }
+    for c in &p[common..] {
+        out.push(c);
+    }
+    Some(out)
+}
+
+/// SHA-256 of the image's metadata (an OME-Zarr's `zarr.json`/`.zattrs`/`.zgroup`, or a file's
+/// first MiB) and its size: the same image gives the same fingerprint wherever it is.
+fn fingerprint(image: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    if image.is_dir() {
+        for meta in ["zarr.json", ".zattrs", ".zgroup", "OME/METADATA.ome.xml"] {
+            if let Ok(bytes) = std::fs::read(image.join(meta)) {
+                h.update(meta.as_bytes());
+                h.update(&bytes);
+            }
+        }
+    } else if let Ok(mut f) = std::fs::File::open(image) {
+        use std::io::Read;
+        let mut head = vec![0u8; 1 << 20];
+        let n = f.read(&mut head).unwrap_or(0);
+        h.update(&head[..n]);
+        h.update(f.metadata().map(|m| m.len()).unwrap_or(0).to_le_bytes());
+    }
+    let digest = h.finalize();
+    format!("sha256:{}", digest.iter().map(|b| format!("{b:02x}")).collect::<String>())
 }
 
 /// Creates the fallback store's group when it is not the image's own.
@@ -214,6 +281,31 @@ pub fn ensure_group(store: &Path) -> HistResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provenance_never_names_the_full_path() {
+        let root = std::env::temp_dir().join(format!("lumen-prov-{}", std::process::id()));
+        let (slides, project) = (root.join("data/slides"), root.join("data/project/analysis"));
+        std::fs::create_dir_all(&slides).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let image = slides.join("case.tif");
+        std::fs::write(&image, b"image bytes").unwrap();
+        // Close by: a relative path
+        assert_eq!(super::image_ref(&image, &project)["path"], "../../slides/case.tif");
+        // The image's own store
+        assert_eq!(super::image_ref(&slides, &slides)["path"], ".");
+        // Far away: its name and a fingerprint, the same wherever it is
+        let far = root.join("elsewhere/a/b/c");
+        std::fs::create_dir_all(&far).unwrap();
+        let r = super::image_ref(&image, &far);
+        assert_eq!(r["name"], "case.tif");
+        assert!(r["fingerprint"].as_str().unwrap().starts_with("sha256:"));
+        assert!(r.get("path").is_none());
+        let copy = root.join("copy.tif");
+        std::fs::copy(&image, &copy).unwrap();
+        assert_eq!(super::image_ref(&copy, &far)["fingerprint"], r["fingerprint"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     use super::*;
 
     #[test]
