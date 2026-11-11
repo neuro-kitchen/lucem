@@ -156,3 +156,14 @@ docs/api/python/site/
 .DS_Store
 Thumbs.db
 tempCodeRunnerFile.py
+
+# Analysis outputs and model weights (never in git)
+*.lumen.zarr/
+*.pik.zarr/
+*.objects.json.gz
+*.safetensors
+*.onnx
+*.h5
+*.ckpt
+*.pt
+*.pth
