@@ -54,7 +54,13 @@ impl Render for StatusBar {
         let explore = s.workspace == Workspace::Explore && !s.doc.images.is_empty();
         let st = canvas.read(cx).status(cx);
         let (c1, c2, c3) = (canvas.clone(), canvas.clone(), canvas.clone());
-        let busy = s.ml.busy.as_ref().map(|(what, f)| format!("{what}{}", f.map_or(String::new(), |f| format!(" {:.0} %", f * 100.0))));
+        // What runs in the background: model installs, then every job (histology, export…;
+        // the Model node's shows below, with the results it is part of)
+        let pct = |f: Option<f32>| f.map_or(String::new(), |f| format!(" {:.0} %", f * 100.0));
+        let busy = s.ml.busy.as_ref().map(|(what, f)| format!("{what}{}", pct(*f))).or_else(|| {
+            let jobs: Vec<String> = crate::data::jobs::running().into_iter().filter(|j| j.kind != "model").map(|j| format!("{}{}", j.name, pct(j.progress))).collect();
+            (!jobs.is_empty()).then(|| jobs.join(" · "))
+        });
         h_flex()
             .flex_none()
             .h(px(theme::STATUS_BAR_H))
@@ -72,7 +78,10 @@ impl Render for StatusBar {
             })
             .when(!explore, |d| d.child(div().flex_1()))
             .children(busy.map(|b| div().text_color(color::accent_hover()).child(b)))
-            .when(s.computing, |d| d.child(div().text_color(color::warning()).child(crate::data::model_node::progress().unwrap_or_else(|| "computing results…".to_string()))))
+            .when(s.computing, |d| d.child(div().text_color(color::warning()).child(crate::data::jobs::of("model").map(|j| match j.progress {
+                Some(f) => format!("{} ({:.0} %)", j.name, f * 100.0),
+                None => j.name,
+            }).unwrap_or_else(|| "computing results…".to_string()))))
             .when(explore, |d| {
                 d.children(st.level.clone().map(|l| div().font_family("monospace").text_color(color::text_muted()).child(l)))
                     .child(div().font_family("monospace").child(crate::ui::widgets::scrub_label("status-zoom", format!("{:.1} %", st.zoom * 100.0), move |d, _, cx| c1.update(cx, |c, cx| c.zoom_at(if d > 0.0 { 1.05 } else { 1.0 / 1.05 }, None, cx)))))
@@ -284,7 +293,7 @@ impl LumenApp {
         let store = self.store.clone();
         let (can_undo, can_redo) = (self.store.read(cx).can_undo(), self.store.read(cx).can_redo());
         let recent = self.store.read(cx).prefs.recent.clone();
-        let has_selection = !self.store.read(cx).selection.is_empty();
+        let has_selection = !self.store.read(cx).sel.shapes.is_empty();
         let item = |label: &str, icon: IconName| PopupMenuItem::new(label.to_string()).icon(Icon::new(icon));
         let file = {
             let store = store.clone();
@@ -454,7 +463,7 @@ impl LumenApp {
         let tool = s.tool.clone();
         let image_id = s.doc.active_image.clone();
         let masks = s.selected_masks().len();
-        let has_selection = !s.selection.is_empty();
+        let has_selection = !s.sel.shapes.is_empty();
         let brightfield = image_id.as_deref().map(|i| s.hist_is_brightfield(i));
         // Models by purpose, those fitting the image
         let detectors: Vec<(String, String, bool)> = brightfield.map(|b| s.ml.nucleus_models_for(b).into_iter().map(|(_, m)| (m.id, m.name, m.installed)).collect()).unwrap_or_default();
@@ -869,3 +878,8 @@ impl Render for LumenApp {
             .child(div().size_full().when(rounded, |d| d.rounded(px(WINDOW_RADIUS)).shadow_lg()).child(app))
     }
 }
+
+/// Headless UI tests: the real app in a test window (layout, hit testing, no pixels).
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod tests;

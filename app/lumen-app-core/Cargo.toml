@@ -30,3 +30,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# Headless UI tests (`#[gpui_kit::test]`)
+gpui-kit = { workspace = true, features = ["test-support"] }
