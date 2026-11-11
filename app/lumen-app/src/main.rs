@@ -10,7 +10,7 @@ use lumen_app_core::navigation::actions;
 fn main() {
     // `lumen-app <path>` opens an image, an OME-Zarr container or a project
     let open = std::env::args().nth(1).map(std::path::PathBuf::from);
-    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
+    gpui_kit::application().with_assets(kitchen_ui::icons::AppAssets::new().all_icons()).run(move |cx| {
         gpui_kit::init(cx);
         actions::bind_keys(cx);
         cx.on_action(|_: &actions::Quit, cx| cx.quit());

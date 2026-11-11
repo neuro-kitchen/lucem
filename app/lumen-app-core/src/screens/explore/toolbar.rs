@@ -25,9 +25,8 @@ pub fn tool_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -
         .py(px(theme::SM))
         .gap(px(2.))
         .items_center()
-        .bg(color::chrome())
-        .border_r_1()
-        .border_color(color::border());
+        .rounded(px(theme::RADIUS_LG))
+        .bg(color::panel());
     for slot in Tool::BAR {
         match slot {
             Some(t) => {

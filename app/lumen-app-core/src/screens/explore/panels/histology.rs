@@ -143,7 +143,7 @@ pub fn panel(store: &Entity<Store>, cx: &App) -> AnyElement {
             .cursor_pointer()
             .when(is_open, |d| d.bg(color::raised()))
             .when(!is_open, |d| d.hover(|d| d.bg(color::control())))
-            .child(Icon::new(r.icon()).small().text_color(if is_open { color::accent_hover() } else { color::text_muted() }))
+            .child(Icon::new(r.icon()).small().text_color(if is_open { color::accent_mark() } else { color::text_muted() }))
             .child(div().flex_1().min_w_0().text_sm().when(is_open, |d| d.font_weight(FontWeight::SEMIBOLD)).child(r.title()))
             .child(div().flex_none().text_xs().text_color(color::text_muted()).child(status))
             .child(Icon::new(if is_open { IconName::ChevronDown } else { IconName::ChevronRight }).small().text_color(color::text_muted()))
@@ -274,7 +274,6 @@ fn recipe_body(store: &Entity<Store>, s: &Store, r: Recipe, img: &str, cells: &[
                         cx.notify();
                     })
                 })
-                .full_width(),
             ));
             for k in 0..3 {
                 let v = t.thresholds.get(k).copied().unwrap_or(0.0);
