@@ -7,6 +7,16 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
+### Documentation (2026-11-11)
+
+- **The documentation site** (`docs/`, Starlight, built with Bun): Learn, App, Histology,
+  Reference, Models, Extend, Deploy and the changelog, with lumen's own look (hematoxylin ink,
+  eosin accent, a chef's hat logo). The Operations page is generated from `lumen ops --json`; the
+  Rust API pages from rustdoc's JSON (`docs/scripts/rust_api.py`): every public function and type
+  of lumen-core, io, ops, pipeline, hist, ml and hub, with its signature and documentation.
+- **CI:** `.github/workflows/docs.yml` builds the site with Bun on pull requests, and deploys it
+  to GitHub Pages from `main` once the repository is public.
+
 ### Supply chain (2026-11-11)
 
 - RUSTSEC-2026-0194 and -0195 (quick-xml, reached only through polars' `object_store`) are
