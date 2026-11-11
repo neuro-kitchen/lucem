@@ -70,12 +70,20 @@ impl std::fmt::Display for Permission {
 pub struct Peer {
     pub name: String,
     pub permission: Permission,
+    /// A computer without a certificate on a server that does not allow anonymous clients: it
+    /// may only pair ([`crate::pairing`]).
+    pub pairing_only: bool,
 }
 
 impl Peer {
     /// A client without a certificate: read only.
     pub fn anonymous() -> Self {
-        Self { name: ANONYMOUS.into(), permission: Permission::Read }
+        Self { name: ANONYMOUS.into(), permission: Permission::Read, pairing_only: false }
+    }
+
+    /// A computer without a certificate that may only pair.
+    pub fn pairing() -> Self {
+        Self { name: ANONYMOUS.into(), permission: Permission::Read, pairing_only: true }
     }
 
     pub fn can_control(&self) -> bool {
@@ -144,6 +152,11 @@ impl ClientIdentity {
     pub fn from_file(path: &Path) -> StreamResult<Self> {
         let bytes = std::fs::read(path)?;
         Self::from_pem(&bytes)
+    }
+
+    /// SHA-256 of the first CA certificate (hex): the server it was paired with.
+    pub fn ca_fingerprint(&self) -> String {
+        self.authorities.first().map(|c| fingerprint(c)).unwrap_or_default()
     }
 
     pub fn from_pem(bytes: &[u8]) -> StreamResult<Self> {
@@ -238,6 +251,26 @@ impl Authority {
             return Err(StreamError::Tls(format!("{name} is already enrolled: revoke it first to issue a new certificate")));
         }
         let key = KeyPair::generate().map_err(tls)?;
+        let (record, cert_pem) = self.issue(&mut registry, name, permission, &key)?;
+        let pem = format!("{cert_pem}{}{}", key.serialize_pem(), self.ca_pem);
+        Ok(Enrollment { record, pem })
+    }
+
+    /// Enrolls `name` for a key the client made itself (pairing): only its public key
+    /// (SubjectPublicKeyInfo, DER) reaches the server. Returns the record and the certificate
+    /// (PEM).
+    pub fn enroll_public_key(&self, name: &str, permission: Permission, public_key: &[u8]) -> StreamResult<(ClientRecord, String)> {
+        check_name(name)?;
+        let mut registry = self.registry()?;
+        if registry.clients.iter().any(|c| c.name == name && c.active()) {
+            return Err(StreamError::Tls(format!("{name} is already paired: revoke it on the server first, or pair under another name")));
+        }
+        let key = rcgen::SubjectPublicKeyInfo::from_der(public_key).map_err(tls)?;
+        self.issue(&mut registry, name, permission, &key)
+    }
+
+    /// Signs a client certificate for `key` and records it.
+    fn issue(&self, registry: &mut Registry, name: &str, permission: Permission, key: &impl rcgen::PublicKeyData) -> StreamResult<(ClientRecord, String)> {
         let mut params = CertificateParams::new(Vec::<String>::new()).map_err(tls)?;
         params.distinguished_name = common_name(name);
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
@@ -245,12 +278,16 @@ impl Authority {
         let year = this_year();
         let expires_year = year + CLIENT_YEARS + 1;
         (params.not_before, params.not_after) = (date_time_ymd(year - 1, 1, 1), date_time_ymd(expires_year, 1, 1));
-        let cert = params.signed_by(&key, &self.issuer()).map_err(tls)?;
+        let cert = params.signed_by(key, &self.issuer()).map_err(tls)?;
         let record = ClientRecord { name: name.into(), permission, fingerprint: fingerprint(cert.der()), issued_unix: now_unix(), expires_year, revoked_unix: None };
         registry.clients.push(record.clone());
-        self.save(&registry)?;
-        let pem = format!("{}{}{}", cert.pem(), key.serialize_pem(), self.ca_pem);
-        Ok(Enrollment { record, pem })
+        self.save(registry)?;
+        Ok((record, cert.pem()))
+    }
+
+    /// The CA certificate (PEM).
+    pub fn ca_pem(&self) -> &str {
+        &self.ca_pem
     }
 
     /// Revokes `name`'s certificate: refused from its next connection on.
@@ -274,7 +311,7 @@ impl Authority {
     pub fn authorize(&self, certificate: &[u8]) -> Option<Peer> {
         let fp = fingerprint(certificate);
         let registry = self.registry().map_err(|e| tracing::warn!("reading the client registry: {e}")).ok()?;
-        registry.clients.into_iter().find(|c| c.fingerprint == fp && c.active()).map(|c| Peer { name: c.name, permission: c.permission })
+        registry.clients.into_iter().find(|c| c.fingerprint == fp && c.active()).map(|c| Peer { name: c.name, permission: c.permission, pairing_only: false })
     }
 
     fn registry(&self) -> StreamResult<Registry> {
@@ -296,6 +333,15 @@ impl Authority {
     }
 }
 
+/// Writes `bytes` (mode 0600) whole and renames it into place, so a reader never sees half a file.
+pub(crate) fn replace_private(path: &Path, bytes: &[u8]) -> StreamResult<()> {
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    write_private(&tmp, bytes, true)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// The CA's parameters. Issuing rebuilds them from here, so they must not depend on anything
 /// but constants (the issued certificates name this issuer).
 fn ca_params() -> CertificateParams {
@@ -313,7 +359,7 @@ fn common_name(name: &str) -> DistinguishedName {
 }
 
 /// Letters, digits, `.`, `_`, `-`; 1 to [`MAX_NAME_CHARS`] characters (names become file names).
-fn check_name(name: &str) -> StreamResult<()> {
+pub(crate) fn check_name(name: &str) -> StreamResult<()> {
     let ok = !name.is_empty() && name.len() <= MAX_NAME_CHARS && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) && !name.starts_with('.');
     if ok { Ok(()) } else { Err(StreamError::Tls(format!("client name {name:?}: use 1–{MAX_NAME_CHARS} letters, digits, '.', '_' or '-', not starting with '.'"))) }
 }
@@ -323,7 +369,7 @@ pub fn fingerprint(der: &[u8]) -> String {
     Sha256::digest(der).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
@@ -339,7 +385,7 @@ fn tls(e: impl std::fmt::Display) -> StreamError {
 
 /// Writes `bytes` to a new file readable only by its owner (0600 on Unix); `create_new` refuses
 /// an existing file.
-fn write_private(path: &Path, bytes: &[u8], create_new: bool) -> StreamResult<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8], create_new: bool) -> StreamResult<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true);
     if create_new {
@@ -387,7 +433,7 @@ mod tests {
         let alice = auth.enroll("alice", Permission::Control).unwrap();
         let id = ClientIdentity::from_pem(alice.pem.as_bytes()).unwrap();
         assert_eq!(id.authorities, vec![auth.ca_certificate().to_vec()]);
-        assert_eq!(auth.authorize(&id.certificate), Some(Peer { name: "alice".into(), permission: Permission::Control }));
+        assert_eq!(auth.authorize(&id.certificate), Some(Peer { name: "alice".into(), permission: Permission::Control, pairing_only: false }));
         assert!(auth.enroll("alice", Permission::Read).is_err(), "an active name is not issued twice");
 
         // The same authority after a restart: same CA, same clients

@@ -12,7 +12,11 @@ publish = false
 lumen-core = { workspace = true, default-features = false }
 lumen-io.workspace = true
 quinn.workspace = true
-rcgen.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }
+# Pairing: a short code instead of a file handed over (SPAKE2, HMAC-SHA-256)
+spake2.workspace = true
+hmac.workspace = true
+getrandom.workspace = true
 rustls.workspace = true
 rustls-pki-types = { workspace = true, features = ["std"] }
 serde.workspace = true
