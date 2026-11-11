@@ -27,8 +27,11 @@ lumen-io.workspace = true
 lumen-hist = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
 lumen-ops.workspace = true
 lumen-pipeline.workspace = true
+# `lumen mcp`, and the runners `lumen ops`, `run` and `session run` share with it
+lumen-mcp.workspace = true
 lumen-stream.workspace = true
 rustls.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
