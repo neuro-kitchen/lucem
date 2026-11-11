@@ -114,6 +114,7 @@ pub fn info(s: &Spec) -> ModelInfo {
         weights: s.files.iter().map(|(f, url, sha)| Weight { file: (*f).into(), url: (*url).into(), sha256: (*sha).into(), bytes: 0 }).collect(),
         installed: installed(s),
         default: s.default,
+        channels: 3,
     }
 }
 
@@ -165,33 +166,98 @@ pub const RUNTIME: Option<RuntimeRelease> = Some(RuntimeRelease {
 #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64"))))]
 pub const RUNTIME: Option<RuntimeRelease> = None;
 
-/// The id `install` takes for the runtime itself.
-pub const RUNTIME_ID: &str = lumen_ml::RUNTIME_ID;
+/// ONNX Runtime's GPU build for CUDA 13 (the CUDA this machine family ships now); it needs an
+/// NVIDIA driver and cuDNN 9 for CUDA 13 (`cudnn9-cuda-13`). Digest from the release's assets.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const RUNTIME_CUDA: Option<RuntimeRelease> = Some(RuntimeRelease {
+    version: "1.31.1",
+    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.31.1/onnxruntime-linux-x64-gpu_cuda13-1.31.1.tgz",
+    sha256: "b2146862e691f7e338f5aff9c7a9a5567c2ca57cf01442a1adb3a13bf62d9095",
+    bytes: 244_573_709,
+    folder: "onnxruntime-linux-x64-gpu_cuda13-1.31.1",
+});
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+pub const RUNTIME_CUDA: Option<RuntimeRelease> = None;
 
-fn runtime_dir() -> PathBuf {
-    lumen_hub::cache_dir("runtime").join(RUNTIME.as_ref().map_or("onnxruntime", |r| r.folder))
+/// The id `install` takes for the runtime itself, and for its GPU build.
+pub const RUNTIME_ID: &str = lumen_ml::RUNTIME_ID;
+pub const RUNTIME_CUDA_ID: &str = lumen_ml::RUNTIME_CUDA_ID;
+
+fn release_dir(r: &RuntimeRelease) -> PathBuf {
+    lumen_hub::cache_dir("runtime").join(r.folder)
 }
 
-/// The library of lumen's own ONNX Runtime, when installed.
-fn own_library() -> Option<PathBuf> {
-    let lib = runtime_dir().join(RUNTIME.as_ref()?.folder).join("lib");
-    let mut libs: Vec<PathBuf> = std::fs::read_dir(&lib).ok()?.flatten().map(|e| e.path()).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| (n.starts_with("libonnxruntime.so.") || n.starts_with("libonnxruntime.") && n.ends_with(".dylib")) && !n.contains("providers"))).collect();
+/// The ONNX Runtime library inside an unpacked release (whatever its top folder is called).
+fn library_in(dir: &std::path::Path) -> Option<PathBuf> {
+    let is_lib = |p: &PathBuf| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| (n.starts_with("libonnxruntime.so.") || n.starts_with("libonnxruntime.") && n.ends_with(".dylib")) && !n.contains("providers"));
+    let mut libs: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path().join("lib")).filter(|l| l.is_dir()).flat_map(|l| std::fs::read_dir(l).into_iter().flatten().flatten().map(|e| e.path())).filter(is_lib).collect();
     libs.sort();
     libs.pop()
+}
+
+/// The library of lumen's own ONNX Runtime (CPU build), when installed.
+fn own_library() -> Option<PathBuf> {
+    library_in(&release_dir(RUNTIME.as_ref()?))
+}
+
+/// The library of lumen's GPU build, when installed.
+fn own_cuda_library() -> Option<PathBuf> {
+    library_in(&release_dir(RUNTIME_CUDA.as_ref()?))
+}
+
+/// Whether cuDNN 9 can be loaded (the GPU build's CUDA provider needs it).
+pub fn cudnn_found() -> bool {
+    let in_cache = std::process::Command::new("ldconfig").arg("-p").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libcudnn.so.9"));
+    let dirs = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    in_cache || dirs.split(':').chain(["/usr/local/cuda/lib64", "/usr/local/cuda/targets/x86_64-linux/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu"]).filter(|d| !d.is_empty()).any(|d| std::path::Path::new(d).join("libcudnn.so.9").exists())
+}
+
+/// The GPU build's state for the manifest.
+pub fn gpu_runtime() -> Option<lumen_ml::GpuRuntime> {
+    let r = RUNTIME_CUDA.as_ref()?;
+    let installed = own_cuda_library().is_some();
+    let cudnn = cudnn_found();
+    let detail = match (installed, cudnn) {
+        (false, _) => format!("ONNX Runtime {} for CUDA 13 ({:.0} MB): SAM on the GPU; needs the NVIDIA driver and cuDNN 9 (cudnn9-cuda-13)", r.version, r.bytes as f64 / 1e6),
+        (true, false) => "The GPU build is installed but cuDNN 9 is not found (install cudnn9-cuda-13): the CPU build runs".into(),
+        (true, true) => "The GPU build is installed and cuDNN 9 found: SAM runs on the GPU".into(),
+    };
+    Some(lumen_ml::GpuRuntime { installed, usable: installed && cudnn, bytes: r.bytes, detail })
+}
+
+fn install_release(r: &RuntimeRelease, progress: &mut dyn FnMut(u64, u64)) -> Result<PathBuf, String> {
+    let archive = lumen_hub::cache_dir("runtime").join(format!("{}.tgz", r.folder));
+    lumen_hub::fetch_archive(r.url, &archive, r.sha256, r.bytes, &release_dir(r), progress)?;
+    // The archive is no longer needed once unpacked (the GPU build is large)
+    let _ = std::fs::remove_file(&archive);
+    library_in(&release_dir(r)).ok_or_else(|| "the ONNX Runtime archive has no library".to_string())
 }
 
 /// Downloads and verifies ONNX Runtime into lumen's cache.
 pub fn install_runtime(progress: &mut dyn FnMut(u64, u64)) -> Result<(), String> {
     let r = RUNTIME.as_ref().ok_or("no ONNX Runtime build is published for this platform here: set ORT_DYLIB_PATH")?;
-    let archive = lumen_hub::cache_dir("runtime").join(format!("{}.tgz", r.folder));
-    lumen_hub::fetch_archive(r.url, &archive, r.sha256, r.bytes, &runtime_dir(), progress)?;
-    own_library().map(|_| ()).ok_or_else(|| "the ONNX Runtime archive has no library".to_string())
+    install_release(r, progress).map(|_| ())
 }
 
-/// The ONNX Runtime library to load: `ORT_DYLIB_PATH`, else lumen's own (installed from Settings),
-/// else the `onnxruntime` Python package, else the system's.
+/// Downloads and verifies the GPU build (used instead of the CPU one when cuDNN 9 is there; the
+/// plugin must start again to load it).
+pub fn install_runtime_cuda(progress: &mut dyn FnMut(u64, u64)) -> Result<(), String> {
+    let r = RUNTIME_CUDA.as_ref().ok_or("no ONNX Runtime GPU build is published for this platform")?;
+    install_release(r, progress).map(|_| ())
+}
+
+/// The ONNX Runtime library to load: `ORT_DYLIB_PATH`, else lumen's GPU build (when cuDNN 9 is
+/// there and `LUMEN_ML_EP` is not `cpu`), else its CPU build, else the `onnxruntime` Python
+/// package, else the system's.
 fn find_library() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let cpu_only = std::env::var("LUMEN_ML_EP").is_ok_and(|v| v.eq_ignore_ascii_case("cpu"));
+    if !cpu_only
+        && cudnn_found()
+        && let Some(p) = own_cuda_library()
+    {
         return Some(p);
     }
     if let Some(p) = own_library() {
@@ -239,14 +305,15 @@ pub fn init_runtime() -> RuntimeStatus {
             None => RuntimeStatus {
                 ready: false,
                 detail: format!("ONNX Runtime is not installed: Install it here ({}, {:.0} MB, verified), or set ORT_DYLIB_PATH", RUNTIME.as_ref().map_or("?", |r| r.version), RUNTIME.as_ref().map_or(0.0, |r| r.bytes as f64 / 1e6)),
+                gpu: gpu_runtime(),
             },
             Some(lib) => match ort::init_from(&lib).map_err(|e| e.to_string()).and_then(|b| b.with_name("lumen-ml-sam").build().map_err(|e| e.to_string())) {
                 Ok(env) => {
                     let _ = ENV.set(env);
                     let cuda = *CUDA.get_or_init(|| has_cuda(&lib));
-                    RuntimeStatus { ready: true, detail: format!("ONNX Runtime on the {} ({})", if cuda { "GPU (CUDA), else the CPU" } else { "CPU" }, lib.display()) }
+                    RuntimeStatus { ready: true, detail: format!("ONNX Runtime on the {} ({})", if cuda { "GPU (CUDA), else the CPU" } else { "CPU" }, lib.display()), gpu: gpu_runtime() }
                 }
-                Err(e) => RuntimeStatus { ready: false, detail: format!("ONNX Runtime at {} did not load ({e}); lumen needs ONNX Runtime 1.31 or newer: pip install -U onnxruntime", lib.display()) },
+                Err(e) => RuntimeStatus { ready: false, detail: format!("ONNX Runtime at {} did not load ({e}); lumen needs ONNX Runtime 1.31 or newer: pip install -U onnxruntime", lib.display()), gpu: gpu_runtime() },
             },
     };
     if status.ready {

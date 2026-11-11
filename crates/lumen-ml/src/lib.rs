@@ -26,6 +26,8 @@
 /// The id `install` takes (and `Request::Install` carries) for a plugin's runtime itself rather
 /// than a model: a plugin whose runtime is not ready installs it under this id.
 pub const RUNTIME_ID: &str = "runtime";
+/// The id for a plugin's GPU build of its runtime (see [`manifest::GpuRuntime`]).
+pub const RUNTIME_CUDA_ID: &str = "runtime-cuda";
 
 pub mod client;
 pub mod discover;
@@ -34,5 +36,5 @@ pub mod protocol;
 
 pub use client::PluginProcess;
 pub use discover::{discover, plugin_dirs, PROGRAM_PREFIX};
-pub use manifest::{ModelInfo, PluginInfo, RuntimeStatus, Task, Weight};
+pub use manifest::{GpuRuntime, ModelInfo, PluginInfo, RuntimeStatus, Task, Weight};
 pub use protocol::{Event, InstanceClass, InstancesResult, MaskOut, Prompt, RasterRef, Request, SegmentResult};

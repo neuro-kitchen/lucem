@@ -6,6 +6,7 @@
 //! lumen-ml-sam info               the manifest (JSON): models, whether installed, the runtime
 //! lumen-ml-sam install <model>    downloads and verifies a model's weights
 //! lumen-ml-sam install runtime    downloads and verifies ONNX Runtime into lumen's cache
+//! lumen-ml-sam install runtime-cuda   its GPU build (CUDA 13; used when cuDNN 9 is found)
 //! lumen-ml-sam serve              requests on stdin, events on stdout, one JSON object per line
 //!                                 (lumen-ml's protocol); models stay loaded between requests
 //! ```
@@ -35,19 +36,21 @@ fn emit(e: &Event) {
 
 /// Installs a model, reporting progress as events (`serve`) or on stderr (`install`).
 fn install(id: &str, events: bool) -> Result<(), String> {
-    if id == sam::RUNTIME_ID {
+    if id == sam::RUNTIME_ID || id == sam::RUNTIME_CUDA_ID {
+        let gpu = id == sam::RUNTIME_CUDA_ID;
         let mut last = -1i64;
-        sam::install_runtime(&mut |done, total| {
+        let mut report = |done: u64, total: u64| {
             let pct = (done * 100 / total.max(1)) as i64;
             if pct != last {
                 last = pct;
                 if events {
-                    emit(&Event::Progress { stage: "downloading ONNX Runtime".into(), fraction: Some(pct as f32 / 100.0) });
+                    emit(&Event::Progress { stage: if gpu { "downloading ONNX Runtime (GPU)".into() } else { "downloading ONNX Runtime".into() }, fraction: Some(pct as f32 / 100.0) });
                 } else {
                     eprint!("\rONNX Runtime {pct:3} %");
                 }
             }
-        })?;
+        };
+        if gpu { sam::install_runtime_cuda(&mut report) } else { sam::install_runtime(&mut report) }?;
         if !events {
             eprintln!();
         }

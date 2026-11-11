@@ -68,6 +68,14 @@ pub struct ModelInfo {
     /// The plugin's suggestion when the user has not chosen.
     #[serde(default)]
     pub default: bool,
+    /// Channels its images have: 3 (RGB, e.g. H&E) or 1 (one fluorescence channel); 0: not
+    /// said (RGB).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub channels: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 impl ModelInfo {
@@ -82,6 +90,20 @@ pub struct RuntimeStatus {
     pub ready: bool,
     /// What runs the models (`ONNX Runtime 1.22.1 (CUDA, CPU)`), or what is missing and how to
     /// get it.
+    pub detail: String,
+    /// A GPU build of the runtime the plugin can install (`install runtime-cuda`), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuRuntime>,
+}
+
+/// A plugin's optional GPU runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuRuntime {
+    pub installed: bool,
+    /// Installed and everything it needs is there (a driver, libraries such as cuDNN).
+    pub usable: bool,
+    pub bytes: u64,
+    /// What it is, or what it still needs.
     pub detail: String,
 }
 

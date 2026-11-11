@@ -1,0 +1,24 @@
+[package]
+name = "lumen-ml-stardist"
+description = "lumen's StarDist plugin: nuclei as star-convex polygons on Burn, a separate program the app runs (lumen-ml protocol over stdin / stdout)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "BSD-3-Clause"
+publish = false
+
+[[bin]]
+name = "lumen-ml-stardist"
+path = "src/main.rs"
+
+[features]
+default = ["wgpu", "cpu", "cuda"]
+wgpu = ["lumen-model-stardist/wgpu"]
+cpu = ["lumen-model-stardist/cpu"]
+cuda = ["lumen-model-stardist/cuda"]
+
+[dependencies]
+lumen-ml = { path = "../../../crates/lumen-ml" }
+lumen-model-stardist.workspace = true
+serde_json.workspace = true

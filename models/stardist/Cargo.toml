@@ -1,0 +1,25 @@
+[package]
+name = "lumen-model-stardist"
+description = "StarDist (Schmidt, Weigert et al.) for lumen on Burn: the H&E nuclei model, its Keras weights fetched from Zenodo, verified through lumen-hub and turned into safetensors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+# StarDist's code and the published model are BSD-3-Clause
+license = "BSD-3-Clause"
+publish = false
+
+[features]
+default = ["wgpu", "cpu", "cuda"]
+wgpu = ["burn/wgpu"]
+cpu = ["burn/cpu"]
+cuda = ["burn/cuda"]
+
+[dependencies]
+lumen-ml = { path = "../../crates/lumen-ml" }
+lumen-hub.workspace = true
+burn = { workspace = true, features = ["std", "fusion", "autotune"] }
+# The same CubeCL as Burn's: its runtime configuration (compiled-kernel cache) is set here
+cubecl.workspace = true
+hdf5-reader.workspace = true
+safetensors.workspace = true
