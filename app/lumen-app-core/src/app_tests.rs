@@ -90,7 +90,8 @@ fn every_command_runs(cx: &mut TestAppContext) {
     let registry = cx.update(|cx| app.read(cx).registry.clone());
     let commands = registry.all();
     assert!(commands.len() > 100, "every action is a command: {}", commands.len());
-    let dialog = ["file.open_image", "file.open_project", "file.save_in", "file.import_geojson", "script.from_file", "app.quit", "file.new", "image.remove"];
+    // File dialogs, quitting, and the exports (they write files where the test runs)
+    let dialog = ["file.open_image", "file.open_project", "file.save_in", "file.import_geojson", "script.from_file", "app.quit", "file.new", "image.remove", "file.export_geojson", "file.export_cells", "analyze.export_csv"];
     for c in commands.into_iter().filter(|c| !dialog.contains(&c.id.as_ref())) {
         let r = cx.update_window(window, |_, window, cx| registry.run(&c.id, serde_json::Value::Null, window, cx)).unwrap();
         if let Err(e) = r {
