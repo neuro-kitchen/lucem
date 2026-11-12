@@ -73,7 +73,7 @@
   },
   "evenBetterToml.formatter.alignComments": false,
 
-  // ---- Markdown (README, docs, .knowledge) ----
+  // ---- Markdown (README, docs) ----
   "[markdown]": {
     "editor.defaultFormatter": "yzhang.markdown-all-in-one",
     "editor.wordWrap": "wordWrapColumn",

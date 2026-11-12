@@ -8,6 +8,12 @@ sidebar:
 `lucem-app` is a workstation for large microscopy images. It draws whole slides and volumes from
 their pyramids and runs processing on your GPU as you change it.
 
+<figure>
+  <img class="light:sl-hidden" src="/lucem/screenshots/main-dark.png" alt="lucem-app in Explore: a multispectral lung-cancer scan with a tissue region drawn on it, the channels and shapes in the Layers panel" />
+  <img class="dark:sl-hidden" src="/lucem/screenshots/main-light.png" alt="lucem-app in Explore: a multispectral lung-cancer scan with a tissue region drawn on it, the channels and shapes in the Layers panel" />
+  <figcaption>Explore: a whole-slide multispectral scan (5 channels) drawn from its pyramid, a tissue region drawn on it. Sample image © PerkinElmer / Akoya Biosciences, <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</figcaption>
+</figure>
+
 ## Workspaces
 
 The workspaces sit at the top left, after the **Lucem** and **Help** menus. Each has its own
