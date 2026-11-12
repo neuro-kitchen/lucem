@@ -20,6 +20,8 @@ No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 - **Shapes by id:** `shapes.list`, `shapes.draw` (rectangle, ellipse, polygon, point in image
   pixels), `shapes.set_class` ("call that region tissue"), `shapes.delete`, `classes.add`; each
   returns the ids it touched.
+- A new script node (Automate › New Python / Rust script node) opens in the Pipeline's Inspector
+  editor, selected, instead of the system's text editor (still a button there).
 
 ### Agents, the code editor and environments (2026-11-12)
 

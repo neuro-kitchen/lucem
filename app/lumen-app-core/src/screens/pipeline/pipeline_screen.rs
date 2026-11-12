@@ -66,8 +66,13 @@ impl PipelineView {
         let canvas = cx.new(|cx| GraphCanvas::new(store.clone(), cx));
         let inspector = cx.new(|cx| Inspector::new(store.clone(), canvas.clone(), window, cx));
         let subs = vec![
-            cx.subscribe(&store, |_, _, e: &AppEvent, cx| {
-                if matches!(e, AppEvent::Document(_) | AppEvent::Results | AppEvent::ImageReady(_)) {
+            cx.subscribe(&store, |this, _, e: &AppEvent, cx| {
+                if let AppEvent::RevealNode(id) = e {
+                    // A new script node: selected, so its code opens in the Inspector's editor
+                    let id = id.clone();
+                    this.canvas.update(cx, |c, cx| c.select([id], cx));
+                }
+                if matches!(e, AppEvent::Document(_) | AppEvent::Results | AppEvent::ImageReady(_) | AppEvent::RevealNode(_)) {
                     cx.notify();
                 }
             }),

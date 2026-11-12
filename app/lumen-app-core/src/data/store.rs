@@ -45,6 +45,9 @@ pub enum AppEvent {
     Cursor,
     /// Bring a level-0 point of the shown image into the focused view.
     Reveal([f64; 2]),
+    /// Select this Pipeline node and show the Pipeline (a new script node: its code opens in the
+    /// Inspector's editor).
+    RevealNode(String),
 }
 
 /// What a pane of Explore shows.
@@ -851,7 +854,7 @@ impl Store {
     // ------------------------------------------------------------------------
 
     /// A new script node (Python or Rust) from the template, in the project's `scripts/` folder
-    /// (or the user's), opened in the system's editor.
+    /// (or the user's), selected in the Pipeline so its code opens in the Inspector's editor.
     pub fn add_script_node(&mut self, lang: crate::data::script::Language, cx: &mut Context<Self>) {
         use crate::data::script;
         let dir = script::scripts_dir(self.folder().as_deref());
@@ -859,7 +862,6 @@ impl Store {
             Ok(p) => p,
             Err(e) => return self.set_status(format!("Could not write the script: {e}"), cx),
         };
-        let _ = script::open_in_editor(&path);
         self.add_script_file(path, cx);
     }
 
@@ -876,8 +878,13 @@ impl Store {
         };
         let kind = NodeKind::Script { path: path.to_string_lossy().into_owned(), inputs: h.inputs, output: h.output, params: h.params, enabled: true };
         let y = self.doc.graph.next_row();
+        let before: std::collections::HashSet<String> = self.doc.graph.nodes.iter().map(|n| n.id.clone()).collect();
         if self.execute(Command::AddNode { kind, x: 0.0, y, id: None, after: self.sel.node.clone() }, cx).is_ok() {
-            self.set_status(format!("Script {} added; edit it, save, and the node runs again", crate::domain::paths::short_path(&path)), cx);
+            self.set_status(format!("Script {} added: edit it in the Inspector, Save and run", crate::domain::paths::short_path(&path)), cx);
+            if let Some(id) = self.doc.graph.nodes.iter().find(|n| !before.contains(&n.id)).map(|n| n.id.clone()) {
+                self.set_workspace(Workspace::Pipeline, cx);
+                cx.emit(AppEvent::RevealNode(id));
+            }
         }
     }
 
