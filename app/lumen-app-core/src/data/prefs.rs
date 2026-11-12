@@ -65,6 +65,9 @@ pub struct Prefs {
     /// The model the Segment tool uses (a plugin's model id; `None`: the plugin's default).
     #[serde(default)]
     pub ml_model: Option<String>,
+    /// The agent the chat starts: its ACP command (`agy acp`; `None`: the first one installed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 fn dark() -> Option<bool> {
@@ -94,7 +97,7 @@ fn yes() -> bool {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { recent: Vec::new(), sidebar_open: true, rulers: false, left_tab: left_tab(), right_tab: None, studio_tabs: Vec::new(), studio_collapsed: Vec::new(), pipeline_dock: false, link_views: false, left_open: true, right_open: true, theme: dark(), accent: None, tools: Default::default(), pasteboard: 0, font_size: font_size(), tile_threads: 0, runtime: None, ml_model: None, dock_sides: None }
+        Self { recent: Vec::new(), sidebar_open: true, rulers: false, left_tab: left_tab(), right_tab: None, studio_tabs: Vec::new(), studio_collapsed: Vec::new(), pipeline_dock: false, link_views: false, left_open: true, right_open: true, theme: dark(), accent: None, tools: Default::default(), pasteboard: 0, font_size: font_size(), tile_threads: 0, runtime: None, ml_model: None, dock_sides: None, agent: None }
     }
 }
 

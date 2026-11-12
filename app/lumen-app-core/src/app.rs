@@ -14,7 +14,8 @@ use gpui_kit::{
     div, px, App, AppContext as _, Context, Entity, ExternalPaths, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window,
 };
-use kitchen_shell::{Registry, RemoteSpec, SettingsSection, Shell, ShellEvent, ShellSpec, WorkspaceSpec};
+use kitchen_agent::{AcpClient, AgentSpec, AgentWorkspace, McpHost, McpStdio, Policy};
+use kitchen_shell::{CommandSpec, MenuItem, MenuSpec, Registry, RemoteSpec, SettingsSection, Shell, ShellEvent, ShellSpec, WorkspaceSpec};
 
 use crate::commands::{self, Ctx};
 use crate::data::store::{AppEvent, Store, ViewRequest};
@@ -148,7 +149,80 @@ pub struct LumenApp {
     pub explore: Entity<ExploreView>,
     pub pipeline: Entity<PipelineView>,
     pub analyze: Entity<AnalyzeView>,
+    /// The Agents workspace: the chat with the agent, its sessions, what it changed.
+    pub agents: Entity<AgentWorkspace>,
+    /// lumen's commands served to agents (MCP), and the socket they reach it on.
+    pub host: Entity<McpHost>,
+    socket: std::path::PathBuf,
     _subs: Vec<Subscription>,
+}
+
+/// What an agent is told about lumen when it connects.
+const AGENT_INSTRUCTIONS: &str = "lumen is a GPU workstation for histology and microscopy. Its tools are the app's own commands, run in the open window as the person would: open images, find tissue and cells, classify, add pipeline steps (process.op.*), show views, export. Commands that change something wait for the person to allow them. Every call is recorded in the session.";
+
+/// The agent the chat starts: the one chosen in Settings, else the first installed.
+fn chosen_agent(store: &Entity<Store>, cx: &App) -> AgentSpec {
+    let known = kitchen_agent::known_agents();
+    match store.read(cx).prefs.agent.clone() {
+        Some(cmd) => known.iter().find(|a| a.command == cmd).cloned().unwrap_or_else(|| AgentSpec::new("Agent", cmd)),
+        None => known.iter().find(|a| a.available()).cloned().unwrap_or_else(|| known[0].clone()),
+    }
+}
+
+/// Starts the chosen agent in the chat (replacing one running): it reaches lumen's commands
+/// through this program run as an MCP bridge to the app's socket.
+fn start_agent(agents: &Entity<AgentWorkspace>, store: &Entity<Store>, socket: &std::path::Path, cx: &mut App) {
+    let spec = chosen_agent(store, cx);
+    if !spec.available() {
+        let text = format!("**{}** is not installed (`{}` was not found). Install it, or choose another agent under Agent ▸ Use.", spec.name, spec.command);
+        agents.update(cx, |w, cx| w.chat().update(cx, |c, cx| {
+            c.push(kitchen_ui::chat::ChatMessage::Agent { text }, cx);
+        }));
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let mcp = vec![McpStdio { name: "lumen".into(), command: exe, args: vec!["--mcp-bridge".into(), socket.display().to_string()] }];
+    let cwd = store.read(cx).project_file.as_ref().and_then(|f| f.parent().map(|p| p.to_path_buf())).or_else(|| std::env::var_os("HOME").map(Into::into)).unwrap_or_else(std::env::temp_dir);
+    let client = AcpClient::start(spec, cwd, mcp);
+    agents.update(cx, |w, cx| w.connect(client, cx));
+}
+
+/// The Agents workspace's commands: start, stop, a new session, which agent.
+fn agent_commands(agents: &Entity<AgentWorkspace>, store: &Entity<Store>, socket: &std::path::Path) -> Vec<CommandSpec> {
+    let (a1, s1, k1) = (agents.clone(), store.clone(), socket.to_path_buf());
+    let (a2, a3, a4) = (agents.downgrade(), agents.downgrade(), agents.downgrade());
+    let (a5, s5, k5) = (agents.clone(), store.clone(), socket.to_path_buf());
+    let a6 = agents.downgrade();
+    vec![
+        CommandSpec::new("agent.start", "Start the agent", IconName::Play, move |_, cx| start_agent(&a1, &s1, &k1, cx)).group("Agents").hint("Starts the chosen agent in the chat (again, if it runs)"),
+        CommandSpec::new("agent.stop", "Stop the agent", IconName::CircleStop, move |_, cx| {
+            let _ = a2.update(cx, |w, cx| w.disconnect(cx));
+        })
+        .group("Agents")
+        .hint("Closes the agent's program")
+        .enabled(move |cx| if a3.upgrade().is_some_and(|w| w.read(cx).agent().is_some()) { Ok(()) } else { Err("No agent is running".into()) }),
+        CommandSpec::new("agent.new_session", "New session", IconName::Plus, move |_, cx| {
+            let _ = a4.update(cx, |w, cx| w.new_session(cx));
+        })
+        .group("Agents")
+        .hint("An empty conversation (the agent starts afresh)"),
+        CommandSpec::with_args::<AgentArgs>("agent.use", "Use an agent", IconName::Bot, move |a, _, cx| {
+            s5.update(cx, |s, cx| s.update_prefs(|p| p.agent = Some(a.command.clone()), cx));
+            if a6.upgrade().is_some_and(|w| w.read(cx).agent().is_some()) {
+                start_agent(&a5, &s5, &k5, cx);
+            }
+            Ok(serde_json::Value::Null)
+        })
+        .group("Agents")
+        .hint("Which agent the chat starts (an ACP command such as `agy acp`)"),
+    ]
+}
+
+/// An agent to use.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct AgentArgs {
+    /// Its ACP command (`agy acp`, `claude-code-acp`).
+    command: String,
 }
 
 impl LumenApp {
@@ -194,12 +268,48 @@ impl LumenApp {
         AnalyzeView::provide(&registry, analyze.downgrade());
         pipeline.update(cx, |p, _| p.set_registry(registry.clone()));
 
+        // The Agents workspace: lumen's commands as MCP tools (asking before anything that
+        // changes), the chat running an ACP agent, the project's files and what changed
+        let socket = kitchen_agent::default_socket("lumen");
+        let host = cx.new(|cx| McpHost::new("lumen", AGENT_INSTRUCTIONS, registry.clone(), window.window_handle(), Policy::Ask, cx));
+        if !cfg!(test) && let Err(e) = host.read(cx).listen(socket.clone()) {
+            eprintln!("MCP socket: {e}");
+        }
+        let project_dir = store.read(cx).project_file.as_ref().and_then(|f| f.parent().map(|p| p.to_path_buf()));
+        let watched: Vec<std::path::PathBuf> = project_dir.iter().flat_map(|d| [crate::domain::project::PROJECT_FILE, crate::domain::project::PIPELINE_FILE, "session.json"].map(|f| d.join(f))).collect();
+        let changes = cx.new(|cx| kitchen_shell::ChangesPanel::new(watched, cx));
+        let sessions = crate::data::prefs::Prefs::dir().unwrap_or_else(std::env::temp_dir).join("agents");
+        let files_root = project_dir.clone().or_else(|| std::env::var_os("HOME").map(Into::into)).unwrap_or_else(std::env::temp_dir);
+        let context = kitchen_ui::chat::ChatContext { workspace: store.read(cx).doc.name.clone(), location: kitchen_ui::chat::Location::Local, model: String::new() };
+        let agents = cx.new(|cx| AgentWorkspace::new(sessions, files_root, host.clone(), changes, context, window, cx));
+        registry.extend(agent_commands(&agents, &store, &socket));
+        registry.provide("agent.choices", {
+            let store = store.clone();
+            move |cx| {
+                let current = chosen_agent(&store, cx);
+                kitchen_agent::known_agents()
+                    .into_iter()
+                    .map(|a| {
+                        if a.available() {
+                            MenuItem::run(a.name.clone(), "agent.use", serde_json::json!({"command": a.command})).icon(IconName::Bot).checked(a.command == current.command)
+                        } else {
+                            MenuItem::label(format!("{} (not installed: {})", a.name, a.command))
+                        }
+                    })
+                    .collect()
+            }
+        });
+
         let explore_body = cx.new(|cx| ExploreBody { store: store.clone(), explore: explore.clone(), _subs: vec![cx.subscribe(&store, |_, _, _: &AppEvent, cx| cx.notify())] });
         let workspace = |w: Workspace, view: gpui_kit::AnyView, menus| WorkspaceSpec::new(commands::workspace_id(w), w.title(), w.icon(), view).hint(w.hint()).menus(menus);
         let workspaces = vec![
             workspace(Workspace::Explore, explore_body.into(), commands::explore_menus()),
             workspace(Workspace::Pipeline, pipeline.clone().into(), PipelineView::menu_specs()),
             workspace(Workspace::Analyze, analyze.clone().into(), AnalyzeView::menu_specs()),
+            WorkspaceSpec::new("agents", "Agents", IconName::Bot, agents.clone()).hint("Chat with an agent that works in lumen: its sessions, and what it changed").menus(vec![MenuSpec::new(
+                "Agent",
+                vec![MenuItem::command("agent.start"), MenuItem::command("agent.stop"), MenuItem::command("agent.new_session"), MenuItem::Separator, MenuItem::label("Use"), MenuItem::provided("agent.choices")],
+            )]),
         ];
         let settings_view = cx.new(|_| SettingsView::new(store.clone()));
         let sections = Section::ALL
@@ -208,7 +318,9 @@ impl LumenApp {
                 let view = settings_view.clone();
                 SettingsSection::new(sec.title(), sec.icon(), move |_, cx| view.update(cx, |v, cx| v.body(sec, cx)))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut sections = sections;
+        sections.push(kitchen_agent::workspace::settings_section(host.clone(), (!cfg!(test)).then(|| socket.clone())));
         let readings = cx.new(|cx| StatusReadings::new(store.clone(), explore.clone(), cx));
         let mut spec = ShellSpec::new("Lumen", registry.clone(), workspaces);
         spec.app_menu = commands::app_menu();
@@ -219,6 +331,7 @@ impl LumenApp {
         spec.status_items = Some(Rc::new(move |_, _| readings.clone().into_any_element()));
         let shell = cx.new(|cx| Shell::new(spec, window, cx));
         let _ = shell_cell.set(shell.downgrade());
+        registry.add(kitchen_agent::workspace::open_command(&shell, "agents"));
 
         // Keys: every command's (the canvas binds its own)
         for bad in registry.bind_keys(None, cx) {
@@ -229,6 +342,10 @@ impl LumenApp {
         let subs = vec![
             cx.subscribe(&shell, |this, _, e: &ShellEvent, cx| match e {
                 ShellEvent::WorkspaceChanged(id) => {
+                    // The agent starts the first time its workspace is shown (not in tests)
+                    if id.as_ref() == "agents" && !cfg!(test) && this.agents.read(cx).agent().is_none() {
+                        start_agent(&this.agents, &this.store, &this.socket, cx);
+                    }
                     if let Some(w) = Workspace::ALL.into_iter().find(|w| commands::workspace_id(*w) == *id) {
                         this.store.update(cx, |s, cx| s.set_workspace(w, cx));
                     }
@@ -260,7 +377,7 @@ impl LumenApp {
                 }
             }),
         ];
-        let this = Self { store, shell, registry, explore, pipeline, analyze, _subs: subs };
+        let this = Self { store, shell, registry, explore, pipeline, analyze, agents, host, socket, _subs: subs };
         this.sync_shell(&AppEvent::Workspace, cx);
         this.sync_shell(&AppEvent::Status, cx);
         this
