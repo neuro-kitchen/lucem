@@ -9,7 +9,6 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -24,6 +23,8 @@ use crate::domain::graph::{NodeKind, ViewStyle};
 use crate::ui::param_editor::{Commit, EditOps as _, ParamEditor};
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::{divider_v, row, stepper, MenuSelect, Section};
+use kitchen_shell::{CommandSpec, MenuItem, MenuSpec, Registry};
+use serde_json::json;
 
 use super::canvas::{CanvasEvent, GraphCanvas};
 use super::catalog::{describe, operations, port_color, sources, Template};
@@ -34,7 +35,29 @@ pub struct PipelineView {
     store: Entity<Store>,
     pub canvas: Entity<GraphCanvas>,
     inspector: Entity<Inspector>,
+    /// The app's commands, for the bar drawn when the Pipeline is docked in Explore.
+    registry: Option<Registry>,
     _subs: Vec<Subscription>,
+}
+
+/// A source node: a channel of an image, or (no channel) the image's shapes as a mask.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct SourceArgs {
+    /// The image's id.
+    image: String,
+    /// The channel (0 is the first); none for the image's shapes as a mask.
+    #[serde(default)]
+    channel: Option<usize>,
+}
+
+/// A model step.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct ModelArgs {
+    /// The model's id (Settings › Models).
+    id: String,
+    /// Whether it segments what shapes point at (Segment Anything) rather than every nucleus.
+    #[serde(default)]
+    interactive: bool,
 }
 
 impl PipelineView {
@@ -49,7 +72,7 @@ impl PipelineView {
             }),
             cx.subscribe(&canvas, |_, _, _: &CanvasEvent, cx| cx.notify()),
         ];
-        Self { store, canvas, inspector, _subs: subs }
+        Self { store, canvas, inspector, registry: None, _subs: subs }
     }
 
     fn canvas_do(canvas: &WeakEntity<GraphCanvas>, cx: &mut App, f: impl FnOnce(&mut GraphCanvas, &mut Context<GraphCanvas>)) {
@@ -58,8 +81,8 @@ impl PipelineView {
 
     /// The menu bar: Sources, Edit, one menu per family of operators, Output, View.
     /// The Pipeline's own bar: shown above the canvas when the Pipeline is docked in Explore;
-    /// in its workspace its menus sit in the app's menu row instead ([`Self::menus`]).
-    fn menu_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// in its workspace the same menus sit in the frame's menu row ([`Self::menu_specs`]).
+    fn menu_bar(&self, _cx: &mut Context<Self>) -> impl IntoElement + use<> {
         h_flex()
             .id("pipeline-menu-bar")
             .flex_none()
@@ -69,140 +92,181 @@ impl PipelineView {
             .bg(color::panel())
             .border_b_1()
             .border_color(color::border())
-            .child(self.menus(cx))
+            .child(self.menus())
     }
 
-    /// The Pipeline's menus: Sources, Edit, Process (Find an operation, then a submenu per
-    /// family, as Explore's Process), Output, Script, Model, View; the port colours at the end.
-    pub fn menus(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let canvas = self.canvas.downgrade();
-        let selected = !self.canvas.read(cx).selected.is_empty();
-        let menu = |id: &'static str, title: &'static str, icon: IconName, items: Vec<(String, String, Template)>| {
-            let canvas = canvas.clone();
-            Button::new(id).ghost().small().icon(Icon::new(icon)).label(title).dropdown_menu(move |m: PopupMenu, _, _| {
-                let mut m = m.scrollable(true).max_h(px(520.));
-                if items.is_empty() {
-                    m = m.label("Open an image first");
+    /// The Pipeline's commands (kitchen-shell): editing the graph, adding sources, outputs,
+    /// scripts and model steps, and the canvas' view. Its operations are the `process.op.*`
+    /// commands, which add a node while the Pipeline is shown (or with `{"node": true}`).
+    pub fn commands(this: WeakEntity<Self>, store: Entity<Store>) -> Vec<CommandSpec> {
+        let canvas_do = |f: fn(&mut GraphCanvas, &mut Context<GraphCanvas>)| {
+            let this = this.clone();
+            move |_: &mut Window, cx: &mut App| {
+                if let Some(p) = this.upgrade() {
+                    let canvas = p.read(cx).canvas.clone();
+                    canvas.update(cx, f);
                 }
-                for (label, hint, template) in &items {
-                    let (canvas, template) = (canvas.clone(), template.clone());
-                    m = m.item(PopupMenuItem::new(format!("{label}   {hint}")).on_click(move |_, _, cx| Self::canvas_do(&canvas, cx, |c, cx| c.add(&template, None, cx))));
-                }
-                m
-            })
+            }
         };
-        let src = sources(&self.store.read(cx).doc);
-        let mut bar = h_flex()
-            .flex_1()
-            .gap(px(2.))
-            .items_center()
-            .child(menu("pipeline-menu-sources", "Sources", IconName::Image, src.items.into_iter().map(|i| (i.label, i.hint, i.template)).collect()));
-        let edit = {
-            let canvas = canvas.clone();
-            Button::new("pipeline-menu-edit").ghost().small().label("Edit").dropdown_menu(move |m: PopupMenu, _, _| {
-                let item = |label: &'static str, enabled: bool, f: fn(&mut GraphCanvas, &mut Context<GraphCanvas>)| {
-                    let canvas = canvas.clone();
-                    PopupMenuItem::new(label).disabled(!enabled).on_click(move |_, _, cx| Self::canvas_do(&canvas, cx, f))
+        let selected = || {
+            let this = this.clone();
+            move |cx: &App| match this.upgrade() {
+                Some(p) if !p.read(cx).canvas.read(cx).selected.is_empty() => Ok(()),
+                _ => Err("Select nodes first".to_string()),
+            }
+        };
+        let canvas_flag = |f: fn(&GraphCanvas) -> bool| {
+            let this = this.clone();
+            move |cx: &App| this.upgrade().is_some_and(|p| f(p.read(cx).canvas.read(cx)))
+        };
+        let owner = this.clone();
+        let add = move |template: Template| {
+            let this = owner.clone();
+            move |cx: &mut App| {
+                if let Some(p) = this.upgrade() {
+                    let canvas = p.read(cx).canvas.clone();
+                    canvas.update(cx, |c, cx| c.add(&template, None, cx));
+                }
+            }
+        };
+        let (add_source, add_view) = (add.clone(), add(Template::View));
+        let (s1, s2) = (store.clone(), store.clone());
+        vec![
+            CommandSpec::new("pipeline.duplicate", "Duplicate", IconName::Copy, canvas_do(|c, cx| c.duplicate_selected(cx))).group("Pipeline").hint("The selected nodes (Ctrl+D on the canvas)").enabled(selected()),
+            CommandSpec::new("pipeline.delete", "Delete, reconnecting", IconName::Trash, canvas_do(|c, cx| c.delete_selected(true, cx))).group("Pipeline").hint("The selected nodes; their neighbours are joined (Del)").enabled(selected()),
+            CommandSpec::new("pipeline.delete_alone", "Delete alone", IconName::Delete, canvas_do(|c, cx| c.delete_selected(false, cx))).group("Pipeline").hint("The selected nodes only (Shift+Del)").enabled(selected()),
+            CommandSpec::new("pipeline.select_all", "Select all", IconName::SquareDashed, canvas_do(|c, cx| c.select_all(cx))).group("Pipeline").hint("Every node (Ctrl+A on the canvas)"),
+            CommandSpec::with_args::<SourceArgs>("pipeline.source", "Add a source", IconName::Image, move |a, _, cx| {
+                let template = match a.channel {
+                    Some(channel) => Template::Source { image: a.image, channel },
+                    None => Template::Annotations { image: a.image },
                 };
-                m.item(item("Duplicate  Ctrl+D", selected, |c, cx| c.duplicate_selected(cx)))
-                    .item(item("Delete, reconnecting  Del", selected, |c, cx| c.delete_selected(true, cx)))
-                    .item(item("Delete alone  Shift+Del", selected, |c, cx| c.delete_selected(false, cx)))
-                    .separator()
-                    .item(item("Select all  Ctrl+A", true, |c, cx| c.select_all(cx)))
+                add_source(template)(cx);
+                Ok(serde_json::Value::Null)
             })
-        };
-        bar = bar.child(edit).child(divider_v());
-        // Process: every operation, a submenu per family (as Explore's Process menu)
-        let process = {
-            let canvas = canvas.clone();
-            Button::new("pipeline-menu-process").ghost().small().label("Process").dropdown_menu(move |m: PopupMenu, window, cx| {
-                let mut m = m
-                    .item(PopupMenuItem::new("Find an operation…  Ctrl+K").icon(Icon::new(IconName::Search)).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::navigation::actions::FindOperation), cx)))
-                    .separator()
-                    .label("A node on the canvas");
-                for c in operations() {
-                    let (canvas, icon, items) = (canvas.clone(), c.icon, c.items);
-                    m = m.submenu_with_icon(Some(Icon::new(icon)), c.name, window, cx, move |mut sub, _, _| {
-                        for it in &items {
-                            let (canvas, template) = (canvas.clone(), it.template.clone());
-                            sub = sub.item(PopupMenuItem::new(format!("{}   {}", it.label, it.hint)).icon(Icon::new(icon)).on_click(move |_, _, cx| Self::canvas_do(&canvas, cx, |c, cx| c.add(&template, None, cx))));
-                        }
-                        sub
-                    });
-                }
-                m
+            .group("Pipeline")
+            .hint("A channel of an image, or an image's shapes as a mask, as a node"),
+            CommandSpec::new("pipeline.output", "Result view", IconName::Eye, move |_, cx| add_view(cx)).group("Pipeline").hint("A result shown in Explore and Analyze"),
+            CommandSpec::new("script.from_file", "Script from a file (.py, .rs)…", IconName::FileCode, move |_, cx| {
+                let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Script file".into()) });
+                let store = s1.clone();
+                cx.spawn(async move |cx| {
+                    if let Ok(Ok(Some(paths))) = rx.await
+                        && let Some(p) = paths.into_iter().next()
+                    {
+                        store.update(cx, |s, cx| s.add_script_file(p, cx));
+                    }
+                })
+                .detach();
             })
-        };
-        bar = bar.child(process).child(divider_v()).child(menu("pipeline-menu-output", "Output", IconName::Eye, vec![("Result view".into(), "shown in Explore / Analyze".into(), Template::View)]));
-        // Blender's Script node: a Python or Rust file as a step
-        let scripts = {
-            let store = self.store.clone();
-            Button::new("pipeline-menu-script").ghost().small().icon(Icon::new(IconName::SquareTerminal)).label("Script").dropdown_menu(move |m: PopupMenu, _, _| {
-                let (a, b, c) = (store.clone(), store.clone(), store.clone());
-                m.label("A step written as a file; edit, save, it runs again")
-                    .item(PopupMenuItem::new("New Python script…").on_click(move |_, _, cx| a.update(cx, |s, cx| s.add_script_node(crate::data::script::Language::Python, cx))))
-                    .item(PopupMenuItem::new("New Rust script…").on_click(move |_, _, cx| b.update(cx, |s, cx| s.add_script_node(crate::data::script::Language::Rust, cx))))
-                    .item(PopupMenuItem::new("Script from a file (.py, .rs)…").on_click(move |_, _, cx| {
-                        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Script file".into()) });
-                        let store = c.clone();
-                        cx.spawn(async move |cx| {
-                            if let Ok(Ok(Some(paths))) = rx.await
-                                && let Some(p) = paths.into_iter().next() {
-                                    store.update(cx, |s, cx| s.add_script_file(p, cx));
-                                }
-                        })
-                        .detach();
-                    }))
+            .group("Automate")
+            .hint("A Python or Rust file as a step"),
+            CommandSpec::with_args::<ModelArgs>("pipeline.model", "Add a model step", IconName::BrainCircuit, move |a, _, cx| {
+                s2.update(cx, |s, cx| s.add_model_node(a.id, a.interactive, cx));
+                Ok(serde_json::Value::Null)
             })
-        };
-        bar = bar.child(scripts);
-        // Model plugins: nucleus models and Segment Anything as steps
-        let models = {
-            let store = self.store.clone();
-            let list: Vec<(String, String, bool, bool)> = self
-                .store
+            .group("Pipeline")
+            .hint("A model plugin as a step: labels from its answers"),
+            CommandSpec::new("pipeline.fit", "Fit the graph", IconName::Maximize, canvas_do(|c, cx| c.fit(cx))).group("Pipeline").hint("Every node in view (F on the canvas)").read_only(),
+            CommandSpec::new("pipeline.actual", "Actual size", IconName::Scan, canvas_do(|c, cx| c.zoom_to(1.0, cx))).group("Pipeline").hint("100 % (Ctrl+0 on the canvas)").read_only(),
+            CommandSpec::new("pipeline.grid", "Dot grid", IconName::Grip, canvas_do(|c, cx| {
+                c.show_grid = !c.show_grid;
+                cx.notify();
+            }))
+            .group("Pipeline")
+            .hint("Dots behind the nodes")
+            .checked(canvas_flag(|c| c.show_grid))
+            .read_only(),
+            CommandSpec::new("pipeline.minimap", "Minimap", IconName::Map, canvas_do(|c, cx| {
+                c.show_minimap = !c.show_minimap;
+                cx.notify();
+            }))
+            .group("Pipeline")
+            .hint("The whole graph in a corner")
+            .checked(canvas_flag(|c| c.show_minimap))
+            .read_only(),
+        ]
+    }
+
+    /// The Pipeline's menu providers: its sources, the model steps, every family as nodes.
+    pub fn provide(registry: &Registry, store: Entity<Store>) {
+        let st = store.clone();
+        registry.provide("pipeline.sources", move |cx| {
+            let items = sources(&st.read(cx).doc).items;
+            if items.is_empty() {
+                return vec![MenuItem::label("Open an image first")];
+            }
+            items
+                .into_iter()
+                .filter_map(|i| match i.template {
+                    Template::Source { image, channel } => Some(MenuItem::run(format!("{}   {}", i.label, i.hint), "pipeline.source", json!({"image": image, "channel": channel}))),
+                    Template::Annotations { image } => Some(MenuItem::run(format!("{}   {}", i.label, i.hint), "pipeline.source", json!({"image": image}))),
+                    _ => None,
+                })
+                .collect()
+        });
+        registry.provide("pipeline.models", move |cx| {
+            let models: Vec<MenuItem> = store
                 .read(cx)
                 .ml
                 .plugins
                 .iter()
                 .flat_map(|p| p.models.iter())
                 .filter(|m| matches!(m.task, lumen_ml::Task::Segmentation | lumen_ml::Task::InteractiveSegmentation))
-                .map(|m| (m.id.clone(), m.name.clone(), m.task == lumen_ml::Task::InteractiveSegmentation, m.installed))
-                .collect();
-            Button::new("pipeline-menu-model").ghost().small().icon(Icon::new(IconName::BrainCircuit)).label("Model").dropdown_menu(move |m: PopupMenu, _, _| {
-                let mut m = m.label(if list.is_empty() { "No model plugins found (Settings → Models)" } else { "A step by a model → labels" });
-                for (id, name, interactive, installed) in &list {
-                    let (store, id, interactive) = (store.clone(), id.clone(), *interactive);
+                .map(|m| {
+                    let interactive = m.task == lumen_ml::Task::InteractiveSegmentation;
                     // Named by purpose: what the step does, then with which model
                     let purpose = if interactive { "Segment what shapes point at" } else { "Detect cells" };
-                    let label = if *installed { format!("{purpose} · {name}") } else { format!("{purpose} · {name} (not installed)") };
-                    m = m.item(PopupMenuItem::new(label).on_click(move |_, _, cx| store.update(cx, |s, cx| s.add_model_node(id.clone(), interactive, cx))));
-                }
-                m
-            })
-        };
-        bar = bar.child(models);
-        let view = {
-            let canvas = canvas.clone();
-            Button::new("pipeline-menu-view").ghost().small().label("View").dropdown_menu(move |m: PopupMenu, _, _| {
-                let item = |label: &'static str, f: fn(&mut GraphCanvas, &mut Context<GraphCanvas>)| {
-                    let canvas = canvas.clone();
-                    PopupMenuItem::new(label).on_click(move |_, _, cx| Self::canvas_do(&canvas, cx, f))
-                };
-                m.item(item("Fit the graph  F", |c, cx| c.fit(cx)))
-                    .item(item("Actual size  Ctrl+0", |c, cx| c.zoom_to(1.0, cx)))
-                    .separator()
-                    .item(item("Dot grid", |c, cx| {
-                        c.show_grid = !c.show_grid;
-                        cx.notify();
-                    }))
-                    .item(item("Minimap", |c, cx| {
-                        c.show_minimap = !c.show_minimap;
-                        cx.notify();
-                    }))
-            })
-        };
-        bar.child(view)
+                    let label = if m.installed { format!("{purpose} · {}", m.name) } else { format!("{purpose} · {} (not installed)", m.name) };
+                    MenuItem::run(label, "pipeline.model", json!({"id": m.id, "interactive": interactive}))
+                })
+                .collect();
+            if models.is_empty() {
+                return vec![MenuItem::label("No model plugins found (Settings › Models)")];
+            }
+            let mut out = vec![MenuItem::label("A step by a model → labels")];
+            out.extend(models);
+            out
+        });
+        registry.provide("pipeline.families", |_| {
+            operations()
+                .into_iter()
+                .map(|c| {
+                    let items = c.items.iter().filter(|i| matches!(i.template, Template::Op(_))).map(|i| MenuItem::run(format!("{}   {}", i.label, i.hint), crate::commands::op_id(&i.label), json!({"node": true})).icon(c.icon)).collect();
+                    MenuItem::submenu_with_icon(c.name, c.icon, items)
+                })
+                .collect()
+        });
+    }
+
+    /// The Pipeline's menus: Sources, Edit, Process (Find an operation, then a submenu per
+    /// family), Output, Script, Model, View.
+    pub fn menu_specs() -> Vec<MenuSpec> {
+        let c = MenuItem::command;
+        vec![
+            MenuSpec::new("Sources", vec![MenuItem::provided("pipeline.sources")]),
+            MenuSpec::new("Edit", vec![c("pipeline.duplicate"), c("pipeline.delete"), c("pipeline.delete_alone"), MenuItem::Separator, c("pipeline.select_all"), MenuItem::Separator, c("edit.undo"), c("edit.redo")]),
+            MenuSpec::new("Process", vec![c("process.find"), MenuItem::Separator, MenuItem::label("A node on the canvas"), MenuItem::provided("pipeline.families")]),
+            MenuSpec::new("Output", vec![c("pipeline.output")]),
+            MenuSpec::new("Script", vec![MenuItem::label("A step written as a file; edit, save, it runs again"), c("script.new_python"), c("script.new_rust"), c("script.from_file")]),
+            MenuSpec::new("Model", vec![MenuItem::provided("pipeline.models")]),
+            MenuSpec::new("View", vec![c("pipeline.fit"), c("pipeline.actual"), MenuItem::Separator, c("pipeline.grid"), c("pipeline.minimap")]),
+        ]
+    }
+
+    /// Hands the Pipeline the app's commands (its own bar, docked in Explore, draws them).
+    pub fn set_registry(&mut self, registry: Registry) {
+        self.registry = Some(registry);
+    }
+
+    /// The menus as buttons, and the port colours.
+    fn menus(&self) -> AnyElement {
+        let buttons = self.registry.as_ref().map(|r| Self::menu_specs().iter().enumerate().map(|(i, m)| r.menu_button(format!("pipeline-menu-{i}"), m)).collect::<Vec<_>>()).unwrap_or_default();
+        h_flex()
+            .flex_1()
+            .gap(px(2.))
+            .items_center()
+            .children(buttons)
             .child(div().flex_1())
             .children([("image", lumen_pipeline::PortType::Image), ("mask", lumen_pipeline::PortType::Mask), ("labels", lumen_pipeline::PortType::Labels), ("table", lumen_pipeline::PortType::Table)].into_iter().map(|(n, t)| {
                 h_flex().gap(px(theme::XS)).px(px(theme::XS)).child(div().size(px(8.)).rounded_full().bg(port_color(Some(t)))).child(div().text_xs().text_color(color::text_muted()).child(n))

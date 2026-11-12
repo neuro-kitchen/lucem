@@ -18,7 +18,6 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::base::dock::{DockArea, DockLayout, Panel as BasePanel, PanelEvent};
 use gpui_kit::base::Placement;
 use gpui_kit::component::dock::{panel_handle, Panel};
@@ -28,8 +27,8 @@ use gpui_kit::EventEmitter;
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    canvas, div, fill, img, point, px, size, AppContext as _, Bounds, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, RenderImage, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
+    canvas, div, fill, img, point, px, size, App, AppContext as _, Bounds, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, RenderImage, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window,
 };
 use lumen_io::Pyramid;
 use lumen_view::{bgra_image, composite_bgra, ChannelDisplay};
@@ -38,6 +37,8 @@ use polars::prelude::{AnyValue, Column, DataFrame, NamedFrom as _, Series};
 use crate::data::results::centroid_l0;
 use crate::data::script::{self, Language};
 use crate::data::store::{AppEvent, Store};
+use kitchen_shell::{CommandSpec, MenuItem, MenuSpec, Registry};
+use serde_json::json;
 use crate::domain::annotation::{rasterize, Annotation};
 use crate::domain::graph::NodeKind;
 use crate::ui::theme::{self, color};
@@ -292,6 +293,21 @@ pub(crate) struct PlotView {
 const MAX_GROUPS: usize = 12;
 
 /// The tabs of the detected objects (the others are Measure views' ids).
+/// What the table shows.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct TableArgs {
+    /// "shapes" (regions and shapes, the default), "cells" or "tiles".
+    #[serde(default)]
+    what: Option<String>,
+}
+
+/// A kind of plot.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct PlotArgs {
+    /// "Histogram", "Scatter", "Box plot" or "Counts" (as the View menu names them).
+    kind: String,
+}
+
 const CELLS: &str = "@cells";
 const TILES: &str = "@tiles";
 
@@ -329,6 +345,9 @@ pub struct AnalyzeView {
     pub(crate) dock: Entity<DockArea>,
     pub(crate) table_panel: Option<Entity<AnalyzePanel>>,
     pub(crate) plot_panels: Vec<(usize, Entity<AnalyzePanel>)>,
+    /// The activity timeline's panel, when shown, and the timeline (made when first shown).
+    pub(crate) activity_panel: Option<Entity<AnalyzePanel>>,
+    pub(crate) activity: Option<Entity<kitchen_ui::timeline::Timeline>>,
     /// The hierarchy (left) and the side pane (right) shown.
     show_hierarchy: bool,
     show_side: bool,
@@ -371,6 +390,8 @@ impl AnalyzeView {
         Self {
             dock,
             table_panel: Some(table_panel),
+            activity_panel: None,
+            activity: None,
             plot_panels: Vec::new(),
             show_hierarchy: true,
             show_side: true,
@@ -978,7 +999,31 @@ impl AnalyzeView {
         let table = ViewOption::new("Table", IconName::Table2, "The rows, filtered, searched and sorted");
         let mut out = vec![if self.table_panel.is_some() { table.unavailable("Already shown") } else { table }];
         out.extend(Plot::ALL.iter().map(|k| ViewOption::new(k.title(), k.icon(), k.hint())));
+        let activity = ViewOption::new("Activity", IconName::ChartGantt, "What you and the agent did, as a timeline of episodes");
+        out.push(if self.activity_panel.is_some() { activity.unavailable("Already shown") } else { activity });
         out
+    }
+
+    /// Shows the activity timeline beside the other views.
+    pub(crate) fn add_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.activity_panel.is_some() {
+            return;
+        }
+        if self.activity.is_none() {
+            self.activity = Some(kitchen_shell::activity::view("What you and the agent did", cx));
+        }
+        let me = cx.weak_entity();
+        let panel = cx.new(|cx| AnalyzePanel::new(me, PanelKind::Activity, cx));
+        let next_to = self.plot_panels.last().map(|(_, p)| (p.entity_id(), Placement::Bottom)).or_else(|| self.table_panel.as_ref().map(|p| (p.entity_id(), Placement::Bottom)));
+        self.activity_panel = Some(panel.clone());
+        self.place(panel, next_to, window, cx);
+    }
+
+    fn activity_view(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        if self.activity.is_none() {
+            self.activity = Some(kitchen_shell::activity::view("What you and the agent did", cx));
+        }
+        self.activity.clone().map(|t| t.into_any_element()).unwrap_or_else(|| div().into_any_element())
     }
 
     /// The shared "Add view or container" dialog.
@@ -990,7 +1035,8 @@ impl AnalyzeView {
             match *e {
                 DialogEvent::Arrange(how) => this.arrange(how, window, cx),
                 DialogEvent::Add(0) => this.add_table(window, cx),
-                DialogEvent::Add(i) => this.add_plot(Plot::ALL[i - 1], window, cx),
+                DialogEvent::Add(i) if i <= Plot::ALL.len() => this.add_plot(Plot::ALL[i - 1], window, cx),
+                DialogEvent::Add(_) => this.add_activity(window, cx),
                 DialogEvent::Close => {}
             }
             cx.notify();
@@ -1014,6 +1060,7 @@ impl AnalyzeView {
     pub(crate) fn removed(&mut self, kind: PanelKind, cx: &mut Context<Self>) {
         match kind {
             PanelKind::Table => self.table_panel = None,
+            PanelKind::Activity => self.activity_panel = None,
             PanelKind::Plot(id) => {
                 self.plots.retain(|p| p.id != id);
                 self.plot_panels.retain(|(i, _)| *i != id);
@@ -1040,98 +1087,113 @@ impl AnalyzeView {
         self.plot_card(&v, &m, &order, cx)
     }
 
-    /// Analyze's menus (in the app's menu row while Analyze is shown): Edit, Table (what it
-    /// shows, export, code), View (add a view, the side panels).
-    pub fn menus(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let me = cx.entity().downgrade();
-        let store = self.store.clone();
-        let (can_undo, can_redo) = (self.store.read(cx).can_undo(), self.store.read(cx).can_redo());
-        let img = self.store.read(cx).doc.active_image.clone().unwrap_or_default();
-        let (n_cells, n_tiles) = (self.store.read(cx).hist.cells.get(&img).map_or(0, Vec::len), self.store.read(cx).hist.tiles.get(&img).map_or(0, Vec::len));
-        let tab = self.tab.clone();
-        let item = |label: &str, icon: IconName| PopupMenuItem::new(label.to_string()).icon(Icon::new(icon));
-        let edit = {
-            let (a, b) = (store.clone(), store.clone());
-            Button::new("analyze-menu-edit").ghost().small().label("Edit").dropdown_menu(move |m: PopupMenu, _, _| {
-                let (a, b) = (a.clone(), b.clone());
-                m.item(item("Undo  Ctrl+Z", IconName::Undo2).disabled(!can_undo).on_click(move |_, _, cx| a.update(cx, |s, cx| s.undo(false, cx))))
-                    .item(item("Redo  Ctrl+Shift+Z", IconName::Redo2).disabled(!can_redo).on_click(move |_, _, cx| b.update(cx, |s, cx| s.undo(true, cx))))
-            })
+    /// Analyze's commands (kitchen-shell): what the table shows, its export, the views.
+    pub fn commands(this: WeakEntity<Self>) -> Vec<CommandSpec> {
+        let with = |f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            let this = this.clone();
+            move |window: &mut Window, cx: &mut App| {
+                let _ = this.update(cx, |a, cx| f(a, window, cx));
+            }
         };
-        let table = {
-            let me = me.clone();
-            Button::new("analyze-menu-table").ghost().small().label("Table").dropdown_menu(move |m: PopupMenu, _, _| {
-                let pick = |label: String, icon: IconName, to: Option<String>, on: bool, enabled: bool| {
-                    let me = me.clone();
-                    PopupMenuItem::new(label).icon(Icon::new(icon)).checked(on).disabled(!enabled).on_click(move |_, _, cx| {
-                        let to = to.clone();
-                        let _ = me.update(cx, |a, cx| {
-                            a.tab = to;
-                            a.show_result = false;
-                            a.sort = None;
-                            cx.notify();
-                        });
-                    })
+        let flag = |f: fn(&Self) -> bool| {
+            let this = this.clone();
+            move |cx: &App| this.upgrade().is_some_and(|a| f(a.read(cx)))
+        };
+        let (show, plot, table_off) = (this.clone(), this.clone(), this.clone());
+        vec![
+            CommandSpec::with_args::<TableArgs>("analyze.show", "Show in the table", IconName::Table2, move |a, _, cx| {
+                let to = match a.what.as_deref() {
+                    None | Some("shapes") => None,
+                    Some("cells") => Some(CELLS.to_string()),
+                    Some("tiles") => Some(TILES.to_string()),
+                    Some(other) => return Err(format!("no table {other:?}: shapes, cells or tiles")),
                 };
-                let (e, c) = (me.clone(), me.clone());
-                m.label("Show")
-                    .item(pick("Regions and shapes".into(), IconName::Shapes, None, tab.is_none(), true))
-                    .item(pick(format!("Cells · {}", group_digits(n_cells)), IconName::Sparkles, Some(CELLS.into()), tab.as_deref() == Some(CELLS), n_cells > 0))
-                    .item(pick(format!("Tiles · {}", group_digits(n_tiles)), IconName::Grid3x3, Some(TILES.into()), tab.as_deref() == Some(TILES), n_tiles > 0))
-                    .separator()
-                    .item(item("Export CSV…", IconName::Download).on_click(move |_, _, cx| {
-                        let _ = e.update(cx, |a, cx| {
-                            if let Some((m, order, _)) = a.shown.clone() {
-                                let csv = m.csv(&order);
-                                a.export(csv, "table", order.len(), cx);
-                            }
-                        });
-                    }))
-                    .item(item("Code on the table (Python, Rust)", IconName::SquareTerminal).on_click(move |_, _, cx| {
-                        let _ = c.update(cx, |a, cx| {
-                            a.code_open = !a.code_open;
-                            cx.notify();
-                        });
-                    }))
+                show.update(cx, |a, cx| {
+                    a.tab = to;
+                    a.show_result = false;
+                    a.sort = None;
+                    cx.notify();
+                })
+                .map_err(|e| e.to_string())?;
+                Ok(serde_json::Value::Null)
             })
-        };
-        let (table_shown, hier, side) = (self.table_panel.is_some(), self.show_hierarchy, self.show_side);
-        let view = {
-            let me = me.clone();
-            Button::new("analyze-menu-view").ghost().small().label("View").dropdown_menu(move |m: PopupMenu, _, _| {
-                let (t, d) = (me.clone(), me.clone());
-                let mut m = m
-                    .item(item("Add view or container…", IconName::Plus).on_click(move |_, window, cx| {
-                        let _ = d.update(cx, |a, cx| a.open_dialog(window, cx));
-                    }))
-                    .separator()
-                    .label("Add a view")
-                    .item(item("Table", IconName::Table2).disabled(table_shown).on_click(move |_, window, cx| {
-                        let _ = t.update(cx, |a, cx| a.add_table(window, cx));
-                    }));
-                for k in Plot::ALL {
-                    let me = me.clone();
-                    m = m.item(PopupMenuItem::new(format!("{}   {}", k.title(), k.hint())).icon(Icon::new(k.icon())).on_click(move |_, window, cx| {
-                        let _ = me.update(cx, |a, cx| a.add_plot(k, window, cx));
-                    }));
+            .group("Analyze")
+            .hint("Regions and shapes, the cells or the tiles")
+            .read_only(),
+            CommandSpec::new("analyze.export_csv", "Export CSV…", IconName::Download, with(|a, _, cx| {
+                if let Some((m, order, _)) = a.shown.clone() {
+                    let csv = m.csv(&order);
+                    a.export(csv, "table", order.len(), cx);
                 }
-                let (h, s) = (me.clone(), me.clone());
-                m.separator()
-                    .item(item("Hierarchy", IconName::PanelLeft).checked(hier).on_click(move |_, _, cx| {
-                        let _ = h.update(cx, |a, cx| {
-                            a.show_hierarchy = !a.show_hierarchy;
-                            cx.notify();
-                        });
-                    }))
-                    .item(item("Selection, summary and steps", IconName::PanelRight).checked(side).on_click(move |_, _, cx| {
-                        let _ = s.update(cx, |a, cx| {
-                            a.show_side = !a.show_side;
-                            cx.notify();
-                        });
-                    }))
+            }))
+            .group("Analyze")
+            .hint("The table as it is shown (sorted and filtered)"),
+            CommandSpec::new("analyze.add_dialog", "Add view or container…", IconName::Plus, with(|a, window, cx| a.open_dialog(window, cx))).group("Analyze").hint("A table, a plot or a container"),
+            CommandSpec::new("analyze.add_table", "Table", IconName::Table2, with(|a, window, cx| a.add_table(window, cx)))
+                .group("Analyze")
+                .hint("The measurement table as a view")
+                .enabled(move |cx| if table_off.upgrade().is_some_and(|a| a.read(cx).table_panel.is_some()) { Err("The table is shown".into()) } else { Ok(()) }),
+            CommandSpec::with_args::<PlotArgs>("analyze.add_plot", "Add a plot", IconName::ChartColumn, move |a, window, cx| {
+                let kind = Plot::ALL.into_iter().find(|k| k.title().eq_ignore_ascii_case(&a.kind)).ok_or_else(|| format!("no plot {:?}", a.kind))?;
+                plot.update(cx, |p, cx| p.add_plot(kind, window, cx)).map_err(|e| e.to_string())?;
+                Ok(serde_json::Value::Null)
             })
-        };
-        h_flex().gap(px(2.)).child(edit).child(table).child(view).into_any_element()
+            .group("Analyze")
+            .hint("A histogram, a scatter plot, a box plot or counts"),
+            CommandSpec::new("analyze.add_activity", "Activity timeline", IconName::ChartGantt, with(|a, window, cx| a.add_activity(window, cx)))
+                .group("Analyze")
+                .hint("What you and the agent did, as episodes over time, with where each thing came from")
+                .read_only(),
+            CommandSpec::new("analyze.hierarchy", "Hierarchy", IconName::PanelLeft, with(|a, _, cx| {
+                a.show_hierarchy = !a.show_hierarchy;
+                cx.notify();
+            }))
+            .group("Analyze")
+            .hint("The objects as a tree")
+            .checked(flag(|a| a.show_hierarchy)),
+            CommandSpec::new("analyze.side", "Selection, summary and steps", IconName::PanelRight, with(|a, _, cx| {
+                a.show_side = !a.show_side;
+                cx.notify();
+            }))
+            .group("Analyze")
+            .hint("The side panel")
+            .checked(flag(|a| a.show_side)),
+        ]
+    }
+
+    /// Analyze's menu providers: the tables with their sizes, the plots.
+    pub fn provide(registry: &Registry, this: WeakEntity<Self>) {
+        let me = this;
+        registry.provide("analyze.tables", move |cx| {
+            let Some(a) = me.upgrade() else { return vec![] };
+            let a = a.read(cx);
+            let s = a.store.read(cx);
+            let img = s.doc.active_image.clone().unwrap_or_default();
+            let (n_cells, n_tiles) = (s.hist.cells.get(&img).map_or(0, Vec::len), s.hist.tiles.get(&img).map_or(0, Vec::len));
+            let tab = a.tab.as_deref();
+            let mut out = vec![MenuItem::run("Regions and shapes", "analyze.show", json!({})).icon(IconName::Shapes).checked(tab.is_none())];
+            if n_cells > 0 {
+                out.push(MenuItem::run(format!("Cells · {}", group_digits(n_cells)), "analyze.show", json!({"what": "cells"})).icon(IconName::Sparkles).checked(tab == Some(CELLS)));
+            }
+            if n_tiles > 0 {
+                out.push(MenuItem::run(format!("Tiles · {}", group_digits(n_tiles)), "analyze.show", json!({"what": "tiles"})).icon(IconName::Grid3x3).checked(tab == Some(TILES)));
+            }
+            out
+        });
+        registry.provide("analyze.plots", |_| Plot::ALL.iter().map(|k| MenuItem::run(format!("{}   {}", k.title(), k.hint()), "analyze.add_plot", json!({"kind": k.title()})).icon(k.icon())).collect());
+    }
+
+    /// Analyze's menus (in the frame's menu row while Analyze is shown): Edit, Table, View.
+    pub fn menu_specs() -> Vec<MenuSpec> {
+        let c = MenuItem::command;
+        vec![
+            MenuSpec::new("Edit", vec![c("edit.undo"), c("edit.redo")]),
+            MenuSpec::new("Table", vec![MenuItem::label("Show"), MenuItem::provided("analyze.tables"), MenuItem::Separator, c("analyze.export_csv"), c("analyze.code")]),
+            MenuSpec::new(
+                "View",
+                vec![c("analyze.add_dialog"), MenuItem::Separator, MenuItem::label("Add a view"), c("analyze.add_table"), MenuItem::provided("analyze.plots"), c("analyze.add_activity"), MenuItem::Separator, c("analyze.hierarchy"), c("analyze.side")],
+            ),
+        ]
     }
 
     /// Its views as `layout.json` keeps them.
@@ -1771,6 +1833,8 @@ mod tests {
 pub enum PanelKind {
     Table,
     Plot(usize),
+    /// The activity timeline: what you and the agent did (kitchen-ui's timeline).
+    Activity,
 }
 
 /// A view of Analyze's dock (the table, or one plot): its content is drawn by the Analyze view,
@@ -1799,6 +1863,7 @@ impl Render for AnalyzePanel {
         let body = a.update(cx, |a, cx| match kind {
             PanelKind::Table => a.table_view(window, cx),
             PanelKind::Plot(id) => a.plot_view(id, cx),
+            PanelKind::Activity => a.activity_view(cx),
         });
         div().id("analyze-panel").track_focus(&self.focus).size_full().bg(color::panel()).child(body).into_any_element()
     }
@@ -1820,7 +1885,7 @@ impl BasePanel for AnalyzePanel {
     /// Plots close; the table only while a plot is left (a view always stays).
     fn closable(&self, cx: &gpui_kit::App) -> bool {
         match self.kind {
-            PanelKind::Plot(_) => true,
+            PanelKind::Plot(_) | PanelKind::Activity => true,
             PanelKind::Table => self.analyze.upgrade().is_some_and(|a| !a.read(cx).plot_panels.is_empty()),
         }
     }
@@ -1851,6 +1916,7 @@ impl Panel for AnalyzePanel {
         let _ = cx;
         Some(match self.kind {
             PanelKind::Table => container::tab_buttons("analyze-table", &[ViewOption::new("Table", IconName::Table2, "The rows, filtered, searched and sorted")], Some(0), |_, _, _| {}, add),
+            PanelKind::Activity => container::tab_buttons("analyze-activity", &[ViewOption::new("Activity", IconName::ChartGantt, "What you and the agent did")], Some(0), |_, _, _| {}, add),
             PanelKind::Plot(id) => {
                 let current = a.upgrade().and_then(|a| a.read(cx).plots.iter().find(|p| p.id == id).map(|p| p.kind)).and_then(|k| Plot::ALL.iter().position(|x| *x == k));
                 let options: Vec<ViewOption> = Plot::ALL.iter().map(|k| ViewOption::new(k.title(), k.icon(), k.hint())).collect();
@@ -1864,6 +1930,7 @@ impl Panel for AnalyzePanel {
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let text = match (self.kind, self.analyze.upgrade()) {
             (PanelKind::Table, _) => "Table".to_string(),
+            (PanelKind::Activity, _) => "Activity".to_string(),
             (PanelKind::Plot(id), Some(a)) => a.read(cx).plot_title(id),
             _ => String::new(),
         };

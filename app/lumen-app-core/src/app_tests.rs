@@ -10,7 +10,6 @@ use super::LumenApp;
 use crate::data::prefs::Prefs;
 use crate::data::store::{Arrangement, Store, ViewKind};
 use crate::navigation::route::Workspace;
-use crate::screens::palette::PaletteEvent;
 
 /// Opens the app (default preferences, never saved) in a 1400 × 900 test window.
 fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Store>, Entity<LumenApp>) {
@@ -51,16 +50,20 @@ fn open_sample(cx: &mut TestAppContext, window: AnyWindowHandle, store: &Entity<
     wait_until(cx, window, "the sample image", |cx| cx.update(|cx| store.read(cx).active_pyramid().is_some()));
 }
 
-/// Closes whatever a command opened, so the next starts from the plain app.
-fn reset(cx: &mut TestAppContext, app: &Entity<LumenApp>) {
-    cx.update(|cx| {
-        app.update(cx, |a, cx| {
-            a.settings = None;
-            a.show_help = false;
-            a.palette = None;
-            cx.notify();
+/// Closes whatever a command opened (Settings, the search, the help sheet), so the next starts
+/// from the plain app.
+fn reset(cx: &mut TestAppContext, window: AnyWindowHandle, app: &Entity<LumenApp>) {
+    let shell = cx.update(|cx| app.read(cx).shell.clone());
+    cx.update_window(window, |_, window, cx| {
+        shell.update(cx, |s, cx| {
+            s.show_settings(None, window, cx);
+            s.set_overlay(None, window, cx);
+            if s.search().is_some() {
+                s.open_search(window, cx);
+            }
         })
-    });
+    })
+    .unwrap();
 }
 
 /// The app opens, and every workspace draws, without and with an image.
@@ -78,20 +81,57 @@ fn every_workspace_draws(cx: &mut TestAppContext) {
     }
 }
 
-/// Every search command runs and the app draws after each (those that open a system file
-/// dialog, quit or restart aside).
+/// Every command runs and the app draws after each (those that open a system file dialog or
+/// quit aside; those that cannot run now say why, and those needing arguments say which).
 #[gpui_kit::test]
-fn every_search_command_runs(cx: &mut TestAppContext) {
+fn every_command_runs(cx: &mut TestAppContext) {
     let (window, store, app) = open(cx);
     open_sample(cx, window, &store);
-    let commands = cx.update_window(window, |_, _, cx| app.update(cx, |a, cx| a.commands(false, cx))).unwrap();
-    assert!(commands.len() > 40, "the search lists every action: {}", commands.len());
-    let dialog = |name: &str| ["Open", "Import", "Save", "Quit", "Restart", "New project"].iter().any(|w| name.starts_with(w));
-    for c in commands.into_iter().filter(|c| !dialog(&c.name)) {
-        let run = c.run.clone();
-        cx.update_window(window, |_, window, cx| run(window, cx)).unwrap();
+    let registry = cx.update(|cx| app.read(cx).registry.clone());
+    let commands = registry.all();
+    assert!(commands.len() > 100, "every action is a command: {}", commands.len());
+    // File dialogs, quitting, and the exports (they write files where the test runs)
+    let dialog = ["file.open_image", "file.open_project", "file.save_in", "file.import_geojson", "script.from_file", "app.quit", "file.new", "image.remove", "file.export_geojson", "file.export_cells", "analyze.export_csv"];
+    for c in commands.into_iter().filter(|c| !dialog.contains(&c.id.as_ref())) {
+        let r = cx.update_window(window, |_, window, cx| registry.run(&c.id, serde_json::Value::Null, window, cx)).unwrap();
+        if let Err(e) = r {
+            assert!(!e.is_empty(), "{} says why it did not run", c.id);
+        }
         frame(cx, window);
-        reset(cx, &app);
+        reset(cx, window, &app);
+    }
+}
+
+/// Every menu of every workspace names registered commands, its providers' entries too.
+#[gpui_kit::test]
+fn every_menu_entry_is_a_command(cx: &mut TestAppContext) {
+    use kitchen_shell::MenuItem;
+    let (window, store, app) = open(cx);
+    open_sample(cx, window, &store);
+    let registry = cx.update(|cx| app.read(cx).registry.clone());
+    fn walk(items: &[MenuItem], registry: &kitchen_shell::Registry, cx: &gpui_kit::App, out: &mut Vec<String>) {
+        for i in items {
+            match i {
+                MenuItem::Command(id) | MenuItem::Run { command: id, .. } => out.push(id.to_string()),
+                MenuItem::Submenu { items, .. } => walk(items, registry, cx, out),
+                MenuItem::Provided(p) => walk(&registry.provided(p, cx), registry, cx, out),
+                _ => {}
+            }
+        }
+    }
+    let mut menus = crate::commands::explore_menus();
+    menus.extend(crate::screens::pipeline::PipelineView::menu_specs());
+    menus.extend(crate::screens::analyze::AnalyzeView::menu_specs());
+    let mut ids = Vec::new();
+    cx.update(|cx| {
+        for m in &menus {
+            walk(&m.items, &registry, cx, &mut ids);
+        }
+        walk(&crate::commands::app_menu(), &registry, cx, &mut ids);
+    });
+    assert!(ids.len() > 80, "the menus hold the commands: {}", ids.len());
+    for id in ids {
+        assert!(registry.get(&id).is_some(), "{id} is registered");
     }
 }
 
@@ -99,16 +139,35 @@ fn every_search_command_runs(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn settings_opens_from_the_search(cx: &mut TestAppContext) {
     let (window, _store, app) = open(cx);
-    cx.update_window(window, |_, window, cx| app.update(cx, |a, cx| a.open_search(false, window, cx))).unwrap();
-    let palette = cx.update(|cx| app.read(cx).palette.as_ref().map(|(p, _)| p.clone()).expect("the search is open"));
-    let settings = cx.update_window(window, |_, _, cx| app.update(cx, |a, cx| a.commands(false, cx))).unwrap().into_iter().find(|c| c.name.starts_with("Settings")).expect("Settings is listed").run;
-    cx.update(|cx| palette.update(cx, |_, cx| cx.emit(PaletteEvent::Run(settings))));
+    let shell = cx.update(|cx| app.read(cx).shell.clone());
+    cx.update_window(window, |_, window, cx| shell.update(cx, |s, cx| s.open_search(window, cx))).unwrap();
+    let search = cx.update(|cx| shell.read(cx).search().expect("the search is open"));
+    cx.update(|cx| search.update(cx, |_, cx| cx.emit(kitchen_shell::SearchEvent::Run("shell.settings".into()))));
     frame(cx, window);
     frame(cx, window);
     cx.update(|cx| {
-        assert!(app.read(cx).palette.is_none(), "the search closed");
-        assert!(app.read(cx).settings.is_some(), "Settings opened");
+        assert!(shell.read(cx).search().is_none(), "the search closed");
+        assert_eq!(shell.read(cx).settings_section(), Some(0), "Settings opened");
     });
+    // lumen's sections are there, after the frame's Appearance
+    for (i, sec) in crate::screens::settings::Section::ALL.iter().enumerate() {
+        assert_eq!(cx.update(|cx| shell.read(cx).settings_index(sec.title())), Some(i + 1));
+        cx.update_window(window, |_, window, cx| shell.update(cx, |s, cx| s.show_settings(Some(i + 1), window, cx))).unwrap();
+        frame(cx, window);
+    }
+}
+
+/// The workspace follows the store and the frame alike.
+#[gpui_kit::test]
+fn the_frame_and_the_store_share_the_workspace(cx: &mut TestAppContext) {
+    let (window, store, app) = open(cx);
+    let shell = cx.update(|cx| app.read(cx).shell.clone());
+    cx.update(|cx| store.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx)));
+    frame(cx, window);
+    assert_eq!(cx.update(|cx| shell.read(cx).workspace_id()).as_ref(), "analyze");
+    cx.update(|cx| shell.update(cx, |s, cx| s.set_workspace("pipeline", cx)));
+    frame(cx, window);
+    assert_eq!(cx.update(|cx| store.read(cx).workspace), Workspace::Pipeline);
 }
 
 /// Explore: a view of every kind is added, then every arrangement is applied.
@@ -205,4 +264,31 @@ fn a_saved_project_brings_back_its_views(cx: &mut TestAppContext) {
         assert_eq!(analyze.read(cx).plots.len(), 1, "Analyze's plot");
     });
     std::fs::remove_dir_all(&folder).ok();
+}
+
+/// What you do lands on the activity timeline: commands run show in Analyze's Activity view, on
+/// your lane, with the workspace and how they were started.
+#[gpui_kit::test]
+fn the_activity_view_shows_what_was_done(cx: &mut TestAppContext) {
+    let (window, store, app) = open(cx);
+    open_sample(cx, window, &store);
+    let registry = cx.update(|cx| app.read(cx).registry.clone());
+    cx.update_window(window, |_, window, cx| {
+        let _ = registry.run_as(kitchen_shell::activity::Actor::Person, "menu", "view.rulers", serde_json::Value::Null, window, cx);
+        let _ = registry.run_as(kitchen_shell::activity::Actor::Agent, "agent", "hist.find_tissue", serde_json::Value::Null, window, cx);
+    })
+    .unwrap();
+    cx.update(|cx| store.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx)));
+    frame(cx, window);
+    let analyze = cx.update(|cx| app.read(cx).analyze.clone());
+    cx.update_window(window, |_, window, cx| analyze.update(cx, |a, cx| a.add_activity(window, cx))).unwrap();
+    frame(cx, window);
+    let timeline = cx.update(|cx| analyze.read(cx).activity.clone().expect("the timeline is made"));
+    let acts = cx.update(|cx| timeline.read(cx).activities().to_vec());
+    let rulers = acts.iter().find(|a| a.title.as_ref() == "Rulers").expect("the rulers command is on the timeline");
+    assert_eq!(rulers.lane.as_ref(), "You");
+    assert!(rulers.source.contains("menu"), "{}", rulers.source);
+    assert!(acts.iter().any(|a| a.lane.as_ref() == "Agent" && a.title.as_ref() == "Find tissue"));
+    assert!(acts.iter().any(|a| a.lane.as_ref() == "Focus"), "time in each workspace");
+    assert!(cx.update(|cx| analyze.read(cx).activity_panel.is_some()));
 }

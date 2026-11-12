@@ -1,60 +1,20 @@
-//! App actions and their key bindings (`secondary` = Cmd on macOS, Ctrl elsewhere). Tool keys
-//! (V, H, B, …) are handled by the image canvas while it has focus, so typing never switches tools.
+//! Keys that only work on the image canvas (its key context). Every other key belongs to a
+//! command (`crate::commands`), bound by kitchen-shell's registry. Tool keys (V, H, B, …) are
+//! handled by the canvas while it has focus, so typing never switches tools.
 
-use gpui_kit::{actions, Action, App, KeyBinding};
+use gpui_kit::{actions, App, KeyBinding};
 
 actions!(
     lumen_app,
     [
-        /// Choose an image or OME-Zarr container and open it.
-        OpenImage,
-        OpenProject,
-        SaveProjectAs,
-        NewProject,
-        Undo,
-        Redo,
-        CommandPalette,
-        /// The search, listing the operations only.
-        FindOperation,
-        ShowHelp,
-        Quit,
-        GoExplore,
-        GoPipeline,
-        GoAnalyze,
+        /// Hide or show both side panels (Tab on the image).
         ToggleSidebar,
-        ToggleRulers,
-        OpenSettings,
-        ToggleLeftPanel,
-        ToggleRightPanel,
     ]
 );
 
-/// A global binding whose `secondary-` modifier is resolved for this OS.
-fn os_binding<A: Action>(keys: &str, action: A, cx: &App) -> KeyBinding {
-    KeyBinding::load(keys, Box::new(action), None, false, None, cx).unwrap_or_else(|e| panic!("key binding {keys:?}: {e:?}"))
-}
-
+/// Binds the canvas' own keys.
 pub fn bind_keys(cx: &mut App) {
-    let global = [
-        os_binding("secondary-o", OpenImage, cx),
-        os_binding("secondary-shift-o", OpenProject, cx),
-        os_binding("secondary-shift-s", SaveProjectAs, cx),
-        os_binding("secondary-n", NewProject, cx),
-        os_binding("secondary-z", Undo, cx),
-        os_binding("secondary-shift-z", Redo, cx),
-        os_binding("secondary-y", Redo, cx),
-        os_binding("secondary-k", CommandPalette, cx),
-        os_binding("secondary-q", Quit, cx),
-        os_binding("secondary-1", GoExplore, cx),
-        os_binding("secondary-2", GoPipeline, cx),
-        os_binding("secondary-3", GoAnalyze, cx),
-        os_binding("secondary-r", ToggleRulers, cx),
-        os_binding("secondary-,", OpenSettings, cx),
-        os_binding("secondary-[", ToggleLeftPanel, cx),
-        os_binding("secondary-]", ToggleRightPanel, cx),
-    ];
-    cx.bind_keys(global);
-    cx.bind_keys([KeyBinding::new("f1", ShowHelp, None), KeyBinding::new("f3", CommandPalette, None), KeyBinding::new("tab", ToggleSidebar, Some("ImageCanvas"))]);
+    cx.bind_keys([KeyBinding::new("tab", ToggleSidebar, Some("ImageCanvas"))]);
 }
 
 /// Every binding as (keys, what it does), for the Keyboard & mouse dialog.

@@ -89,15 +89,21 @@ pub struct PathArg {
 pub struct RunSessionArg {
     /// Images to run the session's steps on.
     pub images: Vec<String>,
-    /// Folder for results of images whose own OME-Zarr cannot take them (default: next to each image).
+    /// Folder for the results of images that are not OME-Zarr (TIFF, …). An .ome.zarr image keeps its
+    /// results inside itself (`written` in the answer names where), whatever this says. Default:
+    /// beside each image.
     #[serde(default)]
     pub out_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PipelineArg {
-    /// The pipeline: {"nodes": [...], "edges": [...]} as `lumen run` reads it (see list_operations for the ops).
-    pub spec: Value,
+    /// The pipeline, as `lumen run` reads it: `sources` maps a name to a channel index, `nodes` maps
+    /// a name to `{"op": {"op": "<operation>", ...its parameters}, "inputs": [source or node names]}`,
+    /// `target` names the node whose result is written. Example: `{"sources": {"src": 0}, "nodes":
+    /// {"blur": {"op": {"op": "gaussian_blur", "sigma": 2.0}, "inputs": ["src"]}}, "target": "blur"}`.
+    /// The operations and their parameters: list_operations.
+    pub spec: lumen_pipeline::PipelineSpec,
     /// The input image.
     pub image: String,
     /// The output OME-Zarr folder.
@@ -214,7 +220,7 @@ impl LumenTools {
         }
     }
 
-    #[tool(description = "Runs the session's recipe on each image and writes each one's results (labels, Parquet tables, GeoParquet shapes, provenance). As `lumen session run`.")]
+    #[tool(description = "Runs the session's recipe on each image and writes each one's results (labels, Parquet tables, GeoParquet shapes, provenance): inside the image when it is OME-Zarr, else in out_dir (default beside it); `written` says where. As `lumen session run`.")]
     async fn run_session(&self, Parameters(a): Parameters<RunSessionArg>) -> CallToolResult {
         let session = self.state().session.clone();
         if session.recipe().is_empty() {
@@ -243,12 +249,9 @@ impl LumenTools {
         }
     }
 
-    #[tool(description = "Runs a pipeline of operations (list_operations) over a whole image, block by block, and writes the result as OME-Zarr. As `lumen run`.")]
+    #[tool(description = "Runs a pipeline of operations (list_operations) over a whole image, block by block, and writes the result as OME-Zarr. As `lumen run`. Smallest spec: {\"sources\": {\"src\": 0}, \"nodes\": {\"blur\": {\"op\": {\"op\": \"gaussian_blur\", \"sigma\": 2.0}, \"inputs\": [\"src\"]}}, \"target\": \"blur\"}.")]
     async fn run_pipeline(&self, Parameters(a): Parameters<PipelineArg>) -> CallToolResult {
-        let spec: lumen_pipeline::PipelineSpec = match serde_json::from_value(a.spec) {
-            Ok(s) => s,
-            Err(e) => return fail(format!("not a pipeline: {e}")),
-        };
+        let spec = a.spec;
         let runtime = self.runtime.clone();
         let (image, output) = (self.image_path(&a.image), PathBuf::from(&a.output));
         let result = blocking(move || {
@@ -307,4 +310,28 @@ pub async fn serve_stdio(runtime: Option<String>) -> Result<(), String> {
     let service = LumenTools::new(runtime).serve(rmcp::transport::stdio()).await.map_err(|e| e.to_string())?;
     service.waiting().await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The example in run_pipeline's description reads, and the schema an agent sees describes the
+    /// real format (sources, nodes, target), not another.
+    #[test]
+    fn the_pipeline_example_reads_and_the_schema_is_the_real_one() {
+        let arg: PipelineArg = serde_json::from_value(json!({
+            "spec": {"sources": {"src": 0}, "nodes": {"blur": {"op": {"op": "gaussian_blur", "sigma": 2.0}, "inputs": ["src"]}}, "target": "blur"},
+            "image": "a.ome.zarr",
+            "output": "b.ome.zarr"
+        }))
+        .expect("the documented example reads");
+        assert_eq!(arg.spec.target, "blur");
+        assert_eq!(arg.spec.sources.get("src"), Some(&0));
+        let schema = serde_json::to_string(&schemars::schema_for!(PipelineArg)).unwrap();
+        for field in ["sources", "nodes", "target", "inputs"] {
+            assert!(schema.contains(field), "the schema names {field}");
+        }
+        assert!(!schema.contains("\"edges\""), "no edges field");
+    }
 }

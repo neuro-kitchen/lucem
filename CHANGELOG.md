@@ -7,6 +7,37 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
+### The shared frame (2026-11-12)
+
+- **Activity** (Analyze › View › Activity timeline, or the search): an episodic memory of the
+  work (kitchen-ui's timeline over kitchen-shell's activity log): what you did and what an agent
+  did, the time in each workspace and every job, summarised into a few episodes (or every
+  action); hover a bar for its card, click it for each action, where it came from (workspace,
+  menu, key, search, agent) and what it produced.
+- **kitchen-shell's frame.** The title bar (the Lumen menu, Help, the workspaces, the project,
+  where lumen runs, the panel toggles, the theme), the workspace's menu row, the status bar
+  (status line, every job with its cancel button, lumen's readings, CPU and memory), Settings and
+  the search are kitchen-shell's, shared with dsp-kitchen. The window keeps its rounded frame and
+  resizes from its edge (now the frame's).
+- **Every action is a command** of one registry (`commands.rs`, and the Pipeline's and Analyze's
+  own): id, title, icon, what it does, group, key, when it can run and why not, and the JSON
+  Schema of its arguments. The menus, the keys, the search (Ctrl+K; F3 for the operations) and,
+  next, an agent's tools come from that one list, so none drifts from the others. A menu entry
+  that cannot run is greyed with the reason.
+- Menus that follow the project (channels, images, recent files, the nucleus models that fit,
+  the Pipeline's sources and model steps, Analyze's tables) are made when they open.
+- An operation is one command (`process.op.*`): a step on the shown channel in Explore, a node on
+  the canvas in the Pipeline.
+- Settings: the frame's Appearance (theme, accent, text size) first, then lumen's Display (a
+  theme that follows the system, the pasteboard), Views, Compute, Models, Tools, Performance and
+  About. Keyboard & mouse (F1) is a sheet over the frame.
+- Jobs are kitchen-shell's registry (lumen's own, moved there).
+- `lumen mcp`: `run_pipeline` takes the pipeline as its real type, so an agent sees its schema,
+  and its description carries a working example (an agent needed eleven tries before, one
+  now); `run_session` says where results go (inside an OME-Zarr image, else `out_dir`).
+- Tests: every command runs (or says why not), every menu entry is a registered command,
+  Settings has lumen's sections, the frame and the store share the workspace.
+
 ### Agents, servers and the command line (2026-11-11)
 
 - **`lumen mcp`: lumen for agents.** A Model Context Protocol server over stdio (`app/lumen-mcp`,

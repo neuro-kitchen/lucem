@@ -227,7 +227,7 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
                 .child(class_picker())
                 .child(divider_v())
                 .child(div().text_sm().text_color(if ready || s.ml.busy.is_some() { color::text() } else { color::warning() }).child(state))
-                .child(Button::new("segment-models").ghost().small().icon(Icon::new(IconName::Settings)).label("Models…").on_click(|_, window, cx| window.dispatch_action(Box::new(crate::navigation::actions::OpenSettings), cx)));
+                .child(Button::new("segment-models").ghost().small().icon(Icon::new(IconName::Settings)).label("Models…").on_click(|_, window, cx| window.dispatch_action(Box::new(kitchen_shell::RunCommand { id: "settings.models".into() }), cx)));
             if volume {
                 let st = store.clone();
                 bar = bar.child(divider_v()).child(Checkbox::new("segment-through-z").checked(t.sam_through_z).label("Through z").on_click(move |on: &bool, _, cx| {

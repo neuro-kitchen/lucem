@@ -16,6 +16,8 @@ arrow.workspace = true
 async-channel.workspace = true
 gpui-kit.workspace = true
 kitchen-ui.workspace = true
+# The shared frame: command registry, menus, search, status bar, Settings, jobs
+kitchen-shell.workspace = true
 sysinfo.workspace = true
 lumen-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
 lumen-io.workspace = true
