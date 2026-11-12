@@ -20,6 +20,13 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
   yet). A test of the activity view found another test's Rulers entry in the shared log; the
   Python test compares the version to the installed package's instead of a fixed `0.1.0`.
 
+### Documentation
+
+- The README says what lucem is now (it described an empty skeleton), with the app's screenshot
+  (dark or light as the reader's theme), installing the library crates from crates.io, and every
+  crate; the docs site shows the screenshot on its front page and the App page. The sample image is
+  credited (© PerkinElmer / Akoya Biosciences, CC BY 4.0).
+
 ## [0.0.1] - 2026-11-12
 
 The first release: lucem's library crates on crates.io (`lucem-core`, `lucem-io`, `lucem-ops`,
