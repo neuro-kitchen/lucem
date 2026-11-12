@@ -33,6 +33,8 @@ lumen-pipeline.workspace = true
 lumen-view.workspace = true
 polars.workspace = true
 schemars.workspace = true
+# The agent's snapshot of the shown image (PNG)
+image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
