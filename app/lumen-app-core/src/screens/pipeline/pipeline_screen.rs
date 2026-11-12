@@ -24,6 +24,7 @@ use crate::ui::param_editor::{Commit, EditOps as _, ParamEditor};
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::{divider_v, row, stepper, MenuSelect, Section};
 use kitchen_shell::{CommandSpec, MenuItem, MenuSpec, Registry};
+use kitchen_ui::widgets::{CodeChanged, CodeLanguage, CodeView};
 use serde_json::json;
 
 use super::canvas::{CanvasEvent, GraphCanvas};
@@ -359,7 +360,19 @@ pub struct Inspector {
     params: Entity<ParamEditor>,
     name: Entity<InputState>,
     name_for: String,
+    /// The code of the selected script node: its file, the editor, the text on disk, and the
+    /// error last marked in it.
+    code: Option<ScriptCode>,
     _subs: Vec<Subscription>,
+}
+
+struct ScriptCode {
+    path: String,
+    view: Entity<CodeView>,
+    saved: String,
+    error: Option<String>,
+    dirty: bool,
+    _sub: Subscription,
 }
 
 impl Inspector {
@@ -389,7 +402,7 @@ impl Inspector {
                 }
             }),
         ];
-        Self { store, canvas, params: cx.new(|_| ParamEditor::new()), name, name_for: String::new(), _subs: subs }
+        Self { store, canvas, params: cx.new(|_| ParamEditor::new()), name, name_for: String::new(), code: None, _subs: subs }
     }
 
     fn exec(store: &Entity<Store>, cmd: Command, cx: &mut App) {
@@ -398,8 +411,75 @@ impl Inspector {
         });
     }
 
+    /// The editor of the script at `path` (made when another script is selected), with the errors
+    /// of its last run marked on their lines.
+    fn script_code(&mut self, id: &str, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.code.as_ref().is_none_or(|c| c.path != path) {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or_default();
+            let view = cx.new(|cx| CodeView::new(CodeLanguage::from_name(ext), text.clone(), window, cx).editable(true));
+            let sub = cx.subscribe(&view, |this, _, e: &CodeChanged, cx| {
+                if let Some(c) = &mut this.code {
+                    c.dirty = e.0 != c.saved;
+                }
+                cx.notify();
+            });
+            self.code = Some(ScriptCode { path: path.to_string(), view, saved: text, error: None, dirty: false, _sub: sub });
+        }
+        let error = self.store.read(cx).analysis.as_ref().and_then(|a| a.errors.get(id).cloned());
+        if let Some(c) = &mut self.code
+            && c.error != error
+        {
+            let file = std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            let marks = error.as_deref().map(|e| crate::data::script::error_lines(&file, e)).unwrap_or_default();
+            c.error = error;
+            c.view.update(cx, |v, cx| v.set_errors(marks, cx));
+        }
+    }
+
+    /// Writes the editor's text to the script's file and runs the node again.
+    fn save_script(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(c) = &mut self.code else { return };
+        let text = c.view.read(cx).text(cx);
+        match std::fs::write(&c.path, &text) {
+            Ok(()) => {
+                c.saved = text;
+                c.dirty = false;
+                self.store.update(cx, |s, cx| s.reload_script(id, cx));
+            }
+            Err(e) => {
+                let msg = format!("Could not save {}: {e}", crate::domain::paths::short_path(std::path::Path::new(&c.path)));
+                self.store.update(cx, |s, cx| s.set_status(msg, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Puts back the text on disk.
+    fn revert_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = &mut self.code {
+            let text = std::fs::read_to_string(&c.path).unwrap_or_else(|_| c.saved.clone());
+            c.saved = text.clone();
+            c.dirty = false;
+            c.view.update(cx, |v, cx| v.set_text(text, window, cx));
+        }
+        cx.notify();
+    }
+
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.canvas.read(cx).selected.clone();
+        // The selected script node's code, made ready before the store is read below
+        let script = (selected.len() == 1)
+            .then(|| selected.iter().next().cloned())
+            .flatten()
+            .and_then(|id| match self.store.read(cx).doc.graph.node(&id).map(|n| n.kind.clone()) {
+                Some(NodeKind::Script { path, .. }) => Some((id, path)),
+                _ => None,
+            });
+        match &script {
+            Some((id, path)) => self.script_code(id, path, window, cx),
+            None => self.code = None,
+        }
         let s = self.store.read(cx);
         let doc = s.doc.clone();
         let g = &doc.graph;
@@ -678,10 +758,26 @@ impl Inspector {
                     }))
                     .child(row("Language", div().text_sm().child(lang)))
                     .child(row("File", div().text_xs().font_family("monospace").truncate().child(path.clone())))
+                    .children(self.code.as_ref().map(|c| {
+                        let dirty = c.dirty;
+                        let (save_id, me, me2) = (id.clone(), cx.entity().downgrade(), cx.entity().downgrade());
+                        Section::new(if dirty { "Code · not saved" } else { "Code" })
+                            .child(div().h(px(340.)).rounded(px(theme::RADIUS)).overflow_hidden().border_1().border_color(color::border()).child(c.view.clone()))
+                            .child(
+                                h_flex()
+                                    .gap(px(theme::SM))
+                                    .child(Button::new("script-save").small().primary().icon(Icon::new(IconName::Save)).label("Save and run").disabled(!dirty).on_click(move |_, _, cx| {
+                                        let _ = me.update(cx, |i, cx| i.save_script(&save_id, cx));
+                                    }))
+                                    .child(Button::new("script-revert").small().ghost().label("Revert").disabled(!dirty).on_click(move |_, window, cx| {
+                                        let _ = me2.update(cx, |i, cx| i.revert_script(window, cx));
+                                    })),
+                            )
+                    }))
                     .child(
                         h_flex()
                             .gap(px(theme::SM))
-                            .child(Button::new("script-open").small().outline().icon(Icon::new(IconName::SquarePen)).label("Open in editor").on_click(move |_, _, cx| {
+                            .child(Button::new("script-open").small().ghost().icon(Icon::new(IconName::SquarePen)).label("External editor").on_click(move |_, _, cx| {
                                 if let Err(e) = crate::data::script::open_in_editor(&open_p) {
                                     st_open.update(cx, |s, cx| s.set_status(format!("Could not open the editor: {e}"), cx));
                                 }
