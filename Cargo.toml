@@ -59,7 +59,7 @@ lucem-app-core = { path = "app/lucem-app-core", version = "0.0.1" }
 # add each to a crate with `<name>.workspace = true`.
 # Compute (as in dsp-kitchen)
 # `persistence`: autotune decisions survive the process; with the compiled-kernel cache turned on
-# in the runtime setup (.knowledge/gpu/01-compute-layer.md), start-up drops from minutes to seconds
+# in the runtime setup (neuro-kitchen/knowledge/cubecl/02-compute-layer.md), start-up drops from minutes to seconds
 cubecl = { version = "0.11.4", default-features = false, features = ["std", "stdlib", "persistence"] }
 burn = { version = "0.22.1", default-features = false }
 # Python bindings (built by maturin, see pyproject.toml)

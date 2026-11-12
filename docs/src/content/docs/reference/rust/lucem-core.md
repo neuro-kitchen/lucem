@@ -22,7 +22,7 @@ Core of lucem: the one place every crate reaches a GPU (or the CPU runtime) thro
 - `element` (`compute` feature): the element types kernels are generic over.
 
 Ported from dsp-kitchen's `dspk-core` (compute layer) and `dspk-ops::core` (buffers); the reasons
-behind each rule are in `.knowledge/gpu/`.
+behind each rule are in the maintainers' notes (`neuro-kitchen/knowledge/cubecl/`, outside this repository).
 
 ## Types
 
