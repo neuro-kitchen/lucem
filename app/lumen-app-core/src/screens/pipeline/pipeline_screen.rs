@@ -21,7 +21,7 @@ use crate::data::results::COLORMAPS;
 use crate::data::store::{AppEvent, Store};
 use crate::domain::command::Command;
 use crate::domain::graph::{NodeKind, ViewStyle};
-use crate::ui::param_editor::{Commit, ParamEditor};
+use crate::ui::param_editor::{Commit, EditOps as _, ParamEditor};
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::{divider_v, row, stepper, MenuSelect, Section};
 
@@ -270,15 +270,19 @@ impl Render for PipelineView {
             .flex_1()
             .min_h_0()
             .w_full()
-            .child(div().relative().flex_1().min_w_0().h_full().child(self.canvas.clone()).child(self.toolbar(cx)))
+            // Panes are cards on the chrome, PANE_GAP apart (kitchen-ui)
+            .p(px(theme::PANE_GAP))
+            .gap(px(theme::PANE_GAP))
+            .bg(color::chrome())
+            .child(div().relative().flex_1().min_w_0().h_full().rounded(px(theme::RADIUS_LG)).overflow_hidden().child(self.canvas.clone()).child(self.toolbar(cx)))
             .child(
                 v_flex()
                     .flex_none()
                     .w(px(INSPECTOR_W))
                     .h_full()
+                    .rounded(px(theme::RADIUS_LG))
+                    .overflow_hidden()
                     .bg(color::panel())
-                    .border_l_1()
-                    .border_color(color::border())
                     .child(self.inspector.clone()),
             ))
     }
@@ -387,7 +391,7 @@ impl Inspector {
                     let (store, id) = (self.store.clone(), id.clone());
                     Rc::new(move |op, cx| store.update(cx, |s, cx| s.execute(Command::SetOp { id: id.clone(), op }, cx)).map(|_| ()).map_err(|e| e.to_string()))
                 };
-                self.params.update(cx, |p, cx| p.set_target(&id, op, commit, window, cx));
+                self.params.update(cx, |p, cx| p.set_op(&id, op, commit, window, cx));
                 let (store, id2, on) = (self.store.clone(), id.clone(), *enabled);
                 v_flex()
                     .gap(px(theme::MD))

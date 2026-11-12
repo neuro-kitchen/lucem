@@ -225,6 +225,7 @@ impl EventEmitter<AppEvent> for Store {}
 
 impl Store {
     pub fn new(prefs: Prefs, prefs_path: Option<PathBuf>) -> Self {
+        crate::data::tools::set(&prefs.tools);
         let tool = ToolState { rulers: prefs.rulers, ..ToolState::default() };
         Self {
             doc: ProjectDoc::default(),
@@ -333,7 +334,7 @@ impl Store {
                 self.save_prefs();
                 self.hist_persist_all(cx);
                 let _ = self.layout.save(&folder);
-                self.set_status(format!("Project saved in {}", folder.display()), cx);
+                self.set_status(format!("Project saved in {}", crate::domain::paths::short_path(&folder)), cx);
             }
             Err(e) => self.set_status(format!("Project not saved: {e}"), cx),
         }
@@ -464,7 +465,7 @@ impl Store {
                             s.compute_histograms(&id, py, cx);
                             cx.emit(AppEvent::ImageReady(id));
                         }
-                        Err(e) => s.set_status(format!("Could not open {}: {e}", path.display()), cx),
+                        Err(e) => s.set_status(format!("Could not open {}: {e}", crate::domain::paths::short_path(&path)), cx),
                     }
                     cx.notify();
                 });
@@ -863,17 +864,17 @@ impl Store {
     pub fn add_script_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         use crate::data::script;
         if script::Language::of(&path).is_none() {
-            return self.set_status(format!("{}: a script is a .py or .rs file", path.display()), cx);
+            return self.set_status(format!("{}: a script is a .py or .rs file", crate::domain::paths::short_path(&path)), cx);
         }
         let header = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| script::read_header(&t));
         let h = match header {
             Ok(h) => h,
-            Err(e) => return self.set_status(format!("{}: {e}", path.display()), cx),
+            Err(e) => return self.set_status(format!("{}: {e}", crate::domain::paths::short_path(&path)), cx),
         };
         let kind = NodeKind::Script { path: path.to_string_lossy().into_owned(), inputs: h.inputs, output: h.output, params: h.params, enabled: true };
         let y = self.doc.graph.next_row();
         if self.execute(Command::AddNode { kind, x: 0.0, y, id: None, after: self.sel.node.clone() }, cx).is_ok() {
-            self.set_status(format!("Script {} added; edit it, save, and the node runs again", path.display()), cx);
+            self.set_status(format!("Script {} added; edit it, save, and the node runs again", crate::domain::paths::short_path(&path)), cx);
         }
     }
 
@@ -1349,6 +1350,7 @@ impl Store {
     /// Changes the preferences and saves them.
     pub fn update_prefs(&mut self, f: impl FnOnce(&mut Prefs), cx: &mut Context<Self>) {
         f(&mut self.prefs);
+        crate::data::tools::set(&self.prefs.tools);
         self.save_prefs();
         cx.notify();
     }
@@ -1367,8 +1369,8 @@ impl Store {
         let folder = self.folder().or_else(|| std::env::current_dir().ok()).unwrap_or_default();
         let path = folder.join(format!("{}.geojson", img.name.replace([' ', '/'], "_")));
         let msg = match std::fs::write(&path, super::geojson::export(&list)) {
-            Ok(()) => format!("{} annotation(s) written to {}", list.len(), path.display()),
-            Err(e) => format!("Could not write {}: {e}", path.display()),
+            Ok(()) => format!("{} annotation(s) written to {}", list.len(), crate::domain::paths::short_path(&path)),
+            Err(e) => format!("Could not write {}: {e}", crate::domain::paths::short_path(&path)),
         };
         self.set_status(msg, cx);
     }
@@ -1379,11 +1381,11 @@ impl Store {
         let Some(img) = self.doc.active_image.clone() else { return self.set_status("Open an image first", cx) };
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
-            Err(e) => return self.set_status(format!("{}: {e}", path.display()), cx),
+            Err(e) => return self.set_status(format!("{}: {e}", crate::domain::paths::short_path(&path)), cx),
         };
         let annotations = match super::geojson::import(&text, &img, &self.tool.class) {
             Ok(a) => a,
-            Err(e) => return self.set_status(format!("{}: {e}", path.display()), cx),
+            Err(e) => return self.set_status(format!("{}: {e}", crate::domain::paths::short_path(&path)), cx),
         };
         let n = annotations.len();
         let mut commands: Vec<Command> = Vec::new();
@@ -1398,7 +1400,7 @@ impl Store {
         }
         commands.push(Command::AddAnnotations { annotations });
         if self.execute(Command::Batch { commands }, cx).is_ok() {
-            self.set_status(format!("{n} annotation(s) imported from {}", path.display()), cx);
+            self.set_status(format!("{n} annotation(s) imported from {}", crate::domain::paths::short_path(&path)), cx);
         }
     }
 

@@ -123,7 +123,6 @@ pub fn summary(store: &Entity<Store>, cx: &App) -> AnyElement {
                         let _ = s.execute(Command::SetAnnotation { annotation }, cx);
                     });
                 })
-                .full_width(),
             ));
             if let Some(area) = a.shape.area() {
                 col = col.child(value_row("Area", format_area(area, um)));

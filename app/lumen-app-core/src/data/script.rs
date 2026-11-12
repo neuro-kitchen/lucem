@@ -16,11 +16,12 @@
 //!   Python gets a Polars frame (else pandas, else a list of rows), Rust a small [`Table`
 //!   API](RUST_TABLE_PRELUDE). Tables travel as CSV.
 //!
-//! Python is `python3` (or `$LUMEN_PYTHON`) and needs NumPy for script nodes. Rust is `rustc` (or
-//! `$LUMEN_RUSTC`); a Rust file is compiled once per version of it, in the cache folder. A Rust
+//! The programs come from [`crate::data::tools`]: Settings › Tools, else `$LUMEN_PYTHON`… , else
+//! the `PATH`. Python is `python3` and needs NumPy for script nodes (or uv, which provides it).
+//! Rust is `rustc`; a Rust file is compiled once per version of it, in the cache folder. A Rust
 //! script may use crates from crates.io, one header line each —
 //!   `// lumen: crate rayon = "1"` or `// lumen: crate image = { version = "0.25", features = ["png"] }`
-//! — and is then built with `cargo` (or `$LUMEN_CARGO`); the crates compile once, shared by every
+//! — and is then built with `cargo`; the crates compile once, shared by every
 //! script.
 
 use std::collections::hash_map::DefaultHasher;
@@ -278,12 +279,8 @@ pub fn read_npy(bytes: &[u8]) -> Result<HostArray, String> {
 // Running
 // ----------------------------------------------------------------------------
 
-fn python() -> String {
-    std::env::var("LUMEN_PYTHON").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "python3".into())
-}
-
-fn rustc() -> String {
-    std::env::var("LUMEN_RUSTC").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "rustc".into())
+fn rustc() -> PathBuf {
+    crate::data::tools::program(crate::data::tools::Tool::Rustc)
 }
 
 /// The cache folder of compiled Rust scripts and results.
@@ -313,8 +310,8 @@ fn run_program(cmd: &mut Command, what: &str) -> Result<(), String> {
     }
 }
 
-fn cargo() -> String {
-    std::env::var("LUMEN_CARGO").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "cargo".into())
+fn cargo() -> PathBuf {
+    crate::data::tools::program(crate::data::tools::Tool::Cargo)
 }
 
 /// The crates a Rust script asks for: `NAME = SPEC` of each `lumen: crate` line, as a Cargo.toml
@@ -362,7 +359,7 @@ fn compile_rust(source: &str, crates: &[String]) -> Result<PathBuf, String> {
     let target = cache_dir().join("target");
     run_program(Command::new(cargo()).args(["build", "--release", "--quiet", "--manifest-path"]).arg(dir.join("Cargo.toml")).env("CARGO_TARGET_DIR", &target), "cargo")?;
     let built = target.join("release").join(if cfg!(windows) { format!("{package}.exe") } else { package });
-    std::fs::rename(&built, &bin).or_else(|_| std::fs::copy(&built, &bin).map(|_| ())).map_err(|e| format!("{}: {e}", built.display()))?;
+    std::fs::rename(&built, &bin).or_else(|_| std::fs::copy(&built, &bin).map(|_| ())).map_err(|e| format!("{}: {e}", crate::domain::paths::short_path(&built)))?;
     Ok(bin)
 }
 
@@ -461,8 +458,8 @@ fn results_cache() -> &'static Mutex<HashMap<u64, HostArray>> {
 
 /// Runs the script node at `path` on `inputs` (by name) with `params`, giving its output.
 pub fn run_node(path: &Path, inputs: &[(String, PortType, HostArray)], params: &[ScriptParam], output: PortType) -> Result<HostArray, String> {
-    let lang = Language::of(path).ok_or_else(|| format!("{}: a script is a .py or .rs file", path.display()))?;
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let lang = Language::of(path).ok_or_else(|| format!("{}: a script is a .py or .rs file", crate::domain::paths::short_path(&path)))?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", crate::domain::paths::short_path(&path)))?;
     let mut h = DefaultHasher::new();
     (path, &text).hash(&mut h);
     for (n, _, a) in inputs {
@@ -496,7 +493,7 @@ pub fn run_node(path: &Path, inputs: &[(String, PortType, HostArray)], params: &
             Language::Python => {
                 let runner = dir.join("runner.py");
                 std::fs::write(&runner, PYTHON_NODE_RUNNER).map_err(|e| e.to_string())?;
-                run_program(Command::new(python()).arg(&runner).arg(path).arg(&dir), &name)?;
+                run_program(crate::data::tools::python_command().arg(&runner).arg(path).arg(&dir), &name)?;
             }
             Language::Rust => {
                 let abs = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
@@ -657,7 +654,7 @@ pub fn run_table(lang: Language, code: &str, csv: &str) -> Result<String, String
                 std::fs::write(dir.join("cell.py"), code).map_err(|e| e.to_string())?;
                 let runner = dir.join("runner.py");
                 std::fs::write(&runner, PYTHON_TABLE_RUNNER).map_err(|e| e.to_string())?;
-                run_program(Command::new(python()).arg(&runner).arg(&dir), "Python")?;
+                run_program(crate::data::tools::python_command().arg(&runner).arg(&dir), "Python")?;
             }
             Language::Rust => {
                 let bin = compile_rust(&RUST_TABLE_PRELUDE.replace("__USER_CODE__", code), &read_crates(code)?)?;
@@ -698,8 +695,13 @@ mod tests {
         assert!(read_header("// lumen: crate rayon = \"1\"\n// lumen: output mask").is_ok());
     }
 
-    fn has(cmd: &str, args: &[&str]) -> bool {
+    fn has(cmd: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> bool {
         Command::new(cmd).args(args).output().is_ok_and(|o| o.status.success())
+    }
+
+    /// Whether Python (through uv when it is set) runs with `args`.
+    fn has_python(args: &[&str]) -> bool {
+        crate::data::tools::python_command().args(args).output().is_ok_and(|o| o.status.success())
     }
 
     fn run_template(lang: Language) -> HostArray {
@@ -716,7 +718,7 @@ mod tests {
     /// The Rust template, compiled and run (skipped without rustc).
     #[test]
     fn the_rust_template_runs() {
-        if !has(&rustc(), &["--version"]) {
+        if !has(rustc(), &["--version"]) {
             eprintln!("skipped: no rustc");
             return;
         }
@@ -745,7 +747,7 @@ mod tests {
     /// The Python template (skipped without python3 and NumPy).
     #[test]
     fn the_python_template_runs() {
-        if !has(&python(), &["-c", "import numpy"]) {
+        if !has_python(&["-c", "import numpy"]) {
             eprintln!("skipped: no python3 with NumPy");
             return;
         }
@@ -757,11 +759,11 @@ mod tests {
     #[test]
     fn table_cells_run() {
         let csv = "id,class,area\na1,Region,12.5\na2,Tumor,3\n";
-        if has(&rustc(), &["--version"]) {
+        if has(rustc(), &["--version"]) {
             let out = run_table(Language::Rust, table_template(Language::Rust), csv).unwrap();
             assert!(out.contains("a1") && !out.contains("a2"), "{out}");
         }
-        if has(&python(), &["--version"]) {
+        if has_python(&["--version"]) {
             let out = run_table(Language::Python, "result = df\n", csv).unwrap();
             assert!(out.contains("a2"), "{out}");
         }

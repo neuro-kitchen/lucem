@@ -43,9 +43,13 @@ pub struct Prefs {
     /// Appearance: dark (`Some(true)`), light (`Some(false)`) or the system's (`None`).
     #[serde(default = "dark")]
     pub theme: Option<bool>,
-    /// Accent colour (RGB).
-    #[serde(default = "accent")]
-    pub accent: u32,
+    /// The accent the user picked (`None`: lumen's blue). Saved as `"#rrggbb"`; a number from
+    /// before (one of the old preset colours) still reads.
+    #[serde(default, deserialize_with = "accent_or_old")]
+    pub accent: Option<kitchen_ui::Rgb>,
+    /// The programs scripts use (Python, uv, Ruff, Cargo, rustc), when not found on the `PATH`.
+    #[serde(default)]
+    pub tools: crate::data::tools::ToolPaths,
     /// What is around the image: 0 grey, 1 dark, 2 light.
     #[serde(default)]
     pub pasteboard: u8,
@@ -67,8 +71,13 @@ fn dark() -> Option<bool> {
     Some(true)
 }
 
-fn accent() -> u32 {
-    0x3d65a8
+/// `"#rrggbb"`, `null`, or an old preset as a number (the old default blue is lumen's own, `None`).
+fn accent_or_old<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<kitchen_ui::Rgb>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(t) => kitchen_ui::Rgb::parse(&t),
+        serde_json::Value::Number(n) => n.as_u64().filter(|&v| v != 0x3d65a8).map(|v| kitchen_ui::Rgb(v as u32 & 0xffffff)),
+        _ => None,
+    })
 }
 
 fn font_size() -> f32 {
@@ -85,7 +94,7 @@ fn yes() -> bool {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { recent: Vec::new(), sidebar_open: true, rulers: false, left_tab: left_tab(), right_tab: None, studio_tabs: Vec::new(), studio_collapsed: Vec::new(), pipeline_dock: false, link_views: false, left_open: true, right_open: true, theme: dark(), accent: accent(), pasteboard: 0, font_size: font_size(), tile_threads: 0, runtime: None, ml_model: None, dock_sides: None }
+        Self { recent: Vec::new(), sidebar_open: true, rulers: false, left_tab: left_tab(), right_tab: None, studio_tabs: Vec::new(), studio_collapsed: Vec::new(), pipeline_dock: false, link_views: false, left_open: true, right_open: true, theme: dark(), accent: None, tools: Default::default(), pasteboard: 0, font_size: font_size(), tile_threads: 0, runtime: None, ml_model: None, dock_sides: None }
     }
 }
 
@@ -125,5 +134,21 @@ impl Prefs {
         self.recent.retain(|p| p != path);
         self.recent.insert(0, path.to_path_buf());
         self.recent.truncate(RECENT);
+    }
+}
+
+#[cfg(test)]
+mod accent_tests {
+    use super::*;
+
+    #[test]
+    fn the_accent_reads_old_numbers_and_new_colours() {
+        let read = |json: &str| serde_json::from_str::<Prefs>(&format!("{{\"accent\": {json}}}")).unwrap().accent;
+        assert_eq!(read("4023720"), None, "the old default blue is lumen's own accent now");
+        assert_eq!(read("2850694"), Some(kitchen_ui::Rgb(0x2b7f86)), "another old preset is kept");
+        assert_eq!(read("\"#b0285f\""), Some(kitchen_ui::Rgb(0xb0285f)));
+        assert_eq!(read("null"), None);
+        let p = Prefs { accent: Some(kitchen_ui::Rgb(0x2b7f86)), ..Prefs::default() };
+        assert_eq!(serde_json::from_str::<Prefs>(&serde_json::to_string(&p).unwrap()).unwrap(), p);
     }
 }

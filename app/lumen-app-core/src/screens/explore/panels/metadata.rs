@@ -27,7 +27,7 @@ pub fn panel(store: &Entity<Store>, cx: &App) -> AnyElement {
     let mut col = v_flex().id("metadata-panel").size_full().overflow_y_scroll().p(px(theme::MD)).gap(px(theme::SM));
     col = col
         .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(img.name.clone()))
-        .child(line("File", img.path.display().to_string()))
+        .child(line("File", crate::domain::paths::short_path(&img.path)))
         .child(line("Size", format!("{} × {} px{}", group_digits(p.width()), group_digits(p.height()), if p.is_volume() { format!(" × {} planes", p.depth()) } else { String::new() })))
         .child(line("Pixel type", p.dtype.clone()))
         .child(line("Pixel size", p.pixel_size_um.map_or("Unknown".to_string(), |u| format!("{} µm", sig3(u)))))

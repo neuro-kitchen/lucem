@@ -6,12 +6,13 @@ use std::rc::Rc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
-use gpui_kit::{div, px, AnyElement, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
+use gpui_kit::{div, px, AnyElement, App, AppContext as _, Context, Entity, Subscription, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
 
 use crate::data::prefs::Prefs;
+use crate::data::tools::{self, Found, Tool, ToolPaths};
 use crate::data::store::Store;
-use crate::ui::theme::{self, color, ACCENTS, PASTEBOARDS};
-use crate::ui::widgets::{stepper, MenuSelect};
+use crate::ui::theme::{self, color, PASTEBOARDS};
+use crate::ui::widgets::{stepper, AccentChanged, AccentPicker, MenuSelect};
 use gpui_kit::prelude::FluentBuilder as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,12 +21,13 @@ enum Section {
     Views,
     Compute,
     Models,
+    Tools,
     Performance,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [Section::Appearance, Section::Views, Section::Compute, Section::Models, Section::Performance, Section::About];
+    const ALL: [Section; 7] = [Section::Appearance, Section::Views, Section::Compute, Section::Models, Section::Tools, Section::Performance, Section::About];
 
     fn title(self) -> &'static str {
         match self {
@@ -33,6 +35,7 @@ impl Section {
             Section::Views => "Views",
             Section::Compute => "Compute",
             Section::Models => "Models",
+            Section::Tools => "Tools",
             Section::Performance => "Performance",
             Section::About => "About",
         }
@@ -44,6 +47,7 @@ impl Section {
             Section::Views => IconName::LayoutGrid,
             Section::Compute => IconName::Cpu,
             Section::Models => IconName::Sparkles,
+            Section::Tools => IconName::Wrench,
             Section::Performance => IconName::Gauge,
             Section::About => IconName::Info,
         }
@@ -54,11 +58,17 @@ pub struct SettingsView {
     store: Entity<Store>,
     section: Section,
     on_close: crate::screens::palette::Run,
+    /// The accent picker (made on the first draw: it needs the window).
+    accent: Option<Entity<AccentPicker>>,
+    /// Each tool's `--version` (Tools), and the paths it was read for.
+    versions: Vec<(Tool, Result<String, String>)>,
+    versions_for: Option<ToolPaths>,
+    _subs: Vec<Subscription>,
 }
 
 impl SettingsView {
     pub fn new(store: Entity<Store>, on_close: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        Self { store, section: Section::Appearance, on_close: Rc::new(on_close) }
+        Self { store, section: Section::Appearance, on_close: Rc::new(on_close), accent: None, versions: Vec::new(), versions_for: None, _subs: Vec::new() }
     }
 
     /// Changes the preferences; the look follows at once.
@@ -109,26 +119,14 @@ impl SettingsView {
         };
         let s1 = st.clone();
         let theme = Self::choices("set-theme", &["System", "Dark", "Light"], theme_now, move |i, w, cx| Self::set(&s1, |p| p.theme = [None, Some(true), Some(false)][i], w, cx));
-        let accents = h_flex().gap(px(theme::XS)).children(ACCENTS.iter().map(|(name, rgb)| {
-            let (s2, rgb) = (st.clone(), *rgb);
-            let on = p.accent == rgb;
-            div()
-                .id(SharedString::from(format!("set-accent-{name}")))
-                .size(px(22.))
-                .rounded_full()
-                .cursor_pointer()
-                .bg(gpui_kit::rgb(rgb))
-                .border_2()
-                .border_color(if on { color::text() } else { color::border() })
-                .on_click(move |_, w, cx| Self::set(&s2, |p| p.accent = rgb, w, cx))
-        }));
+        let accents = self.accent.clone().map(|a| a.into_any_element()).unwrap_or_else(|| div().into_any_element());
         let s3 = st.clone();
         let paste = Self::choices("set-paste", &PASTEBOARDS, p.pasteboard as usize, move |i, w, cx| Self::set(&s3, |p| p.pasteboard = i as u8, w, cx));
         let s4 = st.clone();
         let size = stepper("set-font", format!("{:.0} px", p.font_size), move |d, w, cx| Self::set(&s4, |p| p.font_size = (p.font_size + d).clamp(12.0, 18.0), w, cx));
         v_flex()
             .child(Self::row("Theme", "Dark or light, or as the system is set (follows it while running).", "Dark", theme))
-            .child(Self::row("Accent", "The colour of selections, the active tool and primary buttons.", "Blue", accents))
+            .child(Self::row("Accent", "The colour of selections, the active tool and primary buttons: lumen's blue, a suggested colour or any colour (kept readable in both themes).", "Blue", accents))
             .child(Self::row("Pasteboard", "What is around the image. Grey shows the edges of dark images.", "Grey", paste))
             .child(Self::row("Interface size", "Text size of the whole interface (drag the number).", "15 px", size))
             .into_any_element()
@@ -217,14 +215,14 @@ impl SettingsView {
                 .child(rescan),
         );
         if let Some((what, f)) = &busy {
-            col = col.child(div().text_sm().text_color(color::accent_hover()).child(format!("{what}{}", f.map_or(String::new(), |f| format!(" — {:.0} %", f * 100.0)))));
+            col = col.child(div().text_sm().text_color(color::accent_mark()).child(format!("{what}{}", f.map_or(String::new(), |f| format!(" — {:.0} %", f * 100.0)))));
         }
         if s.ml.scanning || !s.ml.scanned {
             col = col.child(div().text_sm().text_color(color::text_muted()).child("Looking for plugins…"));
         } else if s.ml.plugins.is_empty() {
             col = col.child(div().text_sm().child("No model plugin found.")).child(div().text_xs().text_color(color::text_muted()).child("Build one (cargo build -p lumen-ml-sam: it lands next to lumen-app) or copy a lumen-ml-* program into one of:"));
             for d in lumen_ml::plugin_dirs().into_iter().take(3) {
-                col = col.child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(d.display().to_string()));
+                col = col.child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(crate::domain::paths::short_path(&d)));
             }
         }
         for (pi, plugin) in s.ml.plugins.iter().enumerate() {
@@ -278,6 +276,63 @@ impl SettingsView {
 
     /// [`Self::choices`] for labels made at run time.
 
+    /// The programs scripts use: where each is found (Settings, its variable or the `PATH`) and
+    /// its version; Choose… sets a path, Use PATH clears it. Nothing is installed by lumen.
+    fn tools(&mut self, p: &Prefs, cx: &mut Context<Self>) -> AnyElement {
+        if self.versions_for.as_ref() != Some(&p.tools) {
+            self.versions_for = Some(p.tools.clone());
+            cx.spawn(async move |this, cx| {
+                let v = cx.background_executor().spawn(async { Tool::ALL.iter().map(|&t| (t, tools::version(t))).collect::<Vec<_>>() }).await;
+                this.update(cx, |s, cx| {
+                    s.versions = v;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        let mut col = v_flex().child(div().pb(px(theme::SM)).text_xs().text_color(color::text_muted()).child("lumen uses these programs as they are on this computer. Each is looked for at the path set here, then at its variable (LUMEN_PYTHON…), then on the PATH."));
+        for tool in Tool::ALL {
+            let found = tools::find(tool);
+            let source = match &found {
+                Found::Settings(p) => format!("{} (set here)", crate::domain::paths::short_path(p)),
+                Found::Env(p) => format!("{} (from {})", crate::domain::paths::short_path(p), tool.env()),
+                Found::Path(p) => format!("{} (on the PATH)", crate::domain::paths::short_path(p)),
+                Found::Missing => "Not found".to_string(),
+            };
+            let version = self.versions.iter().find(|(t, _)| *t == tool).map(|(_, v)| v.clone());
+            let (vtext, ok) = match &version {
+                Some(Ok(v)) => (v.clone(), true),
+                Some(Err(e)) => (e.clone(), false),
+                None => ("Checking…".to_string(), true),
+            };
+            let st = self.store.clone();
+            let choose = Button::new(SharedString::from(format!("tool-choose-{}", tool.env()))).outline().small().label("Choose…").on_click(move |_, _, cx| {
+                let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(format!("{} program", tool.title()).into()) });
+                let st = st.clone();
+                cx.spawn(async move |cx| {
+                    if let Ok(Ok(Some(paths))) = rx.await
+                        && let Some(path) = paths.into_iter().next()
+                    {
+                        st.update(cx, |s, cx| s.update_prefs(|p| *tool.slot(&mut p.tools) = Some(path), cx));
+                    }
+                })
+                .detach();
+            });
+            let st = self.store.clone();
+            let set_here = matches!(found, Found::Settings(_));
+            let clear = Button::new(SharedString::from(format!("tool-clear-{}", tool.env()))).ghost().small().label("Use PATH").disabled(!set_here).on_click(move |_, _, cx| st.update(cx, |s, cx| s.update_prefs(|p| *tool.slot(&mut p.tools) = None, cx)));
+            let control = v_flex()
+                .items_end()
+                .gap(px(theme::XS))
+                .child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(source))
+                .child(div().text_xs().text_color(if ok { color::text() } else { color::danger() }).child(vtext))
+                .child(h_flex().gap(px(theme::XS)).child(clear).child(choose));
+            col = col.child(Self::row(tool.title(), tool.what(), "", control));
+        }
+        col.into_any_element()
+    }
+
     fn performance(&self, p: &Prefs) -> AnyElement {
         let st = self.store.clone();
         let auto = lumen_view::TileService::default_threads();
@@ -290,7 +345,7 @@ impl SettingsView {
 
     fn about(&self, p: &Prefs) -> AnyElement {
         let st = self.store.clone();
-        let path = Prefs::path().map_or("—".to_string(), |p| p.display().to_string());
+        let path = Prefs::path().map_or("—".to_string(), |p| crate::domain::paths::short_path(&p));
         let reset = Button::new("set-reset").outline().small().label("Reset all settings").on_click(move |_, w, cx| {
             Self::set(
                 &st,
@@ -318,8 +373,23 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let prefs = self.store.read(cx).prefs.clone();
+        let picker = match &self.accent {
+            Some(p) => p.clone(),
+            None => {
+                let p = cx.new(|cx| AccentPicker::new(prefs.accent, window, cx));
+                self._subs.push(cx.subscribe_in(&p, window, |this, _, e: &AccentChanged, window, cx| {
+                    let accent = e.0;
+                    Self::set(&this.store, |p| p.accent = accent, window, cx);
+                }));
+                self.accent = Some(p.clone());
+                p
+            }
+        };
+        if picker.read(cx).current() != prefs.accent {
+            picker.update(cx, |p, cx| p.set_current(prefs.accent, cx));
+        }
         // Left-aligned, icon then name (`jakobs-law`, `text-alignment`)
         let nav = v_flex().flex_none().w(px(190.)).h_full().p(px(theme::SM)).gap(px(2.)).bg(color::chrome()).border_r_1().border_color(color::border()).children(Section::ALL.into_iter().map(|sec| {
             let on = sec == self.section;
@@ -332,7 +402,7 @@ impl Render for SettingsView {
                 .cursor_pointer()
                 .when(on, |d| d.bg(color::control()))
                 .when(!on, |d| d.hover(|d| d.bg(color::hover())))
-                .child(Icon::new(sec.icon()).small().text_color(if on { color::accent_hover() } else { color::text_muted() }))
+                .child(Icon::new(sec.icon()).small().text_color(if on { color::accent_mark() } else { color::text_muted() }))
                 .child(div().text_sm().child(sec.title()))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.section = sec;
@@ -344,6 +414,7 @@ impl Render for SettingsView {
             Section::Views => self.views(&prefs, cx),
             Section::Compute => self.compute(&prefs, cx),
             Section::Models => self.models(&prefs, cx),
+            Section::Tools => self.tools(&prefs, cx),
             Section::Performance => self.performance(&prefs),
             Section::About => self.about(&prefs),
         };

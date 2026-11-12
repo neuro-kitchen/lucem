@@ -9,7 +9,7 @@ use lumen_core::cubecl::prelude::Client;
 use lumen_core::memory::DeviceArray;
 use lumen_core::{ComputeTarget, Shape};
 use lumen_io::Pyramid;
-use lumen_pipeline::{run_spec, PipelineSpec, RunOptions};
+use lumen_pipeline::PipelineSpec;
 use lumen_stream::{client_config_with, server_config_with_clients, Authority, ClientIdentity, Permission, ServeOptions, Server, ServerIdentity, ServerTrust, Session};
 
 const USAGE: &str = "lumen — GPU image analysis
@@ -24,18 +24,26 @@ USAGE
   lumen serve [--data DIR] [--bind ADDR] [--name HOST]... [--max-clients N] [--allow-anonymous]
               [--certificate FILE --private-key FILE]
                                          Serve the images under DIR to enrolled clients
+  lumen clients pair [--control]                         (--auth DIR)
+                                         A one-time code to pair a computer (10 minutes)
   lumen clients enroll <name> [--control] --out FILE|-   (--auth DIR)
   lumen clients list | revoke <name>                     (--auth DIR)
                                          Who may connect to `serve`
+  lumen pair <host:port> <code> [--name NAME] [--out FILE]
+                                         Pair this computer with a server (its key is made here)
   lumen fetch <host:port> --identity FILE --server-name NAME [--open PATH]
                                          List a server's images, or read a tile of one
   lumen hist stains | tissue | cells <image> …
                                          Histology: stain vectors, tissue, cells (lumen hist)
+  lumen ops [--json]                     Every pipeline operation: family, types, parameters
+  lumen mcp [--runtime NAME]             lumen's tools for an agent (MCP over stdio), e.g.
+                                         claude mcp add lumen -- lumen mcp
   lumen session run <session.json> <image>... [--out DIR] [--runtime NAME]
                                          Run an analysis saved by the app on many images
 ";
 
 mod hist;
+mod ops;
 mod session;
 
 fn main() -> ExitCode {
@@ -119,8 +127,11 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "serve" => serve(args),
         "clients" => clients(args),
         "fetch" => fetch(args),
+        "pair" => pair(args),
         "hist" => hist::hist(args),
         "session" => session::session(args),
+        "ops" => ops::ops(args),
+        "mcp" => mcp(args),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     }
 }
@@ -184,47 +195,31 @@ fn doctor(args: Args) -> Result<(), String> {
     Ok(())
 }
 
-struct RunTask<'a> {
-    spec: &'a PipelineSpec,
-    image: Arc<Pyramid>,
-    output: PathBuf,
-    block: Option<usize>,
-}
-
-impl ComputeTask for RunTask<'_> {
-    type Output = Result<(), String>;
-    fn run(self, client: Client) -> Self::Output {
-        let progress = Arc::new(|done: usize, total: usize| {
-            if done == total || done.is_multiple_of(16) {
-                eprintln!("{done} / {total} blocks");
-            }
-        });
-        let options = RunOptions { block: self.block, progress: Some(progress), ..RunOptions::default() };
-        let done = run_spec(&client, &self.image, self.spec, &self.output, options).map_err(|e| e.to_string())?;
-        for w in &done.warnings {
-            eprintln!("warning: {w}");
-        }
-        println!("wrote {} ({} blocks)", done.output.display(), done.blocks);
-        if let Some(n) = done.objects {
-            println!("{n} objects");
-        }
-        println!("spec: {}", done.spec.display());
-        Ok(())
-    }
-}
-
 fn run_pipeline(mut args: Args) -> Result<(), String> {
     let block = args.number("--block")?;
     let runtime = args.take_value("--runtime")?;
     let a = args.positional(3)?;
     let text = std::fs::read_to_string(&a[0]).map_err(|e| format!("{}: {e}", a[0]))?;
     let spec: PipelineSpec = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", a[0]))?;
-    let image = Arc::new(Pyramid::open(Path::new(&a[1])).map_err(|e| e.to_string())?);
     let target = match runtime {
         Some(r) => ComputeTarget::parse(&r).and_then(ComputeTarget::checked).map_err(|e| e.to_string())?,
         None => ComputeTarget::from_env().map_err(|e| e.to_string())?,
     };
-    target.run(RunTask { spec: &spec, image, output: PathBuf::from(&a[2]), block }).map_err(|e| e.to_string())?
+    let progress: std::sync::Arc<dyn Fn(usize, usize) + Send + Sync> = Arc::new(|done: usize, total: usize| {
+        if done == total || done.is_multiple_of(16) {
+            eprintln!("{done} / {total} blocks");
+        }
+    });
+    let done = lumen_mcp::work::run_pipeline(&target, &spec, Path::new(&a[1]), Path::new(&a[2]), block, Some(progress))?;
+    for w in &done.warnings {
+        eprintln!("warning: {w}");
+    }
+    println!("wrote {} ({} blocks)", done.output.display(), done.blocks);
+    if let Some(n) = done.objects {
+        println!("{n} objects");
+    }
+    println!("spec: {}", done.spec.display());
+    Ok(())
 }
 
 fn sample(mut args: Args) -> Result<(), String> {
@@ -253,6 +248,13 @@ fn auth_dir(args: &mut Args) -> Result<PathBuf, String> {
     Ok(args.take_value("--auth")?.map(PathBuf::from).or_else(|| std::env::var_os("LUMEN_SERVE_AUTH_DIR").map(PathBuf::from)).unwrap_or_else(|| PathBuf::from(".lumen-auth")))
 }
 
+/// Serves lumen's tools to an agent over stdin/stdout (MCP). Nothing else may print to stdout.
+fn mcp(mut args: Args) -> Result<(), String> {
+    let name = args.take_value("--runtime")?;
+    args.positional(0)?;
+    runtime()?.block_on(lumen_mcp::serve_stdio(name))
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Runtime::new().map_err(|e| e.to_string())
 }
@@ -268,6 +270,7 @@ fn serve(mut args: Args) -> Result<(), String> {
     let certificate = args.take_value("--certificate")?;
     let key = args.take_value("--private-key")?;
     args.positional(0)?;
+    let pair_names = names.clone();
     let identity = match (certificate, key) {
         (Some(c), Some(k)) => ServerIdentity::Files { certificate_chain: c.into(), private_key: k.into() },
         (None, None) => ServerIdentity::SelfSigned { names },
@@ -277,8 +280,11 @@ fn serve(mut args: Args) -> Result<(), String> {
     let authority = Arc::new(Authority::open_or_create(&dir).map_err(|e| e.to_string())?);
     let tls = server_config_with_clients(&authority, &identity, anonymous).map_err(|e| e.to_string())?;
     runtime()?.block_on(async move {
-        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority).with_max_connections(max);
-        eprintln!("serving {data} on {addr} to enrolled clients");
+        let code = authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?;
+        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max);
+        eprintln!("serving {data} on {addr} to paired computers");
+        eprintln!("pair a computer (read only, {} minutes, once): {addr}  code {}", lumen_stream::pairing::CODE_MINUTES, code.display());
+        eprintln!("  in lumen: the server button › Pair with a lumen server…   or: lumen pair {addr} {}", code.display());
         tokio::select! {
             r = server.run(ServeOptions { data: PathBuf::from(&data) }) => r.map_err(|e| e.to_string()),
             _ = shutdown() => { Ok(()) }
@@ -310,6 +316,14 @@ fn clients(mut args: Args) -> Result<(), String> {
     }
     let what = args.rest.remove(0);
     match what.as_str() {
+        "pair" => {
+            let permission = if args.take_flag("--control") { Permission::Control } else { Permission::Read };
+            args.positional(0)?;
+            let code = authority.new_pairing_code(permission).map_err(|e| e.to_string())?;
+            println!("{}", code.display());
+            eprintln!("works once, for {} minutes ({permission}); a running `lumen serve` accepts it at once", lumen_stream::pairing::CODE_MINUTES);
+            Ok(())
+        }
         "enroll" => {
             let permission = if args.take_flag("--control") { Permission::Control } else { Permission::Read };
             let out = args.take_value("--out")?.ok_or("--out FILE (or - for standard output) is required")?;
@@ -339,6 +353,36 @@ fn clients(mut args: Args) -> Result<(), String> {
         }
         other => Err(format!("unknown clients command {other:?}")),
     }
+}
+
+/// Pairs this computer with a server: its key is made here and only the public key is sent; the
+/// identity (certificate, key, the server's CA) is written readable by this user only.
+fn pair(mut args: Args) -> Result<(), String> {
+    let name = args.take_value("--name")?.unwrap_or_else(computer_name);
+    let out = args.take_value("--out")?;
+    let a = args.positional(2)?;
+    let addr: std::net::SocketAddr = a[0].parse().map_err(|e| format!("{}: {e} (host:port, e.g. 10.0.0.5:50051)", a[0]))?;
+    let paired = runtime()?.block_on(lumen_stream::pair(addr, &a[1], &name)).map_err(|e| e.to_string())?;
+    let out = out.map(PathBuf::from).unwrap_or_else(|| servers_dir().join(format!("{}.pem", a[0].replace([':', '[', ']'], "_"))));
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    lumen_stream::pairing::save_identity(&out, &paired.identity_pem).map_err(|e| e.to_string())?;
+    eprintln!("paired as {name} ({}); identity in {}", paired.permission, out.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()));
+    eprintln!("connect with: lumen fetch {} --identity <that file> --server-name {}", a[0], paired.names.first().map_or("localhost", String::as_str));
+    Ok(())
+}
+
+/// This computer's name (for the server's list of paired computers).
+fn computer_name() -> String {
+    let raw = std::fs::read_to_string("/etc/hostname").ok().or_else(|| std::env::var("COMPUTERNAME").ok()).or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_else(|| "computer".into());
+    let clean: String = raw.trim().chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
+    if clean.is_empty() { "computer".into() } else { clean }
+}
+
+/// Where paired servers' identities live: `~/.config/lumen/servers` (each file mode 0600).
+fn servers_dir() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))).unwrap_or_else(std::env::temp_dir).join("lumen").join("servers")
 }
 
 fn fetch(mut args: Args) -> Result<(), String> {

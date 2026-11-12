@@ -111,11 +111,10 @@ pub fn server_config_with_clients(authority: &Authority, identity: &ServerIdenti
     };
     let mut roots = rustls::RootCertStore::empty();
     roots.add(CertificateDer::from(authority.ca_certificate().to_vec())).map_err(tls_error)?;
-    let mut verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots));
-    if anonymous {
-        verifier = verifier.allow_unauthenticated();
-    }
-    let verifier = verifier.build().map_err(tls_error)?;
+    // A computer without a certificate gets in too, to pair: the server then lets it pair only,
+    // unless anonymous clients may read (`Server::with_anonymous`)
+    let _ = anonymous;
+    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots)).allow_unauthenticated().build().map_err(tls_error)?;
     let crypto = rustls::ServerConfig::builder().with_client_cert_verifier(verifier).with_single_cert(chain, key).map_err(tls_error)?;
     finish_server(crypto, certificate)
 }

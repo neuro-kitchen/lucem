@@ -57,6 +57,8 @@ secrets.yml
 .pypirc
 .cargo/credentials
 .cargo/credentials.toml
+# Local overrides, such as [patch.crates-io] kitchen-ui = { path = "../kitchen/crates/kitchen-ui" }
+.cargo/config.toml
 .streamlit/secrets.toml
 *.kdbx
 

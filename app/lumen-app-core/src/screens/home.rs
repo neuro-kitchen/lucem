@@ -44,7 +44,7 @@ pub fn home(store: &Entity<Store>, open_file: impl Fn(&mut Window, &mut App) + '
     for (i, p) in recent.iter().take(8).enumerate() {
         let is_project = p.to_string_lossy().ends_with(".lumen.json");
         let label = if is_project { p.parent().map_or_else(|| display_name(p), display_name) } else { display_name(p) };
-        let sub = p.parent().map(|d| d.display().to_string()).unwrap_or_default();
+        let sub = p.parent().map(crate::domain::paths::short_path).unwrap_or_default();
         recent_col = recent_col.child(entry(SharedString::from(format!("recent-{i}")), if is_project { IconName::FolderOpen } else { IconName::Image }, label, sub, p.clone()));
     }
     let mut samples = column("Samples");

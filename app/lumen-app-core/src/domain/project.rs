@@ -151,12 +151,12 @@ impl ProjectDoc {
 
     /// Reads a project file and, next to it, its `pipeline.json` (format 2).
     pub fn load(path: &Path) -> Result<Self, ProjectError> {
-        let text = std::fs::read_to_string(path).map_err(|e| ProjectError::Io(format!("{}: {e}", path.display())))?;
+        let text = std::fs::read_to_string(path).map_err(|e| ProjectError::Io(format!("{}: {e}", crate::domain::paths::short_path(&path))))?;
         let mut doc = Self::from_json(&text)?;
         let pipeline = path.with_file_name(PIPELINE_FILE);
         if pipeline.is_file() {
-            let text = std::fs::read_to_string(&pipeline).map_err(|e| ProjectError::Io(format!("{}: {e}", pipeline.display())))?;
-            let p: PipelineFile = serde_json::from_str(&text).map_err(|e| ProjectError::Parse(format!("{}: {e}", pipeline.display())))?;
+            let text = std::fs::read_to_string(&pipeline).map_err(|e| ProjectError::Io(format!("{}: {e}", crate::domain::paths::short_path(&pipeline))))?;
+            let p: PipelineFile = serde_json::from_str(&text).map_err(|e| ProjectError::Parse(format!("{}: {e}", crate::domain::paths::short_path(&pipeline))))?;
             doc.graph = p.graph;
         }
         Ok(doc)

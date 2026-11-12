@@ -317,7 +317,7 @@ pub(crate) fn load_folder(folder: &Path, images: &[String]) -> (HistState, Vec<S
                     st.tiles.insert(img.clone(), o.tiles);
                 }
             }
-            Err(e) => errors.push(format!("{}: {e}", f.display())),
+            Err(e) => errors.push(format!("{}: {e}", crate::domain::paths::short_path(&f))),
         }
     }
     (st, errors)
@@ -821,7 +821,6 @@ impl Store {
         self.hist_record(lumen_hist::session::Action::Export, cx);
         let provenance = serde_json::json!({
             "lumen": env!("CARGO_PKG_VERSION"),
-            "image": image_path.display().to_string(),
             "run": "lumen app",
             "session": self.hist.session,
             "pipeline": self.doc.graph,
@@ -849,14 +848,14 @@ impl Store {
             }
             let shapes: Vec<output::RegionShape> = regions.iter().map(|(id, class, o)| output::RegionShape { id, class, outline: o }).collect();
             output::write_shapes(&store, &[cells.clone(), tiles.clone()].concat(), &shapes).map_err(|e| e.to_string())?;
-            output::write_provenance(&store, &provenance).map_err(|e| e.to_string())?;
+            output::write_provenance(&store, &image_path, &provenance).map_err(|e| e.to_string())?;
             Ok::<_, String>((store, cells.len(), tiles.len()))
         });
         cx.spawn(async move |this, cx| {
             let r = task.await;
             let _ = this.update(cx, |s, cx| {
                 match r {
-                    Ok((store, c, t)) => s.hist_report(true, format!("{c} cells, {t} tiles → {} (labels, Parquet tables, GeoParquet shapes, provenance)", store.display()), cx),
+                    Ok((store, c, t)) => s.hist_report(true, format!("{c} cells, {t} tiles → {} (labels, Parquet tables, GeoParquet shapes, provenance)", crate::domain::paths::short_path(&store)), cx),
                     Err(e) => s.hist_report(false, format!("Export failed: {e}"), cx),
                 }
                 cx.notify();
@@ -927,7 +926,7 @@ impl Store {
                     continue;
                 }
                 let bytes = serde_json::to_vec(&o).map_err(|e| e.to_string())?;
-                write_gz(&f, &bytes).map_err(|e| format!("{}: {e}", f.display()))?;
+                write_gz(&f, &bytes).map_err(|e| format!("{}: {e}", crate::domain::paths::short_path(&f)))?;
             }
             Ok::<_, String>(())
         });

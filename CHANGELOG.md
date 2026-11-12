@@ -7,6 +7,50 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
+### Agents, servers and the command line (2026-11-11)
+
+- **`lumen mcp`: lumen for agents.** A Model Context Protocol server over stdio (`app/lumen-mcp`,
+  the official Rust SDK): an agent (Claude Code, `agy`, any MCP client) lists the operations,
+  describes images, runs histology steps on an image (each recorded in a session), saves and
+  loads `session.json`, runs a session over many images, and runs pipelines. Register it with
+  `claude mcp add lumen -- lumen mcp`. `lumen ops`, `lumen run` and `lumen session run` share
+  its code.
+- **`lumen ops [--json]`** lists every pipeline operation: family, ports, parameters and
+  defaults, from the operation catalog and its schema.
+- **Pairing with a code.** `lumen serve` prints a one-time code (`42-8317-2956`: 10 minutes,
+  3 tries); `lumen clients pair` makes another; `lumen pair <host:port> <code>` pairs this
+  computer. Both sides prove they know the code with SPAKE2, so it never crosses the network;
+  the computer makes its own key and sends only the public key; the server records it like any
+  enrolled client (revocable). A computer that has not paired can do nothing but pair.
+- **Provenance names images privately.** Exported results record the image relative to the
+  results (`../slides/case.ome.zarr`) when it is close by, else its file name and a SHA-256
+  fingerprint: never the full path.
+
+### Shared UI (2026-11-11)
+
+- **kitchen-ui 0.0.2** (from crates.io, released 2026-11-12): CodeView, DiffView, TextView and the
+  chat pane are available to the app; nothing in lumen changed for it.
+- **kitchen-ui.** The app's tokens, widgets and parameter editor now come from
+  [`kitchen-ui`](https://crates.io/crates/kitchen-ui) 0.0.1, shared with dsp-kitchen: plain-grey
+  neutrals, the 8 px spacing grid, radii by tier, and text, outlines and slider fills in a
+  contrast-checked accent. lumen keeps its own bar sizes, pasteboard and number formats.
+- **Accent: blue, or any colour.** lumen's accent is blue. Settings has kitchen-ui's accent
+  picker (suggested colours or a custom one, kept readable in both themes); the preference is
+  saved as `"#rrggbb"`, and an accent saved by an earlier version still reads.
+- **Panes as cards.** Explore, Analyze and Pipeline draw their regions (tools, views, side
+  panels, the rail) as rounded cards a few pixels apart on the chrome, as kitchen-ui does. The
+  window has no outline and no transparent shadow margin (what was behind the window showed
+  through it); it resizes from its own edge.
+- **Status bar.** Where lumen runs, at its left (as VS Code's remote indicator: this computer
+  for now; connecting to a lumen server comes with pairing), and this computer's CPU and memory
+  use at its right, every 2 s.
+- **Paths stay private.** Messages, file details, the start screen and Settings show only the
+  last two parts of a path (`…/slides/case-12.ome.zarr`), never the home folder.
+- **Settings › Tools.** The programs scripts use (Python, uv, Ruff, Cargo, rustc): where each is
+  found (a path set here, its `LUMEN_*` variable, or the `PATH`) and its version. With uv set,
+  Python scripts run through it (NumPy provided). lumen installs none of them.
+- **Parameter editor:** switches and two-number lists of an operation are now editable too.
+
 ### Documentation (2026-11-11)
 
 - **The documentation site** (`docs/`, Starlight, built with Bun): Learn, App, Histology,

@@ -33,7 +33,7 @@ use crate::domain::graph::{NodeKind, ViewStyle};
 use crate::domain::project::ChannelDoc;
 use crate::screens::pipeline::catalog::{family_icon, operations, summary, Template};
 use crate::ui::color_wheel::{ColorWheel, WheelEvent};
-use crate::ui::param_editor::{Commit, ParamEditor};
+use crate::ui::param_editor::{Commit, EditOps as _, ParamEditor};
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::{row, slider, swatch};
 
@@ -729,7 +729,7 @@ impl DisplayPanel {
                     let (store, id) = (store.clone(), id.to_string());
                     Rc::new(move |op, cx| store.update(cx, |s, cx| s.execute(Command::SetOp { id: id.clone(), op }, cx)).map(|_| ()).map_err(|e| e.to_string()))
                 };
-                self.params.update(cx, |p, cx| p.set_target(id, op, commit, window, cx));
+                self.params.update(cx, |p, cx| p.set_op(id, op, commit, window, cx));
                 let (st, id2, on) = (store, id.to_string(), *enabled);
                 v_flex()
                     .gap(px(theme::MD))

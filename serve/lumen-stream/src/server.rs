@@ -37,17 +37,34 @@ pub struct Server {
     endpoint: quinn::Endpoint,
     max_connections: usize,
     authority: Option<Arc<Authority>>,
+    /// Clients without a certificate may read (else they may only pair).
+    anonymous: bool,
+    /// The names in the server's certificate, given to a computer that pairs.
+    names: Vec<String>,
 }
 
 impl Server {
     /// Listens on `addr` (UDP).
     pub fn bind(addr: SocketAddr, config: quinn::ServerConfig) -> StreamResult<Self> {
-        Ok(Self { endpoint: quinn::Endpoint::server(config, addr)?, max_connections: DEFAULT_MAX_CONNECTIONS, authority: None })
+        Ok(Self { endpoint: quinn::Endpoint::server(config, addr)?, max_connections: DEFAULT_MAX_CONNECTIONS, authority: None, anonymous: false, names: Vec::new() })
     }
 
     /// Checks every client's certificate against `authority`'s registry after the handshake.
     pub fn with_authority(mut self, authority: Arc<Authority>) -> Self {
         self.authority = Some(authority);
+        self
+    }
+
+    /// Lets clients without a certificate read (a trusted network only). Without it they may
+    /// only pair.
+    pub fn with_anonymous(mut self, anonymous: bool) -> Self {
+        self.anonymous = anonymous;
+        self
+    }
+
+    /// The names the server's certificate carries (a paired computer connects by one of them).
+    pub fn with_names(mut self, names: Vec<String>) -> Self {
+        self.names = names;
         self
     }
 
@@ -99,7 +116,8 @@ impl Server {
         let certificates = connection.peer_identity().and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>().ok());
         match certificates.as_deref().and_then(|c| c.first()) {
             Some(certificate) => authority.authorize(certificate),
-            None => Some(Peer::anonymous()),
+            None if self.anonymous => Some(Peer::anonymous()),
+            None => Some(Peer::pairing()),
         }
     }
 
@@ -112,15 +130,17 @@ impl Server {
     pub async fn run(self, options: ServeOptions) -> StreamResult<()> {
         let root = options.data.canonicalize()?;
         let images = Arc::new(Images { root, open: Mutex::new((HashMap::new(), VecDeque::new())) });
+        let names = Arc::new(self.names.clone());
         while let Some((connection, peer)) = self.accept().await {
             tracing::info!("client {:?} connected from {}", peer.name, connection.remote_address());
             let images = images.clone();
+            let (authority, names, peer) = (self.authority.clone(), names.clone(), Arc::new(peer));
             tokio::spawn(async move {
                 loop {
                     let Ok((send, recv)) = connection.accept_bi().await else { break };
-                    let images = images.clone();
+                    let (images, authority, names, peer) = (images.clone(), authority.clone(), names.clone(), peer.clone());
                     tokio::spawn(async move {
-                        if let Err(e) = answer(send, recv, images).await {
+                        if let Err(e) = answer(send, recv, images, authority.as_deref(), &names, &peer).await {
                             tracing::debug!("request failed: {e}");
                         }
                     });
@@ -216,8 +236,26 @@ fn describe(p: &Pyramid) -> ImageInfo {
     }
 }
 
-async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images: Arc<Images>) -> StreamResult<()> {
+async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images: Arc<Images>, authority: Option<&Authority>, names: &[String], peer: &Peer) -> StreamResult<()> {
     let request: Request = read_message(&mut recv).await?;
+    let request = match (request, authority) {
+        (Request::Pair { hello }, Some(authority)) => {
+            crate::pairing::serve_pairing(authority, names, hello, &mut send, &mut recv).await?;
+            send.finish()?;
+            return Ok(());
+        }
+        (Request::Pair { .. }, None) => {
+            write_message(&mut send, &Response::Error { reason: "this server does not pair computers".into() }).await?;
+            send.finish()?;
+            return Ok(());
+        }
+        (_, _) if peer.pairing_only => {
+            write_message(&mut send, &Response::Error { reason: "this computer is not paired with the server: pair it first".into() }).await?;
+            send.finish()?;
+            return Ok(());
+        }
+        (request, _) => request,
+    };
     let result = tokio::task::spawn_blocking(move || work(&images, request)).await.map_err(StreamError::protocol)?;
     match result {
         Ok((response, payload)) => {
@@ -236,6 +274,7 @@ async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images
 
 fn work(images: &Images, request: Request) -> Result<(Response, Option<Vec<f32>>), String> {
     Ok(match request {
+        Request::Pair { .. } => return Err("pairing is answered before this".into()),
         Request::List => (Response::Images { paths: images.list() }, None),
         Request::Info { path } => (Response::Info { info: describe(images.open(&path)?.as_ref()) }, None),
         Request::Tile { path, level, channel, z, tx, ty } => {
@@ -333,6 +372,52 @@ mod tests {
             s.list().await
         };
         assert!(denied.await.is_err(), "a revoked client is refused");
+        fs::remove_dir_all(&data).unwrap();
+        fs::remove_dir_all(&auth_dir).unwrap();
+    }
+
+    /// A computer pairs with a code, then reads with mutual TLS; before pairing it may do nothing
+    /// else, and a wrong code pairs nothing.
+    #[tokio::test]
+    async fn a_computer_pairs_with_a_code() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let data = temp("pair-data");
+        let auth_dir = temp("pair-auth");
+        let image = data.join("b.ome.zarr");
+        let options = lumen_io::WriterOptions { name: "b".into(), channels: vec!["c".into()], shape: [1, 8, 8], chunks: [1, 8, 8], pixel_size_um: None, z_spacing_um: None };
+        let w = lumen_io::ZarrWriter::create::<f32>(&image, options).unwrap();
+        w.write(0, [0, 0, 0], [1, 8, 8], &[2.0f32; 64]).unwrap();
+        w.finish::<f32>().unwrap();
+
+        let authority = Arc::new(Authority::open_or_create(&auth_dir.join("a")).unwrap());
+        let names = vec!["localhost".to_string()];
+        let tls = server_config_with_clients(&authority, &ServerIdentity::SelfSigned { names: names.clone() }, false).unwrap();
+        let server = Server::bind("127.0.0.1:0".parse().unwrap(), tls.config).unwrap().with_authority(authority.clone()).with_names(names);
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(server.run(ServeOptions { data: data.clone() }));
+
+        // Unpaired: connected, but nothing to read
+        let anonymous = client_config_with(&ServerTrust::DangerAcceptAnyCertificate, None).unwrap();
+        let s = Session::connect(addr, "localhost", anonymous).await.unwrap();
+        assert!(matches!(s.list().await, Err(StreamError::Server(_))), "an unpaired computer reads nothing");
+        s.close();
+
+        // A wrong code pairs nothing
+        let code = authority.new_pairing_code(Permission::Read).unwrap();
+        let wrong = format!("{}-0000-0000", code.id);
+        assert!(crate::pairing::pair(addr, &wrong, "mallory").await.is_err());
+        assert!(authority.clients().unwrap().is_empty());
+
+        // The right code: paired, and the code is spent
+        let paired = crate::pairing::pair(addr, &code.display(), "laptop").await.unwrap();
+        assert_eq!(paired.names, vec!["localhost".to_string()]);
+        assert!(crate::pairing::pair(addr, &code.display(), "again").await.is_err(), "a code works once");
+        let identity = crate::auth::ClientIdentity::from_pem(paired.identity_pem.as_bytes()).unwrap();
+        let config = client_config_with(&ServerTrust::from_identity(&identity), Some(&identity)).unwrap();
+        let session = Session::connect(addr, "localhost", config).await.unwrap();
+        assert_eq!(session.list().await.unwrap(), vec!["b.ome.zarr".to_string()]);
+        session.close();
+        assert_eq!(authority.clients().unwrap()[0].name, "laptop");
         fs::remove_dir_all(&data).unwrap();
         fs::remove_dir_all(&auth_dir).unwrap();
     }

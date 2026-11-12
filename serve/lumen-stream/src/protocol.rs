@@ -22,6 +22,8 @@ pub enum Request {
     /// One image's description (`path` relative to the data folder).
     Info { path: String },
     Tile { path: String, level: usize, channel: usize, z: usize, tx: usize, ty: usize },
+    /// Pairing a computer ([`crate::pairing`]): the rest of the exchange follows on the stream.
+    Pair { hello: crate::pairing::PairHello },
 }
 
 /// One image's description.
