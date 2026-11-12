@@ -265,3 +265,30 @@ fn a_saved_project_brings_back_its_views(cx: &mut TestAppContext) {
     });
     std::fs::remove_dir_all(&folder).ok();
 }
+
+/// What you do lands on the activity timeline: commands run show in Analyze's Activity view, on
+/// your lane, with the workspace and how they were started.
+#[gpui_kit::test]
+fn the_activity_view_shows_what_was_done(cx: &mut TestAppContext) {
+    let (window, store, app) = open(cx);
+    open_sample(cx, window, &store);
+    let registry = cx.update(|cx| app.read(cx).registry.clone());
+    cx.update_window(window, |_, window, cx| {
+        let _ = registry.run_as(kitchen_shell::activity::Actor::Person, "menu", "view.rulers", serde_json::Value::Null, window, cx);
+        let _ = registry.run_as(kitchen_shell::activity::Actor::Agent, "agent", "hist.find_tissue", serde_json::Value::Null, window, cx);
+    })
+    .unwrap();
+    cx.update(|cx| store.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx)));
+    frame(cx, window);
+    let analyze = cx.update(|cx| app.read(cx).analyze.clone());
+    cx.update_window(window, |_, window, cx| analyze.update(cx, |a, cx| a.add_activity(window, cx))).unwrap();
+    frame(cx, window);
+    let timeline = cx.update(|cx| analyze.read(cx).activity.clone().expect("the timeline is made"));
+    let acts = cx.update(|cx| timeline.read(cx).activities().to_vec());
+    let rulers = acts.iter().find(|a| a.title.as_ref() == "Rulers").expect("the rulers command is on the timeline");
+    assert_eq!(rulers.lane.as_ref(), "You");
+    assert!(rulers.source.contains("menu"), "{}", rulers.source);
+    assert!(acts.iter().any(|a| a.lane.as_ref() == "Agent" && a.title.as_ref() == "Find tissue"));
+    assert!(acts.iter().any(|a| a.lane.as_ref() == "Focus"), "time in each workspace");
+    assert!(cx.update(|cx| analyze.read(cx).activity_panel.is_some()));
+}
