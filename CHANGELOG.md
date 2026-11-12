@@ -5,6 +5,13 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+### Changed
+
+- Channels open as the OME-Zarr file marks them (`omero` `active`; shown when it does not say):
+  a 59-marker PhenoCycler image opens with its chosen few, the rest in the list.
+- The workspace's data list (`.data/`) holds only images and OME-Zarr containers: licences,
+  notes, archives and raw formats lucem does not open (`.qptiff`, `.zip`) are left out.
+
 ### Fixed
 
 - CI runs green again: the app's device uses the CPU there (`LUCEM_RUNTIME=cpu`; it opened
