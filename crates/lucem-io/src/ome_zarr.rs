@@ -736,7 +736,16 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
     })
 }
 
-/// Scans `.data/` in the workspace for top-level `.ome.zarr` containers and standard image files.
+/// Whether `path` is a file lucem opens (an image by its extension); licences, notes and formats
+/// it does not read (`.qptiff`, `.zip`) are left out of the workspace's list.
+fn is_openable_image(path: &Path) -> bool {
+    const IMAGES: [&str; 11] = ["png", "tif", "tiff", "jpg", "jpeg", "bmp", "webp", "gif", "hdr", "exr", "ome.tiff"];
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    IMAGES.iter().any(|e| name.ends_with(&format!(".{e}")))
+}
+
+/// Scans `.data/` in the workspace for `.ome.zarr` containers and image files, at its top and one
+/// folder down (files lucem does not open are left out).
 pub fn discover_workspace_data_paths(workspace_dir: &Path) -> Vec<PathBuf> {
     let data_dir = workspace_dir.join(".data");
     let mut found = Vec::new();
@@ -754,13 +763,15 @@ pub fn discover_workspace_data_paths(workspace_dir: &Path) -> Vec<PathBuf> {
                 // Expose the single `.ome.zarr` container itself
                 found.push(p);
             } else if p.is_file() {
-                found.push(p);
+                if is_openable_image(&p) {
+                    found.push(p);
+                }
             } else if p.is_dir()
                 && let Ok(sub_entries) = fs::read_dir(&p) {
                     let mut sub_paths: Vec<PathBuf> = sub_entries.flatten().map(|e| e.path()).collect();
                     sub_paths.sort();
                     for sp in sub_paths {
-                        if sp.is_file() || sp.to_string_lossy().ends_with(".ome.zarr") {
+                        if (sp.is_file() && is_openable_image(&sp)) || (sp.is_dir() && sp.to_string_lossy().ends_with(".ome.zarr")) {
                             found.push(sp);
                         }
                     }
@@ -772,6 +783,22 @@ pub fn discover_workspace_data_paths(workspace_dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// The workspace's list holds images and OME-Zarr containers only: licences, notes, archives
+    /// and formats lucem does not open are left out, at the top and one folder down.
+    #[test]
+    fn the_data_list_holds_only_images() {
+        let ws = std::env::temp_dir().join(format!("lucem-data-list-{}", std::process::id()));
+        let d = ws.join(".data");
+        fs::create_dir_all(d.join("akoya/HandE.ome.zarr")).unwrap();
+        fs::create_dir_all(d.join("akoya/source")).unwrap();
+        for f in ["top.tif", "README.txt", "akoya/COPYING", "akoya/scan.qptiff", "akoya/slide.png", "akoya/data.zip", "akoya/source/deep.tif"] {
+            fs::write(d.join(f), b"").unwrap();
+        }
+        let names: Vec<String> = discover_workspace_data_paths(&ws).iter().map(|p| p.strip_prefix(&d).unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["akoya/HandE.ome.zarr", "akoya/slide.png", "top.tif"]);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
     use super::*;
 
     #[test]
