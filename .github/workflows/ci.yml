@@ -17,6 +17,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   LUCEM_TEST_RUNTIMES: cpu
+  # The app's own device too (else it opens wgpu, whose device thread panics without a GPU)
+  LUCEM_RUNTIME: cpu
 
 jobs:
   rust:
