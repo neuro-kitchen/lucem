@@ -285,7 +285,8 @@ fn the_activity_view_shows_what_was_done(cx: &mut TestAppContext) {
     frame(cx, window);
     let timeline = cx.update(|cx| analyze.read(cx).activity.clone().expect("the timeline is made"));
     let acts = cx.update(|cx| timeline.read(cx).activities().to_vec());
-    let rulers = acts.iter().find(|a| a.title.as_ref() == "Rulers").expect("the rulers command is on the timeline");
+    // The log is the process's: other tests run Rulers too (from the app), so find this one's
+    let rulers = acts.iter().find(|a| a.title.as_ref() == "Rulers" && a.source.contains("menu")).expect("the rulers command run from the menu is on the timeline");
     assert_eq!(rulers.lane.as_ref(), "You");
     assert!(rulers.source.contains("menu"), "{}", rulers.source);
     assert!(acts.iter().any(|a| a.lane.as_ref() == "Agent" && a.title.as_ref() == "Find tissue"));
