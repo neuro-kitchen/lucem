@@ -5,6 +5,15 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+### Release process
+
+- Releases come from a `v*` tag of `main` (`.github/workflows/release.yml`, as kitchen and
+  dsp-kitchen): the tag is checked against the workspace version and CHANGELOG.md, the crates are
+  packaged and checked by cargo-deny, the library crates go to crates.io by trusted publishing
+  (environment `crates-io`, approved by a maintainer; crates already at that version are skipped),
+  then the GitHub release takes this file's section as its notes. The app, the CLI and the MCP
+  server stay off crates.io until kitchen-agent is published.
+
 ### Changed
 
 - Channels open as the OME-Zarr file marks them (`omero` `active`; shown when it does not say):
