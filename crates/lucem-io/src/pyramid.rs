@@ -83,6 +83,9 @@ pub struct ChannelInfo {
     pub window: (f32, f32),
     /// The range the values can take (raw values).
     pub range: (f32, f32),
+    /// Shown when the image opens (OME-Zarr `omero` `active`; on when the file does not say): a
+    /// highly multiplexed image opens with a few markers, not all of them added together.
+    pub active: bool,
 }
 
 /// An axis a plane is cut across.
@@ -339,6 +342,8 @@ struct OmeroChannel {
     color: Option<String>,
     #[serde(default)]
     window: Option<OmeroWindow>,
+    #[serde(default)]
+    active: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -462,7 +467,8 @@ impl Pyramid {
                     Some(w) => (w.min.unwrap_or(range.0 as f64) as f32, w.max.unwrap_or(range.1 as f64) as f32),
                     None => range,
                 };
-                ChannelInfo { label, color, window, range }
+                let active = o.and_then(|o| o.active).unwrap_or(true);
+                ChannelInfo { label, color, window, range, active }
             })
             .collect();
 
@@ -488,12 +494,12 @@ impl Pyramid {
         };
         let channels = if colour {
             vec![
-                ChannelInfo { label: "Red".into(), color: [255, 0, 0], window: (0.0, 1.0), range: (0.0, 1.0) },
-                ChannelInfo { label: "Green".into(), color: [0, 255, 0], window: (0.0, 1.0), range: (0.0, 1.0) },
-                ChannelInfo { label: "Blue".into(), color: [0, 0, 255], window: (0.0, 1.0), range: (0.0, 1.0) },
+                ChannelInfo { label: "Red".into(), color: [255, 0, 0], window: (0.0, 1.0), range: (0.0, 1.0), active: true },
+                ChannelInfo { label: "Green".into(), color: [0, 255, 0], window: (0.0, 1.0), range: (0.0, 1.0), active: true },
+                ChannelInfo { label: "Blue".into(), color: [0, 0, 255], window: (0.0, 1.0), range: (0.0, 1.0), active: true },
             ]
         } else {
-            vec![ChannelInfo { label: "Intensity".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0) }]
+            vec![ChannelInfo { label: "Intensity".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0), active: true }]
         };
         let mut levels = vec![LevelInfo { path: "memory/0".into(), width: w, height: h, tile_w: MEMORY_TILE, tile_h: MEMORY_TILE, downsample: 1.0, depth: 1, tile_d: 1, z_downsample: 1.0 }];
         let mut planes = vec![base];
@@ -880,7 +886,7 @@ fn read_tiff_stack(path: &Path) -> IoResult<Option<Pyramid>> {
         return Ok(None);
     }
     let name = path.file_name().map_or_else(|| "stack".to_string(), |n| n.to_string_lossy().into_owned());
-    let info = vec![ChannelInfo { label: "Intensity".into(), color: [255, 255, 255], window: range, range }];
+    let info = vec![ChannelInfo { label: "Intensity".into(), color: [255, 255, 255], window: range, range, active: true }];
     let mut py = Pyramid::from_volume(name, info, vec![values], [depth, h, w], None, None, dtype)?;
     py.path = Some(path.to_path_buf());
     Ok(Some(py))
@@ -990,8 +996,8 @@ pub fn sample_volume(size: usize, depth: usize) -> IoResult<Pyramid> {
         }
     }
     let info = vec![
-        ChannelInfo { label: "Nuclei".into(), color: [64, 128, 255], window: (0.0, 1.0), range: (0.0, 1.0) },
-        ChannelInfo { label: "Filament".into(), color: [64, 255, 96], window: (0.0, 1.0), range: (0.0, 1.0) },
+        ChannelInfo { label: "Nuclei".into(), color: [64, 128, 255], window: (0.0, 1.0), range: (0.0, 1.0), active: true },
+        ChannelInfo { label: "Filament".into(), color: [64, 255, 96], window: (0.0, 1.0), range: (0.0, 1.0), active: true },
     ];
     Pyramid::from_volume("Sample volume", info, vec![blobs, tube], [d, h, w], Some(1.0), Some(2.0), "float32")
 }
@@ -1026,7 +1032,7 @@ mod tests {
     fn a_volume_reads_planes_along_every_axis() {
         let (d, h, w) = (6usize, 5usize, 4usize);
         let values: Vec<f32> = (0..d * h * w).map(|i| i as f32).collect();
-        let info = vec![ChannelInfo { label: "a".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0) }];
+        let info = vec![ChannelInfo { label: "a".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0), active: true }];
         let py = Pyramid::from_volume("v", info, vec![values], [d, h, w], None, None, "float32").unwrap();
         assert!(py.is_volume());
         let at = |z: usize, y: usize, x: usize| ((z * h + y) * w + x) as f32;
@@ -1052,6 +1058,21 @@ mod tests {
         assert!(Pyramid::open_zarr(&root).unwrap_err().to_string().contains("too large"));
         fs::write(root.join("0/.zarray"), r#"{"shape":[10,10],"chunks":[0,1],"dtype":"<f4"}"#).unwrap();
         assert!(Pyramid::open_zarr(&root).is_err(), "an empty chunk axis");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `omero` `active: false` opens a channel hidden; a channel the file says nothing about is shown.
+    #[test]
+    fn channels_open_as_the_file_marks_them() {
+        let root = std::env::temp_dir().join(format!("lucem-active-zarr-{}", std::process::id()));
+        fs::create_dir_all(root.join("0")).unwrap();
+        fs::write(root.join(".zgroup"), r#"{"zarr_format":2}"#).unwrap();
+        fs::write(root.join(".zattrs"), r#"{"multiscales":[{"axes":["c","y","x"],"datasets":[{"path":"0"}]}],
+            "omero":{"channels":[{"label":"DAPI","active":true},{"label":"CD3","active":false},{"label":"CD20"}]}}"#).unwrap();
+        fs::write(root.join("0/.zarray"), r#"{"shape":[3,4,4],"chunks":[1,4,4],"dtype":"|u1","compressor":null,"fill_value":0,"order":"C","zarr_format":2}"#).unwrap();
+        let py = Pyramid::open_zarr(&root).unwrap();
+        let shown: Vec<(&str, bool)> = py.channels.iter().map(|c| (c.label.as_str(), c.active)).collect();
+        assert_eq!(shown, [("DAPI", true), ("CD3", false), ("CD20", true)]);
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -1585,7 +1585,7 @@ pub fn default_channels(py: &Pyramid) -> Vec<ChannelDoc> {
         .map(|(i, c)| {
             let (min, max) = if c.window == c.range && c.range.1 > 1.0 { py.auto_window(i, 0.001, 0.998).unwrap_or(c.window) } else { c.window };
             let (min, max) = if max > min { (min, max) } else { (min, min + 1.0) };
-            ChannelDoc { label: c.label.clone(), visible: true, color: c.color, min, max, gamma: 1.0 }
+            ChannelDoc { label: c.label.clone(), visible: c.active, color: c.color, min, max, gamma: 1.0 }
         })
         .collect()
 }

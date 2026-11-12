@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn blocks_arrive_in_order_whatever_thread_read_them() {
         let (d, h, w) = (4usize, 64usize, 64usize);
-        let info: Vec<ChannelInfo> = (0..2).map(|_| ChannelInfo { label: "c".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0) }).collect();
+        let info: Vec<ChannelInfo> = (0..2).map(|_| ChannelInfo { label: "c".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0), active: true }).collect();
         let a: Vec<f32> = (0..d * h * w).map(|i| i as f32).collect();
         let b: Vec<f32> = a.iter().map(|v| v + 0.5).collect();
         let py = Arc::new(Pyramid::from_volume("v", info, vec![a, b], [d, h, w], None, None, "float32").unwrap());
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn dropping_a_loader_early_stops_its_threads() {
-        let info = vec![ChannelInfo { label: "c".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0) }];
+        let info = vec![ChannelInfo { label: "c".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0), active: true }];
         let py = Arc::new(Pyramid::from_volume("v", info, vec![vec![0.0; 256]], [4, 8, 8], None, None, "float32").unwrap());
         let mut loader = BlockLoader::new(py, 0, vec![0], schedule([4, 8, 8], [1, 2, 2], [0; 3]), 1, 2);
         assert!(loader.next().is_some());

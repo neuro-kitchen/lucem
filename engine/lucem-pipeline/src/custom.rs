@@ -441,7 +441,7 @@ mod tests {
     use super::*;
 
     fn image(d: usize, h: usize, w: usize) -> Arc<Pyramid> {
-        let info = vec![ChannelInfo { label: "a".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0) }];
+        let info = vec![ChannelInfo { label: "a".into(), color: [255, 255, 255], window: (0.0, 1.0), range: (0.0, 1.0), active: true }];
         let values: Vec<f32> = (0..d * h * w).map(|i| (((i % w) as f32 * 0.31).sin() + ((i / w) as f32 * 0.17).cos()) * 0.25 + 0.5).collect();
         Arc::new(Pyramid::from_volume("t", info, vec![values], [d, h, w], None, None, "float32").unwrap())
     }
