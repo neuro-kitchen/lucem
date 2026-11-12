@@ -10,7 +10,8 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 - CI runs green again: the app's device uses the CPU there (`LUCEM_RUNTIME=cpu`; it opened
   wgpu, whose device thread panics on a runner without a GPU, failing every app test after it),
   and cargo-deny allows kitchen's repository as a git source (kitchen-agent is not on crates.io
-  yet).
+  yet). A test of the activity view found another test's Rulers entry in the shared log; the
+  Python test compares the version to the installed package's instead of a fixed `0.1.0`.
 
 ## [0.0.1] - 2026-11-12
 
