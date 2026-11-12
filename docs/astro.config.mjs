@@ -1,12 +1,12 @@
 // @ts-check
-// The lumen documentation: Starlight (Astro), in the neuro-kitchen family (the same structure as
-// dsp-kitchen's docs) with lumen's own look (src/styles/theme.css).
-// Served at https://neuro-kitchen.github.io/lumen/ (GitHub Pages of this repository).
+// The lucem documentation: Starlight (Astro), in the neuro-kitchen family (the same structure as
+// dsp-kitchen's docs) with lucem's own look (src/styles/theme.css).
+// Served at https://neuro-kitchen.github.io/lucem/ (GitHub Pages of this repository).
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightSidebarTopics from 'starlight-sidebar-topics';
 
-const repo = 'https://github.com/neuro-kitchen/lumen';
+const repo = 'https://github.com/neuro-kitchen/lucem';
 
 /**
  * An entry point: its own sidebar, opened at the folder's index page. `items` lists the pages
@@ -23,7 +23,7 @@ const chapter = (label, directory, collapsed = false) => ({ label, collapsed, it
 
 export default defineConfig({
   site: 'https://neuro-kitchen.github.io',
-  base: '/lumen',
+  base: '/lucem',
 
   // Fonts as files, not data: URIs, so font-src 'self' covers them.
   vite: { build: { assetsInlineLimit: 0 } },
@@ -33,7 +33,7 @@ export default defineConfig({
 
   integrations: [
     starlight({
-      title: 'lumen',
+      title: 'lucem',
       description: 'GPU image analysis for histology and microscopy: an app, a command line and headless pipelines.',
       logo: { src: './src/assets/logo.svg' },
       favicon: '/favicon.svg',

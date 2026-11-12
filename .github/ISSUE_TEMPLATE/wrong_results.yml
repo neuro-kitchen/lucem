@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        lumen's operations are compared with host references such as scipy.ndimage and
+        lucem's operations are compared with host references such as scipy.ndimage and
         scikit-image. Every runtime should give the same result up to rounding.
   - type: dropdown
     id: area
@@ -26,7 +26,7 @@ body:
     id: compare
     attributes:
       label: What you compared
-      description: The lumen operation and the reference call, with their parameters.
+      description: The lucem operation and the reference call, with their parameters.
       render: python
     validations:
       required: true
@@ -40,7 +40,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: lumen version and runtime
+      label: lucem version and runtime
       placeholder: "Does another runtime give the same result?"
     validations:
       required: true

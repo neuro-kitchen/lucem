@@ -7,24 +7,24 @@ sidebar:
 
 ## 1. Open an image
 
-**Lumen → Open image or OME-Zarr…** (<kbd>Ctrl</kbd>+<kbd>O</kbd>), or start the app with a path:
+**Lucem → Open image or OME-Zarr…** (<kbd>Ctrl</kbd>+<kbd>O</kbd>), or start the app with a path:
 
 ```sh
-cargo run -p lumen-app -- slide.ome.zarr
+cargo run -p lucem-app -- slide.ome.zarr
 ```
 
-lumen reads OME-Zarr, OME-TIFF and common image files. No image at hand? Write a synthetic one:
+lucem reads OME-Zarr, OME-TIFF and common image files. No image at hand? Write a synthetic one:
 
 ```sh
-lumen sample sample.ome.zarr            # a 2D image
-lumen sample volume.ome.zarr --depth 64 # a volume
+lucem sample sample.ome.zarr            # a 2D image
+lucem sample volume.ome.zarr --depth 64 # a volume
 ```
 
 ## 2. Count the cells in a region
 
 1. Draw a rectangle (<kbd>U</kbd>) or a polygon (<kbd>P</kbd>) around the area to count.
 2. Open the **Histology** panel on the right rail and choose **Count cells**.
-3. Check the stains: lumen guesses H-DAB for RGB images and, for fluorescence, the channel named
+3. Check the stains: lucem guesses H-DAB for RGB images and, for fluorescence, the channel named
    like a nuclear stain (DAPI, Hoechst).
 4. Press **Run**. Progress shows under the button and on the status bar; **Cancel** stops after
    the current tile.
@@ -40,13 +40,13 @@ rows as CSV.
 
 ## 4. Save, then run it on more images
 
-Save the project in a folder (**Lumen → Save project in folder…**). The steps you ran are in
+Save the project in a folder (**Lucem → Save project in folder…**). The steps you ran are in
 its `session.json`. Run the same analysis on other images, without the app:
 
 ```sh
-lumen session run my-project/session.json slides/*.ome.zarr --out results/
+lucem session run my-project/session.json slides/*.ome.zarr --out results/
 ```
 
 Each image gets its cells as a Parquet table, its outlines as GeoParquet and label images,
 written inside its OME-Zarr when it can be written, else in `results/`. See
-[Sessions](/lumen/learn/concepts/sessions/).
+[Sessions](/lucem/learn/concepts/sessions/).

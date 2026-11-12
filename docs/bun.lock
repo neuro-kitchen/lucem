@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "lumen-docs",
+      "name": "lucem-docs",
       "dependencies": {
         "@astrojs/starlight": "0.42.10",
         "@fontsource-variable/ibm-plex-sans": "5.3.0",

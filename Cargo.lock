@@ -6933,8 +6933,8 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kitchen-agent"
-version = "0.0.3"
-source = "git+https://github.com/neuro-kitchen/kitchen?branch=version%2Fv0.0.4#887591eab1b5d94a992cae9d8eadbb7de048c2d6"
+version = "0.0.4"
+source = "git+https://github.com/neuro-kitchen/kitchen?tag=v0.0.4#028c50effabe7edc4780fb4981c7b6610fb788df"
 dependencies = [
  "agent-client-protocol",
  "async-channel",
@@ -6949,8 +6949,8 @@ dependencies = [
 
 [[package]]
 name = "kitchen-shell"
-version = "0.0.3"
-source = "git+https://github.com/neuro-kitchen/kitchen?branch=version%2Fv0.0.4#887591eab1b5d94a992cae9d8eadbb7de048c2d6"
+version = "0.0.4"
+source = "git+https://github.com/neuro-kitchen/kitchen?tag=v0.0.4#028c50effabe7edc4780fb4981c7b6610fb788df"
 dependencies = [
  "gpui-kit",
  "kitchen-ui",
@@ -6962,8 +6962,8 @@ dependencies = [
 
 [[package]]
 name = "kitchen-ui"
-version = "0.0.3"
-source = "git+https://github.com/neuro-kitchen/kitchen?branch=version%2Fv0.0.4#887591eab1b5d94a992cae9d8eadbb7de048c2d6"
+version = "0.0.4"
+source = "git+https://github.com/neuro-kitchen/kitchen?tag=v0.0.4#028c50effabe7edc4780fb4981c7b6610fb788df"
 dependencies = [
  "gpui-kit",
  "jiff",
@@ -7306,27 +7306,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen"
+name = "lucem"
 version = "0.1.0"
 dependencies = [
- "lumen-core",
- "lumen-io",
- "lumen-ml",
- "lumen-ops",
+ "lucem-core",
+ "lucem-io",
+ "lucem-ml",
+ "lucem-ops",
 ]
 
 [[package]]
-name = "lumen-app"
+name = "lucem-app"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "kitchen-agent",
  "kitchen-ui",
- "lumen-app-core",
+ "lucem-app-core",
 ]
 
 [[package]]
-name = "lumen-app-core"
+name = "lucem-app-core"
 version = "0.1.0"
 dependencies = [
  "arrow",
@@ -7334,16 +7334,17 @@ dependencies = [
  "flate2",
  "geo",
  "gpui-kit",
+ "image",
  "kitchen-agent",
  "kitchen-shell",
  "kitchen-ui",
- "lumen-core",
- "lumen-hist",
- "lumen-io",
- "lumen-ml",
- "lumen-ops",
- "lumen-pipeline",
- "lumen-view",
+ "lucem-core",
+ "lucem-hist",
+ "lucem-io",
+ "lucem-ml",
+ "lucem-ops",
+ "lucem-pipeline",
+ "lucem-view",
  "polars",
  "rayon",
  "schemars 1.2.3",
@@ -7354,18 +7355,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-cli"
+name = "lucem-cli"
 version = "0.1.0"
 dependencies = [
  "image",
- "lumen-core",
- "lumen-hist",
- "lumen-io",
- "lumen-mcp",
- "lumen-ml",
- "lumen-ops",
- "lumen-pipeline",
- "lumen-stream",
+ "lucem-core",
+ "lucem-hist",
+ "lucem-io",
+ "lucem-mcp",
+ "lucem-ml",
+ "lucem-ops",
+ "lucem-pipeline",
+ "lucem-stream",
  "rustls",
  "schemars 1.2.3",
  "serde_json",
@@ -7374,7 +7375,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-core"
+name = "lucem-core"
 version = "0.1.0"
 dependencies = [
  "cubecl",
@@ -7384,14 +7385,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-hist"
+name = "lucem-hist"
 version = "0.1.0"
 dependencies = [
  "cubecl",
- "lumen-core",
- "lumen-io",
- "lumen-ml",
- "lumen-ops",
+ "lucem-core",
+ "lucem-io",
+ "lucem-ml",
+ "lucem-ops",
  "polars",
  "rayon",
  "serde",
@@ -7401,7 +7402,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-hub"
+name = "lucem-hub"
 version = "0.1.0"
 dependencies = [
  "flate2",
@@ -7411,11 +7412,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-io"
+name = "lucem-io"
 version = "0.1.0"
 dependencies = [
  "image",
- "lumen-core",
+ "lucem-core",
  "rayon",
  "serde",
  "serde_json",
@@ -7424,13 +7425,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-mcp"
+name = "lucem-mcp"
 version = "0.1.0"
 dependencies = [
- "lumen-core",
- "lumen-hist",
- "lumen-io",
- "lumen-pipeline",
+ "lucem-core",
+ "lucem-hist",
+ "lucem-io",
+ "lucem-pipeline",
  "rmcp",
  "serde",
  "serde_json",
@@ -7438,7 +7439,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-ml"
+name = "lucem-ml"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -7446,51 +7447,51 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-ml-sam"
+name = "lucem-ml-sam"
 version = "0.1.0"
 dependencies = [
- "lumen-ml",
- "lumen-model-sam",
+ "lucem-ml",
+ "lucem-model-sam",
  "serde_json",
 ]
 
 [[package]]
-name = "lumen-ml-stardist"
+name = "lucem-ml-stardist"
 version = "0.1.0"
 dependencies = [
- "lumen-ml",
- "lumen-model-stardist",
+ "lucem-ml",
+ "lucem-model-stardist",
  "serde_json",
 ]
 
 [[package]]
-name = "lumen-model-sam"
+name = "lucem-model-sam"
 version = "0.1.0"
 dependencies = [
- "lumen-hub",
- "lumen-ml",
+ "lucem-hub",
+ "lucem-ml",
  "ort",
 ]
 
 [[package]]
-name = "lumen-model-stardist"
+name = "lucem-model-stardist"
 version = "0.1.0"
 dependencies = [
  "burn",
  "cubecl",
  "hdf5-reader",
- "lumen-hub",
- "lumen-ml",
+ "lucem-hub",
+ "lucem-ml",
  "safetensors 0.8.0",
 ]
 
 [[package]]
-name = "lumen-ops"
+name = "lucem-ops"
 version = "0.1.0"
 dependencies = [
  "arrow",
  "cubecl",
- "lumen-core",
+ "lucem-core",
  "num-traits",
  "polars",
  "serde",
@@ -7498,13 +7499,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-pipeline"
+name = "lucem-pipeline"
 version = "0.1.0"
 dependencies = [
  "arrow",
- "lumen-core",
- "lumen-io",
- "lumen-ops",
+ "lucem-core",
+ "lucem-io",
+ "lucem-ops",
  "polars",
  "schemars 1.2.3",
  "serde",
@@ -7513,7 +7514,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-py"
+name = "lucem-py"
 version = "0.1.0"
 dependencies = [
  "numpy",
@@ -7521,13 +7522,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-stream"
+name = "lucem-stream"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "hmac 0.13.0",
- "lumen-core",
- "lumen-io",
+ "lucem-core",
+ "lucem-io",
  "quinn",
  "rcgen",
  "rustls",
@@ -7542,15 +7543,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "lumen-view"
+name = "lucem-view"
 version = "0.1.0"
 dependencies = [
  "async-channel",
  "cubecl",
  "gpui-kit",
  "image",
- "lumen-core",
- "lumen-io",
+ "lucem-core",
+ "lucem-io",
  "serde",
  "smallvec",
 ]

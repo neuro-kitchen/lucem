@@ -14,6 +14,6 @@ Later steps can look in the tissue instead of a region you draw: a recorded sess
 images does so.
 
 ```sh
-lumen hist tissue slide.ome.zarr --out tissue.geojson           # brightfield
-lumen hist tissue slide.ome.zarr --fluorescence --out tissue.geojson
+lucem hist tissue slide.ome.zarr --out tissue.geojson           # brightfield
+lucem hist tissue slide.ome.zarr --fluorescence --out tissue.geojson
 ```

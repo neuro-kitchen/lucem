@@ -24,14 +24,14 @@ the nucleus, the cytoplasm and the whole cell.
 ## With a model
 
 Choose a nucleus model (for example **StarDist H&E** or **StarDist fluorescence**) instead of the
-threshold. The model reads the image at about its own scale and finds the nuclei; lumen grows and
-measures the cells the same way. See [Models](/lumen/models/).
+threshold. The model reads the image at about its own scale and finds the nuclei; lucem grows and
+measures the cells the same way. See [Models](/lucem/models/).
 
 ## On the command line
 
 ```sh
-lumen hist cells slide.ome.zarr --region 0,0,4096,4096 --stains h-dab --out cells.tsv
-lumen hist cells slide.ome.zarr --within tissue.geojson --model stardist-he --out cells.geojson
+lucem hist cells slide.ome.zarr --region 0,0,4096,4096 --stains h-dab --out cells.tsv
+lucem hist cells slide.ome.zarr --within tissue.geojson --model stardist-he --out cells.geojson
 ```
 
 New cells replace the cells inside the same regions; the rest are kept.

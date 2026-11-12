@@ -5,7 +5,7 @@
 //! rays). Both come out on the grid (half the input in each axis).
 //!
 //! Burn 0.22's tensors carry their device, which picks the backend (CUDA, wgpu, the CPU): one
-//! network serves every runtime. Fusion is on: no tensor crosses into lumen's own kernels.
+//! network serves every runtime. Fusion is on: no tensor crosses into lucem's own kernels.
 
 use burn::tensor::activation::{relu, sigmoid};
 use burn::tensor::module::{conv2d, interpolate, max_pool2d};

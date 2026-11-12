@@ -1,5 +1,5 @@
-# lumen as a server and batch runner: `lumen serve` gives enrolled clients tiles of the images under
-# /data over QUIC (UDP 50051, TLS), and the same container runs `lumen run` and `lumen doctor` on a
+# lucem as a server and batch runner: `lucem serve` gives enrolled clients tiles of the images under
+# /data over QUIC (UDP 50051, TLS), and the same container runs `lucem run` and `lucem doctor` on a
 # GPU passed through, or on the CPU.
 #
 # One binary (CUDA, wgpu and CPU compiled in), three targets that differ only in the system
@@ -10,7 +10,7 @@
 #   mesa    the Vulkan loader + Mesa's Vulkan drivers (AMD, Intel):  podman run --device /dev/dri …
 #
 # Build from the repository root (the build context is the whole workspace):
-#   podman build -f deploy/Containerfile --ignorefile deploy/.containerignore --target nvidia -t lumen-serve:nvidia .
+#   podman build -f deploy/Containerfile --ignorefile deploy/.containerignore --target nvidia -t lucem-serve:nvidia .
 
 # Rust toolchain of the build
 ARG RUST_VERSION=1.99
@@ -28,24 +28,24 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     --mount=type=cache,target=/root/.local/share/tracel \
-    cargo build --release --locked -p lumen-cli --no-default-features --features "${FEATURES}" \
-    && install -D -m 0755 target/release/lumen /out/lumen
+    cargo build --release --locked -p lucem-cli --no-default-features --features "${FEATURES}" \
+    && install -D -m 0755 target/release/lucem /out/lucem
 
 # What every target shares: the program, a non-root user, /data
 FROM docker.io/library/debian:${DEBIAN}-slim@${DEBIAN_DIGEST} AS base
-COPY --from=build /out/lumen /usr/local/bin/
+COPY --from=build /out/lucem /usr/local/bin/
 # Not root (uid 10001); /data holds the images and the authority of enrolled clients
-RUN useradd --create-home --uid 10001 lumen && install -d -o lumen -g lumen /data
+RUN useradd --create-home --uid 10001 lucem && install -d -o lucem -g lucem /data
 WORKDIR /data
 VOLUME /data
 # Kernels compiled and autotuned once survive restarts when this is a volume too
-ENV XDG_CACHE_HOME=/home/lumen/.cache XDG_RUNTIME_DIR=/tmp
-RUN install -d -o lumen -g lumen /home/lumen/.cache
-VOLUME /home/lumen/.cache
+ENV XDG_CACHE_HOME=/home/lucem/.cache XDG_RUNTIME_DIR=/tmp
+RUN install -d -o lucem -g lucem /home/lucem/.cache
+VOLUME /home/lucem/.cache
 EXPOSE 50051/udp
-ENTRYPOINT ["lumen"]
-ENV LUMEN_SERVE_AUTH_DIR=/data/.lumen-auth
-ENV LUMEN_SERVE_DATA=/data
+ENTRYPOINT ["lucem"]
+ENV LUCEM_SERVE_AUTH_DIR=/data/.lucem-auth
+ENV LUCEM_SERVE_DATA=/data
 # Listen on every interface of the container; only enrolled clients get in
 CMD ["serve", "--bind", "0.0.0.0:50051"]
 
@@ -69,7 +69,7 @@ RUN install -d /usr/share/vulkan/icd.d \
        > /usr/share/vulkan/icd.d/nvidia_egl.json
 ENV VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_egl.json
 ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
-USER lumen
+USER lucem
 
 # AMD and Intel: Vulkan through wgpu, with Mesa's drivers
 FROM base AS mesa
@@ -77,9 +77,9 @@ USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
-USER lumen
+USER lucem
 
 # No GPU: the CPU runtime only
 FROM base AS cpu
-ENV LUMEN_RUNTIME=cpu
-USER lumen
+ENV LUCEM_RUNTIME=cpu
+USER lucem

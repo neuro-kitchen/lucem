@@ -10,9 +10,9 @@ sidebar:
 | Path | What it holds |
 |---|---|
 | `labels/cells`, `labels/nuclei` | Label images: each object's id per pixel (OME-Zarr labels) |
-| `lumen/cells.parquet`, `lumen/tiles.parquet` | One row per object with its measurements and region |
-| `lumen/shapes.parquet` | Every outline, as GeoParquet |
-| `lumen/provenance.json` | The session, the pipeline and the lumen version that made it |
+| `lucem/cells.parquet`, `lucem/tiles.parquet` | One row per object with its measurements and region |
+| `lucem/shapes.parquet` | Every outline, as GeoParquet |
+| `lucem/provenance.json` | The session, the pipeline and the lucem version that made it |
 
-The store is the image's own OME-Zarr when lumen can write to it, else
-`<project>/analysis/<image>.lumen.zarr`. See [Output store](/lumen/reference/files/output-store/).
+The store is the image's own OME-Zarr when lucem can write to it, else
+`<project>/analysis/<image>.lucem.zarr`. See [Output store](/lucem/reference/files/output-store/).

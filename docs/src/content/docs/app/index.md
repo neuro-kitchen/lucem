@@ -5,19 +5,19 @@ sidebar:
   order: 0
 ---
 
-`lumen-app` is a workstation for large microscopy images. It draws whole slides and volumes from
+`lucem-app` is a workstation for large microscopy images. It draws whole slides and volumes from
 their pyramids and runs processing on your GPU as you change it.
 
 ## Workspaces
 
-The workspaces sit at the top left, after the **Lumen** and **Help** menus. Each has its own
+The workspaces sit at the top left, after the **Lucem** and **Help** menus. Each has its own
 menu row under the title bar.
 
 | Workspace | What it's for | Keys |
 |---|---|---|
-| [Explore](/lumen/app/explore/) | Look at images, draw and edit shapes, run histology | <kbd>Ctrl</kbd>+<kbd>1</kbd> |
-| [Pipeline](/lumen/app/pipeline/) | The processing graph on a canvas | <kbd>Ctrl</kbd>+<kbd>2</kbd> |
-| [Analyze](/lumen/app/analyze/) | Tables and plots of what was measured | <kbd>Ctrl</kbd>+<kbd>3</kbd> |
+| [Explore](/lucem/app/explore/) | Look at images, draw and edit shapes, run histology | <kbd>Ctrl</kbd>+<kbd>1</kbd> |
+| [Pipeline](/lucem/app/pipeline/) | The processing graph on a canvas | <kbd>Ctrl</kbd>+<kbd>2</kbd> |
+| [Analyze](/lucem/app/analyze/) | Tables and plots of what was measured | <kbd>Ctrl</kbd>+<kbd>3</kbd> |
 
 ## Finding things
 
@@ -31,4 +31,4 @@ Long steps (finding cells, a model, an export) run in the background. The status
 one with how far it is; the Histology panel's **Cancel** stops a step after its current tile.
 Only one step that drives the GPU runs at a time.
 
-See also [Keyboard and mouse](/lumen/app/keyboard/).
+See also [Keyboard and mouse](/lucem/app/keyboard/).

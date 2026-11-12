@@ -21,7 +21,7 @@ so a step gives the same result wherever it runs.
 ## Running a session on other images
 
 ```sh
-lumen session run session.json slides/*.ome.zarr --out results/ [--runtime cuda]
+lucem session run session.json slides/*.ome.zarr --out results/ [--runtime cuda]
 ```
 
 For each image, the last step of each kind runs, in order: a step you ran again with other
@@ -29,4 +29,4 @@ settings replaces the earlier one. Regions you drew on the image the session was
 belong to that image, so on other images the step looks in the tissue found instead.
 
 Each image's results are written to its output store: see
-[Output store](/lumen/reference/files/output-store/).
+[Output store](/lucem/reference/files/output-store/).

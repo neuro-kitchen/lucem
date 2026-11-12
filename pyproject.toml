@@ -1,21 +1,21 @@
 [project]
-name = "lumen-dev"
+name = "lucem-dev"
 version = "0.1.0"
-description = "Development environment of the lumen repository (playground scripts, tests); the Python package is bindings/python"
+description = "Development environment of the lucem repository (playground scripts, tests); the Python package is bindings/python"
 readme = "README.md"
 authors = [{ name = "jesusdpa1" }]
 requires-python = ">=3.12"
 dependencies = [
-    "lumen",
+    "lucem",
     "numpy>=2.5",
 ]
 
 [tool.uv]
-# Not a package itself: it installs lumen (bindings/python) editable, built by maturin
+# Not a package itself: it installs lucem (bindings/python) editable, built by maturin
 package = false
 
 [tool.uv.sources]
-lumen = { path = "bindings/python", editable = true }
+lucem = { path = "bindings/python", editable = true }
 
 [tool.ruff]
 src = ["bindings/python/python"]

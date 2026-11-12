@@ -5,24 +5,24 @@ sidebar:
   order: 0
 ---
 
-Models run as separate programs (`lumen-ml-<family>`), one per model family, each under its
-model's own licence and with its own runtime. lumen finds them in `$LUMEN_PLUGINS`,
-`~/.local/share/lumen/plugins`, next to the app, and on `PATH`.
+Models run as separate programs (`lucem-ml-<family>`), one per model family, each under its
+model's own licence and with its own runtime. lucem finds them in `$LUCEM_PLUGINS`,
+`~/.local/share/lucem/plugins`, next to the app, and on `PATH`.
 
 | Plugin | Models | Task | Licence |
 |---|---|---|---|
-| `lumen-ml-stardist` | StarDist H&E (`stardist-he`), StarDist fluorescence (`stardist-fluo`) | Nuclei as labels | BSD-3-Clause |
-| `lumen-ml-sam` | Segment Anything 2 | An object from a click or a box | Apache-2.0 |
+| `lucem-ml-stardist` | StarDist H&E (`stardist-he`), StarDist fluorescence (`stardist-fluo`) | Nuclei as labels | BSD-3-Clause |
+| `lucem-ml-sam` | Segment Anything 2 | An object from a click or a box | Apache-2.0 |
 
 ## Installing weights
 
 **Settings → Models** lists each plugin, its runtime and its models. **Install** downloads a
-model's weights and checks their SHA-256 before keeping them, in `$LUMEN_MODELS` or
-`~/.cache/lumen/models`.
+model's weights and checks their SHA-256 before keeping them, in `$LUCEM_MODELS` or
+`~/.cache/lucem/models`.
 
 ## StarDist
 
-The published StarDist models, run on lumen's GPU stack (Burn on CubeCL). The Keras weights from
+The published StarDist models, run on lucem's GPU stack (Burn on CubeCL). The Keras weights from
 Zenodo are converted when installed; the outputs match the published ones.
 
 | Model | Images | Source |

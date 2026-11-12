@@ -23,5 +23,5 @@ sidebar:
 | <kbd>[</kbd>, <kbd>]</kbd> | Brush size |
 | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quit |
 
-Tool keys are listed in [Explore](/lumen/app/explore/#tools). On macOS, <kbd>Cmd</kbd> stands for
+Tool keys are listed in [Explore](/lucem/app/explore/#tools). On macOS, <kbd>Cmd</kbd> stands for
 <kbd>Ctrl</kbd>.

@@ -3,7 +3,7 @@ requires = ["maturin>=1.16,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "lumen"
+name = "lucem"
 dynamic = ["version"]
 description = "GPU image processing for biology, written once in CubeCL"
 readme = "README.md"
@@ -11,14 +11,14 @@ authors = [{ name = "jesusdpa1" }]
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.12"
 dependencies = ["numpy>=2.5"]
-# PyPI rejects any upload carrying this classifier; remove it when lumen is ready to be published
+# PyPI rejects any upload carrying this classifier; remove it when lucem is ready to be published
 classifiers = ["Private :: Do Not Upload"]
 
 [project.urls]
-Repository = "https://github.com/neuro-kitchen/lumen"
+Repository = "https://github.com/neuro-kitchen/lucem"
 
 [tool.maturin]
-manifest-path = "lumen-py/Cargo.toml"
-module-name = "lumen._native"
+manifest-path = "lucem-py/Cargo.toml"
+module-name = "lucem._native"
 python-source = "python"
 features = ["extension-module"]

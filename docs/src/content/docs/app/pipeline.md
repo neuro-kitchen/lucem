@@ -16,4 +16,4 @@ The Pipeline workspace is the graph on a canvas. Its menu row: **Sources**, **Ed
 - The bar at the bottom left zooms, fits the graph (<kbd>F</kbd>), and turns the dot grid and the
   minimap on or off.
 
-The graph is saved in the project's `pipeline.json` and runs headless with `lumen run`.
+The graph is saved in the project's `pipeline.json` and runs headless with `lucem run`.

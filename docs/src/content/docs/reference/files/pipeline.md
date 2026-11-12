@@ -7,7 +7,7 @@ sidebar:
 
 ```json
 {
-  "lumen_pipeline": 1,
+  "lucem_pipeline": 1,
   "graph": {
     "nodes": [
       { "id": "n1", "x": 0, "y": 0, "kind": { "type": "source", "image": "img1", "channel": 0 } },
@@ -19,4 +19,4 @@ sidebar:
 ```
 
 Node kinds: `source` (a channel of an image), `annotations` (a class's shapes as a mask), `op`
-(an [operation](/lumen/reference/operations/)), `view`, `script` and `model`.
+(an [operation](/lucem/reference/operations/)), `view`, `script` and `model`.

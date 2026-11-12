@@ -1,0 +1,37 @@
+[package]
+name = "lucem-cli"
+description = "Command-line interface of lucem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "lucem"
+path = "src/main.rs"
+
+[features]
+default = ["wgpu", "cuda", "cpu"]
+wgpu = ["lucem-core/wgpu", "lucem-ops/wgpu"]
+cpu = ["lucem-core/cpu", "lucem-ops/cpu"]
+cuda = ["lucem-core/cuda", "lucem-ops/cuda"]
+hip = ["lucem-core/hip", "lucem-ops/hip"]
+
+[dependencies]
+lucem-ml.workspace = true
+image.workspace = true
+lucem-core = { workspace = true, features = ["compute"] }
+lucem-io.workspace = true
+lucem-hist = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
+lucem-ops.workspace = true
+lucem-pipeline.workspace = true
+# `lucem mcp`, and the runners `lucem ops`, `run` and `session run` share with it
+lucem-mcp.workspace = true
+lucem-stream.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

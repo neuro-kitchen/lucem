@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test of the lumen server image, end to end, with nothing on the host but Podman: the image
+# Smoke test of the lucem server image, end to end, with nothing on the host but Podman: the image
 # is the server and the client.
 #
 #   build → doctor → data → serve → enroll → fetch (and refusals) → run a pipeline → stop
@@ -9,7 +9,7 @@
 #   deploy/smoke-test.sh --target cpu    # or nvidia, mesa
 #   deploy/smoke-test.sh --no-build      # test the image already built
 #
-# Settings (environment): PORT=50079, WORK=$XDG_CACHE_HOME/lumen-smoke-test
+# Settings (environment): PORT=50079, WORK=$XDG_CACHE_HOME/lucem-smoke-test
 # Exits non-zero at the first failure; its containers are always removed.
 set -euo pipefail
 
@@ -24,10 +24,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 PORT="${PORT:-50079}"
-WORK="${WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/lumen-smoke-test}"
-NAME="lumen-smoke-$$"
+WORK="${WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/lucem-smoke-test}"
+NAME="lucem-smoke-$$"
 # The working folder is removed and recreated: refuse anything not named for this test
-case "$(basename "$WORK")" in *lumen-smoke*) ;; *) echo "WORK must be a folder named *lumen-smoke*: $WORK" >&2; exit 2 ;; esac
+case "$(basename "$WORK")" in *lucem-smoke*) ;; *) echo "WORK must be a folder named *lucem-smoke*: $WORK" >&2; exit 2 ;; esac
 
 if [ -z "$TARGET" ]; then
     if [ -e /etc/cdi/nvidia.yaml ] || [ -e /var/run/cdi/nvidia.yaml ]; then TARGET=nvidia
@@ -40,7 +40,7 @@ case "$TARGET" in
     cpu) DEVICE=() ;;
     *) echo "unknown target: $TARGET" >&2; exit 2 ;;
 esac
-IMAGE="lumen-serve:$TARGET"
+IMAGE="lucem-serve:$TARGET"
 step() { echo "--- $*"; }
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -56,7 +56,7 @@ mkdir -p "$WORK"
 # The data folder is shared by several containers (the server, its clients): `:z`, a label they
 # all may use. `:Z` (private) would relabel it for each new container and lock the server out of
 # its own client registry.
-RUN=(podman run --rm --userns=keep-id:uid=10001,gid=10001 "${DEVICE[@]}" -v "$WORK:/data:z" -v lumen-smoke-cache:/home/lumen/.cache "$IMAGE")
+RUN=(podman run --rm --userns=keep-id:uid=10001,gid=10001 "${DEVICE[@]}" -v "$WORK:/data:z" -v lucem-smoke-cache:/home/lucem/.cache "$IMAGE")
 
 step "doctor"
 "${RUN[@]}" doctor && pass "doctor" || fail "doctor found no usable runtime"
@@ -68,13 +68,13 @@ pass "synthetic image"
 step "serve (hardened)"
 podman run -d --name "$NAME" -p "$PORT:50051/udp" --userns=keep-id:uid=10001,gid=10001 "${DEVICE[@]}" \
     --read-only --cap-drop=all --security-opt=no-new-privileges --pids-limit=1024 \
-    -v "$WORK:/data:z" -v lumen-smoke-cache:/home/lumen/.cache "$IMAGE" serve --bind 0.0.0.0:50051 >/dev/null
+    -v "$WORK:/data:z" -v lucem-smoke-cache:/home/lucem/.cache "$IMAGE" serve --bind 0.0.0.0:50051 >/dev/null
 sleep 3
 podman ps --filter "name=$NAME" --format '{{.Status}}' | grep -q Up || { podman logs "$NAME"; fail "the server did not start"; }
 pass "serving"
 
 step "enroll"
-(umask 077; podman exec "$NAME" lumen clients enroll alice --out - > "$WORK/alice.pem")
+(umask 077; podman exec "$NAME" lucem clients enroll alice --out - > "$WORK/alice.pem")
 [ -s "$WORK/alice.pem" ] || fail "enroll"
 pass "enrolled"
 
@@ -86,9 +86,9 @@ step "fetch"
 step "refusals"
 if "${FETCH[@]}" --open ../etc/passwd >/dev/null 2>&1; then fail "a path out of the data folder was served"; fi
 pass "a path out of /data is refused"
-if "${FETCH[@]}" --open .lumen-auth/ca.key.pem >/dev/null 2>&1; then fail "the authority's key was served"; fi
+if "${FETCH[@]}" --open .lucem-auth/ca.key.pem >/dev/null 2>&1; then fail "the authority's key was served"; fi
 pass "the authority's key is refused"
-podman exec "$NAME" lumen clients revoke alice
+podman exec "$NAME" lucem clients revoke alice
 if "${FETCH[@]}" >/dev/null 2>&1; then fail "a revoked client was served"; fi
 pass "a revoked client is refused"
 

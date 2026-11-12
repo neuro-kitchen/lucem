@@ -1,0 +1,22 @@
+[package]
+name = "lucem"
+description = "lucem: GPU image processing for biology, written once in CubeCL"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["wgpu", "cuda", "cpu"]
+wgpu = ["lucem-core/wgpu", "lucem-ops/wgpu"]
+cpu = ["lucem-core/cpu", "lucem-ops/cpu"]
+cuda = ["lucem-core/cuda", "lucem-ops/cuda"]
+hip = ["lucem-core/hip", "lucem-ops/hip"]
+
+[dependencies]
+lucem-core = { workspace = true, default-features = false, features = ["compute"] }
+lucem-io.workspace = true
+lucem-ml.workspace = true
+lucem-ops = { workspace = true, default-features = false }
