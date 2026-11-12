@@ -1,6 +1,6 @@
 [package]
-name = "lumen-model-sam"
-description = "Segment Anything 2 (Meta AI) for lumen, on ONNX Runtime: an image encoder and a prompt decoder, weights fetched and verified through lumen-hub"
+name = "lucem-model-sam"
+description = "Segment Anything 2 (Meta AI) for lucem, on ONNX Runtime: an image encoder and a prompt decoder, weights fetched and verified through lucem-hub"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,6 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
-lumen-ml = { path = "../../crates/lumen-ml" }
-lumen-hub.workspace = true
+lucem-ml = { path = "../../crates/lucem-ml" }
+lucem-hub.workspace = true
 ort.workspace = true

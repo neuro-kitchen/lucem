@@ -12,7 +12,7 @@ body:
   - type: textarea
     id: proposal
     attributes:
-      label: What lumen could offer
+      label: What lucem could offer
       description: The operator, tool, pipeline node or binding you have in mind, with its parameters if you know them.
   - type: dropdown
     id: interface

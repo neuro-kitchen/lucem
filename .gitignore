@@ -160,7 +160,7 @@ Thumbs.db
 tempCodeRunnerFile.py
 
 # Analysis outputs and model weights (never in git)
-*.lumen.zarr/
+*.lucem.zarr/
 *.pik.zarr/
 *.objects.json.gz
 *.safetensors

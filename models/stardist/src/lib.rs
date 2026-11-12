@@ -1,4 +1,4 @@
-//! StarDist (Schmidt, Weigert, Broaddus, Myers 2018; Weigert et al. 2020) for lumen, on Burn.
+//! StarDist (Schmidt, Weigert, Broaddus, Myers 2018; Weigert et al. 2020) for lucem, on Burn.
 //! Nuclei as star-convex polygons: for every pixel the network gives the probability that it is
 //! inside a nucleus and the distances to the nucleus' edge along 32 rays; the most probable
 //! polygons that do not overlap become the nuclei.
@@ -7,7 +7,7 @@
 //!   brightfield H&E (RGB), and "StarDist Fluorescence Nuclei Segmentation" (Zenodo 6348085,
 //!   `2D_versatile_fluo`) for one fluorescence channel; both BSD-3-Clause, the same network but
 //!   for its input channels. Its Keras weights (`stardist_weights.h5`) are fetched and verified through
-//!   `lumen-hub` (SHA-256 pinned) and turned once into safetensors in lumen's cache
+//!   `lucem-hub` (SHA-256 pinned) and turned once into safetensors in lucem's cache
 //!   ([`install`], [`convert`]); [`StarDist::load`] reads only the safetensors.
 //! - Network: [`net`] on Burn (any of its devices: CUDA, wgpu, the CPU).
 //! - Prediction: [`predict`] (normalization, tiles with a halo, thresholds and NMS as StarDist's
@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use burn::tensor::{Device, DeviceKind};
-use lumen_ml::{ModelInfo, Task, Weight};
+use lucem_ml::{ModelInfo, Task, Weight};
 
 pub use predict::{Nucleus, Thresholds, Tiling, HE_THRESHOLDS};
 
@@ -86,7 +86,7 @@ pub fn spec(id: &str) -> Option<&'static Spec> {
 }
 
 pub fn path_of(file: &str) -> PathBuf {
-    lumen_hub::cache_dir("stardist").join(file)
+    lucem_hub::cache_dir("stardist").join(file)
 }
 
 /// Whether the safetensors are in the cache.
@@ -115,7 +115,7 @@ pub fn info(s: &Spec) -> ModelInfo {
 /// Fetches and verifies the Keras weights, then writes the safetensors next to them.
 pub fn install(s: &Spec, progress: &mut dyn FnMut(u64, u64)) -> Result<(), String> {
     let (file, url, sha, bytes) = s.keras;
-    let h5 = lumen_hub::fetch(url, &path_of(file), sha, bytes, progress)?;
+    let h5 = lucem_hub::fetch(url, &path_of(file), sha, bytes, progress)?;
     let layers = convert::read_keras(&h5, s.channels)?;
     let meta: HashMap<String, String> = [
         ("source", url.to_string()),
@@ -132,16 +132,16 @@ pub fn install(s: &Spec, progress: &mut dyn FnMut(u64, u64)) -> Result<(), Strin
 
 /// CubeCL's runtime configuration, once, before the first device opens: compiled kernels are
 /// cached (CubeCL's default is off: without it every start of the plugin compiles and tunes the
-/// network's kernels again, ~15 s), in the user cache directory (or `LUMEN_CACHE_DIR`) shared
-/// with lumen. `cubecl.toml` and CubeCL's own variables still apply.
+/// network's kernels again, ~15 s), in the user cache directory (or `LUCEM_CACHE_DIR`) shared
+/// with lucem. `cubecl.toml` and CubeCL's own variables still apply.
 fn configure_runtime() {
     use cubecl::config::cache::CacheConfig;
     use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
-        config.compilation.cache = std::env::var("LUMEN_KERNEL_CACHE").map_or(true, |v| v.trim() != "0");
-        match std::env::var_os("LUMEN_CACHE_DIR") {
+        config.compilation.cache = std::env::var("LUCEM_KERNEL_CACHE").map_or(true, |v| v.trim() != "0");
+        match std::env::var_os("LUCEM_CACHE_DIR") {
             Some(dir) if !dir.is_empty() => config.environment.path = CacheConfig::Directory(dir.into()),
             _ if matches!(config.environment.path, CacheConfig::Target) => config.environment.path = CacheConfig::Global,
             _ => {}
@@ -150,27 +150,27 @@ fn configure_runtime() {
     });
 }
 
-/// Whether `LUMEN_STARDIST_TIMING` asks for each phase's time on stderr.
+/// Whether `LUCEM_STARDIST_TIMING` asks for each phase's time on stderr.
 pub(crate) fn timing() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *T.get_or_init(|| std::env::var_os("LUMEN_STARDIST_TIMING").is_some())
+    *T.get_or_init(|| std::env::var_os("LUCEM_STARDIST_TIMING").is_some())
 }
 
-/// The Burn device: `LUMEN_RUNTIME` (`cuda`, `wgpu`, `cpu`), else wgpu's default adapter.
+/// The Burn device: `LUCEM_RUNTIME` (`cuda`, `wgpu`, `cpu`), else wgpu's default adapter.
 pub fn device() -> Result<Device, String> {
     configure_runtime();
-    let want = std::env::var("LUMEN_RUNTIME").unwrap_or_default().to_lowercase();
+    let want = std::env::var("LUCEM_RUNTIME").unwrap_or_default().to_lowercase();
     match want.as_str() {
         #[cfg(feature = "cuda")]
         // Opening CUDA without its driver panics on the device thread: ask the system first
-        "cuda" if cfg!(target_os = "linux") && !std::path::Path::new("/proc/driver/nvidia/version").exists() => Err("LUMEN_RUNTIME=cuda: the NVIDIA driver is not loaded".into()),
+        "cuda" if cfg!(target_os = "linux") && !std::path::Path::new("/proc/driver/nvidia/version").exists() => Err("LUCEM_RUNTIME=cuda: the NVIDIA driver is not loaded".into()),
         #[cfg(feature = "cuda")]
         "cuda" => Ok(Device::cuda(0)),
         #[cfg(feature = "cpu")]
         "cpu" => Ok(Device::cpu()),
         #[cfg(feature = "wgpu")]
         "" | "auto" | "wgpu" | "vulkan" => Ok(Device::wgpu(DeviceKind::DefaultDevice)),
-        other => Err(format!("LUMEN_RUNTIME={other:?}: this build runs on {}", runtimes().join(", "))),
+        other => Err(format!("LUCEM_RUNTIME={other:?}: this build runs on {}", runtimes().join(", "))),
     }
 }
 
@@ -206,7 +206,7 @@ impl StarDist {
     pub fn load(s: &'static Spec, device: Device) -> Result<Self, String> {
         let path = path_of(s.safetensors);
         if !path.is_file() {
-            return Err(format!("{} is not installed (lumen-ml-stardist install {})", s.name, s.id));
+            return Err(format!("{} is not installed (lucem-ml-stardist install {})", s.name, s.id));
         }
         let layers = convert::read_safetensors(&path, s.channels)?;
         Ok(Self { spec: s, net: net::StarDistNet::new(layers, s.channels, device)? })
@@ -341,18 +341,18 @@ mod tests {
 
     /// The published test: `test_input.npy` through the network must give `test_output.npy` (the
     /// TensorFlow export's output, upsampled to the input; compared on the grid's points). Needs
-    /// the model installed and `LUMEN_STARDIST_TEST_DIR` holding the two files from Zenodo 6338615.
+    /// the model installed and `LUCEM_STARDIST_TEST_DIR` holding the two files from Zenodo 6338615.
     #[test]
     #[ignore = "needs the model installed and the published test files"]
     fn matches_the_published_test_output() {
-        published(&MODELS[0], "LUMEN_STARDIST_TEST_DIR");
+        published(&MODELS[0], "LUCEM_STARDIST_TEST_DIR");
     }
 
-    /// As above for the fluorescence model (`LUMEN_STARDIST_FLUO_TEST_DIR`: Zenodo 6348085's files).
+    /// As above for the fluorescence model (`LUCEM_STARDIST_FLUO_TEST_DIR`: Zenodo 6348085's files).
     #[test]
     #[ignore = "needs the model installed and the published test files"]
     fn fluorescence_matches_the_published_test_output() {
-        published(&MODELS[1], "LUMEN_STARDIST_FLUO_TEST_DIR");
+        published(&MODELS[1], "LUCEM_STARDIST_FLUO_TEST_DIR");
     }
 
     fn published(s: &'static Spec, dir_var: &str) {

@@ -1,5 +1,5 @@
 {
-  // lumen workspace settings. Line width 120 everywhere: rulers here, `max_width` in rustfmt.toml,
+  // lucem workspace settings. Line width 120 everywhere: rulers here, `max_width` in rustfmt.toml,
   // `line-length` in pyproject.toml.
 
   // ---- Editor ----

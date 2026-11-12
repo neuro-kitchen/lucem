@@ -7,7 +7,7 @@ sidebar:
 
 ```json
 {
-  "lumen_session": 1,
+  "lucem_session": 1,
   "steps": [
     { "at": 1762870000, "image": "slide-1", "action": "tissue", "settings": { "brightfield": true } },
     { "at": 1762870042, "image": "slide-1", "action": "cells", "within": { "in": "tissue" },

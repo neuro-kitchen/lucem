@@ -8,13 +8,13 @@ const folder = new URL('../src/content/docs/changelog/', import.meta.url);
 const text = await readFile(source, 'utf8');
 // The first line is the file's own title; the page has its title in the frontmatter.
 const body = text.replace(/^# Changelog\s*\n/, '').trim();
-const releases = 'https://github.com/neuro-kitchen/lumen/releases';
+const releases = 'https://github.com/neuro-kitchen/lucem/releases';
 // `<` outside inline code would be read as HTML
 const escaped = body.split(/(`[^`\n]*`)/).map((part) => (part.startsWith('`') ? part : part.replace(/</g, '&lt;'))).join('');
 const page = `---
 title: Changelog
-description: "What changed in each release of lumen."
-editUrl: https://github.com/neuro-kitchen/lumen/edit/main/CHANGELOG.md
+description: "What changed in each release of lucem."
+editUrl: https://github.com/neuro-kitchen/lucem/edit/main/CHANGELOG.md
 tableOfContents:
   minHeadingLevel: 2
   maxHeadingLevel: 2

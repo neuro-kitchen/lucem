@@ -1,5 +1,5 @@
 # Checks every push to main and pull request. GitHub runners have no GPU, so tests run on the CubeCL
-# CPU runtime only (LUMEN_TEST_RUNTIMES=cpu). The GPU runtimes are run locally.
+# CPU runtime only (LUCEM_TEST_RUNTIMES=cpu). The GPU runtimes are run locally.
 name: ci
 
 on:
@@ -16,7 +16,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  LUMEN_TEST_RUNTIMES: cpu
+  LUCEM_TEST_RUNTIMES: cpu
 
 jobs:
   rust:
@@ -27,7 +27,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
-      # The runner image ships ~30 GB of toolchains lumen never uses (.NET, Android, Haskell,
+      # The runner image ships ~30 GB of toolchains lucem never uses (.NET, Android, Haskell,
       # CodeQL bundles, Boost); the debug build of the workspace needs that room
       - name: Free disk space
         run: |
@@ -43,17 +43,17 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-directories: ~/.local/share/tracel
-      # lumen-app's GUI stack (GPUI) builds against these system libraries on Linux
-      - name: System libraries for lumen-app
+      # lucem-app's GUI stack (GPUI) builds against these system libraries on Linux
+      - name: System libraries for lucem-app
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
             libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev
-      # Not --all-targets: the benchmarks in crates/lumen-ops/tests do not compile against the current API
+      # Not --all-targets: the benchmarks in crates/lucem-ops/tests do not compile against the current API
       - name: Check the workspace
         run: cargo check --workspace
       - name: Unit tests
-        run: cargo test --workspace --exclude lumen-app --exclude lumen-py --lib
+        run: cargo test --workspace --exclude lucem-app --exclude lucem-py --lib
 
   python:
     name: Python (build, tests)

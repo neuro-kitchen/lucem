@@ -1,10 +1,10 @@
 """Writes the Rust API reference (docs/src/content/docs/reference/rust/) from rustdoc's JSON, so every
 public function, type and method is listed with its exact signature and its doc comment, and the
-pages cannot drift from the code. lumen is not on docs.rs, so these pages stand in for it.
+pages cannot drift from the code. lucem is not on docs.rs, so these pages stand in for it.
 
 Needs the nightly toolchain (rustdoc's JSON output is unstable). From the repository root:
 
-    for p in lumen-core lumen-io lumen-ops lumen-ml lumen-hist lumen-pipeline lumen-hub; do
+    for p in lucem-core lucem-io lucem-ops lucem-ml lucem-hist lucem-pipeline lucem-hub; do
       CARGO_TARGET_DIR=target/rustdoc-json cargo +nightly rustdoc -p $p --lib -- \
         -Z unstable-options --output-format json
     done
@@ -25,16 +25,16 @@ OUT = ROOT / "docs" / "src" / "content" / "docs" / "reference" / "rust"
 
 # (package, what it is). Order is the order of the pages in the sidebar.
 CRATES = [
-    ("lumen-core", "Device arrays and memory, shapes, compute targets (runtimes), tiling"),
-    ("lumen-io", "Reading and writing images: TIFF, OME-Zarr, pyramids, projects"),
-    ("lumen-ops", "Image operations on the device: filters, thresholds, morphology, segmentation, measurements"),
-    ("lumen-pipeline", "Pipelines as data: the operation catalog, the executor, tables"),
-    ("lumen-hist", "Histology: tissue, cells, classifiers, densities, the analysis engine and sessions"),
-    ("lumen-ml", "The model-plugin protocol: discovery, client, messages"),
-    ("lumen-hub", "Verified downloads of published artifacts (model weights)"),
+    ("lucem-core", "Device arrays and memory, shapes, compute targets (runtimes), tiling"),
+    ("lucem-io", "Reading and writing images: TIFF, OME-Zarr, pyramids, projects"),
+    ("lucem-ops", "Image operations on the device: filters, thresholds, morphology, segmentation, measurements"),
+    ("lucem-pipeline", "Pipelines as data: the operation catalog, the executor, tables"),
+    ("lucem-hist", "Histology: tissue, cells, classifiers, densities, the analysis engine and sessions"),
+    ("lucem-ml", "The model-plugin protocol: discovery, client, messages"),
+    ("lucem-hub", "Verified downloads of published artifacts (model weights)"),
 ]
 # Crates whose top-level modules each get a page (the rest get one page per crate).
-SPLIT = {"lumen-ops", "lumen-hist"}
+SPLIT = {"lucem-ops", "lucem-hist"}
 # Modules that are implementation detail even when public (GPU kernels, test helpers).
 SKIP_MODULES = {"kernels", "test_support", "tests"}
 
@@ -454,7 +454,7 @@ def main() -> None:
                     total += 1
             body += ["## Modules", "", "| Module | What it holds |", "|---|---|"]
             for i, s in enumerate(sorted(subs, key=lambda m: m["name"])):
-                body.append(f"| [`{c.name}::{s['name']}`](/lumen/reference/rust/{package}/{s['name']}/) | {first_para(s).replace(chr(10), ' ') or '—'} |")
+                body.append(f"| [`{c.name}::{s['name']}`](/lucem/reference/rust/{package}/{s['name']}/) | {first_para(s).replace(chr(10), ' ') or '—'} |")
                 sub = []
                 d = doc_text(s)
                 if d:

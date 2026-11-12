@@ -1,11 +1,11 @@
-// Writes the Operations page from `lumen ops --json` (the operations' own documentation, ports
+// Writes the Operations page from `lucem ops --json` (the operations' own documentation, ports
 // and defaults), so the page cannot drift from the code. Needs the built command line:
-//   cargo build -p lumen-cli && bun docs/scripts/operations.mjs
-// (LUMEN_BIN overrides the program's path). The page is committed; rerun when operations change.
+//   cargo build -p lucem-cli && bun docs/scripts/operations.mjs
+// (LUCEM_BIN overrides the program's path). The page is committed; rerun when operations change.
 import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 
-const bin = process.env.LUMEN_BIN ?? new URL('../../target/debug/lumen', import.meta.url).pathname;
+const bin = process.env.LUCEM_BIN ?? new URL('../../target/debug/lucem', import.meta.url).pathname;
 const ops = JSON.parse(execFileSync(bin, ['ops', '--json'], { encoding: 'utf8' }));
 const families = [...new Set(ops.map((o) => o.family))];
 const port = (t) => `\`${t}\``;
@@ -18,9 +18,9 @@ sidebar:
   order: 1
 ---
 
-{/* Written by docs/scripts/operations.mjs from \`lumen ops --json\`: don't edit by hand. */}
+{/* Written by docs/scripts/operations.mjs from \`lucem ops --json\`: don't edit by hand. */}
 
-Every operation the Pipeline, the **Process** menu, the search and \`lumen run\` can use, by
+Every operation the Pipeline, the **Process** menu, the search and \`lucem run\` can use, by
 family. Inputs and outputs are typed (${['image', 'mask', 'labels', 'table'].map(port).join(', ')}); a
 connection between different types is refused. In a pipeline file an operation is written as
 \`{"op": "<name>", …parameters}\`.

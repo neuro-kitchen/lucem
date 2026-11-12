@@ -1,6 +1,6 @@
 [package]
-name = "lumen-model-stardist"
-description = "StarDist (Schmidt, Weigert et al.) for lumen on Burn: the H&E nuclei model, its Keras weights fetched from Zenodo, verified through lumen-hub and turned into safetensors"
+name = "lucem-model-stardist"
+description = "StarDist (Schmidt, Weigert et al.) for lucem on Burn: the H&E nuclei model, its Keras weights fetched from Zenodo, verified through lucem-hub and turned into safetensors"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,8 +16,8 @@ cpu = ["burn/cpu"]
 cuda = ["burn/cuda"]
 
 [dependencies]
-lumen-ml = { path = "../../crates/lumen-ml" }
-lumen-hub.workspace = true
+lucem-ml = { path = "../../crates/lucem-ml" }
+lucem-hub.workspace = true
 burn = { workspace = true, features = ["std", "fusion", "autotune"] }
 # The same CubeCL as Burn's: its runtime configuration (compiled-kernel cache) is set here
 cubecl.workspace = true

@@ -1,5 +1,5 @@
 # Builds the documentation site (docs/, Starlight) with Bun, and deploys it to GitHub Pages
-# (https://neuro-kitchen.github.io/lumen/) from main. Pull requests that touch the site get the
+# (https://neuro-kitchen.github.io/lucem/) from main. Pull requests that touch the site get the
 # build only. Deploying waits until the repository is public (Pages needs it on the free plan).
 name: docs
 

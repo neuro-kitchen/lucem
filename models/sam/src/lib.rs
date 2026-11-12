@@ -1,12 +1,12 @@
-//! Segment Anything 2 (Ravi et al., Meta AI, 2024) for lumen, on ONNX Runtime. Ported from
+//! Segment Anything 2 (Ravi et al., Meta AI, 2024) for lucem, on ONNX Runtime. Ported from
 //! cv-kitchen's `vision-ml` (`models/sam/v2`): the Hiera image encoder turns an RGB image into an
 //! embedding once; the prompt decoder turns points and boxes into masks in milliseconds, so an
 //! image's embedding is kept for the next click ([`Sam2::segment`] reuses it by key).
 //!
 //! - Weights: [`MODELS`] (exported to ONNX by the community, hashes pinned), fetched and verified
-//!   through `lumen-hub` ([`install`]); a model loads only files whose SHA-256 matches.
+//!   through `lucem-hub` ([`install`]); a model loads only files whose SHA-256 matches.
 //! - Runtime: ONNX Runtime loaded at run time ([`init_runtime`]): `ORT_DYLIB_PATH`, else the
-//!   `onnxruntime` Python package (`$LUMEN_PYTHON` or `python3`), else the system's library. CUDA
+//!   `onnxruntime` Python package (`$LUCEM_PYTHON` or `python3`), else the system's library. CUDA
 //!   is used when the library has it, else the CPU.
 //! - Pre-processing as the ONNX export expects: the image resized (stretched) to 1024 × 1024,
 //!   ImageNet mean and deviation; prompt coordinates scaled to that 1024 grid; masks come back at
@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use lumen_ml::{ModelInfo, Prompt, RuntimeStatus, Task, Weight};
+use lucem_ml::{ModelInfo, Prompt, RuntimeStatus, Task, Weight};
 use ort::session::Session;
 use ort::value::Tensor;
 
@@ -91,7 +91,7 @@ pub fn spec(id: &str) -> Option<&'static Spec> {
 
 /// Where a model's file lives in the cache.
 pub fn path_of(file: &str) -> PathBuf {
-    lumen_hub::cache_dir("sam").join(file)
+    lucem_hub::cache_dir("sam").join(file)
 }
 
 /// Whether both files are in the cache (their hashes are checked when the model loads).
@@ -123,7 +123,7 @@ pub fn install(s: &Spec, progress: &mut dyn FnMut(u64, u64)) -> Result<(), Strin
     let mut before = 0u64;
     for (file, url, sha) in s.files {
         let mut last = 0u64;
-        lumen_hub::fetch(url, &path_of(file), sha, 0, &mut |done, _| {
+        lucem_hub::fetch(url, &path_of(file), sha, 0, &mut |done, _| {
             last = done;
             progress(before + done, s.total_bytes)
         })?;
@@ -137,7 +137,7 @@ pub fn install(s: &Spec, progress: &mut dyn FnMut(u64, u64)) -> Result<(), Strin
 // ----------------------------------------------------------------------------
 
 /// ONNX Runtime as Microsoft publishes it (the latest release, CPU build), fetched and verified
-/// through lumen-hub into lumen's cache, so no Python or system package is needed.
+/// through lucem-hub into lucem's cache, so no Python or system package is needed.
 pub struct RuntimeRelease {
     pub version: &'static str,
     pub url: &'static str,
@@ -180,11 +180,11 @@ pub const RUNTIME_CUDA: Option<RuntimeRelease> = Some(RuntimeRelease {
 pub const RUNTIME_CUDA: Option<RuntimeRelease> = None;
 
 /// The id `install` takes for the runtime itself, and for its GPU build.
-pub const RUNTIME_ID: &str = lumen_ml::RUNTIME_ID;
-pub const RUNTIME_CUDA_ID: &str = lumen_ml::RUNTIME_CUDA_ID;
+pub const RUNTIME_ID: &str = lucem_ml::RUNTIME_ID;
+pub const RUNTIME_CUDA_ID: &str = lucem_ml::RUNTIME_CUDA_ID;
 
 fn release_dir(r: &RuntimeRelease) -> PathBuf {
-    lumen_hub::cache_dir("runtime").join(r.folder)
+    lucem_hub::cache_dir("runtime").join(r.folder)
 }
 
 /// The ONNX Runtime library inside an unpacked release (whatever its top folder is called).
@@ -195,12 +195,12 @@ fn library_in(dir: &std::path::Path) -> Option<PathBuf> {
     libs.pop()
 }
 
-/// The library of lumen's own ONNX Runtime (CPU build), when installed.
+/// The library of lucem's own ONNX Runtime (CPU build), when installed.
 fn own_library() -> Option<PathBuf> {
     library_in(&release_dir(RUNTIME.as_ref()?))
 }
 
-/// The library of lumen's GPU build, when installed.
+/// The library of lucem's GPU build, when installed.
 fn own_cuda_library() -> Option<PathBuf> {
     library_in(&release_dir(RUNTIME_CUDA.as_ref()?))
 }
@@ -213,7 +213,7 @@ pub fn cudnn_found() -> bool {
 }
 
 /// The GPU build's state for the manifest.
-pub fn gpu_runtime() -> Option<lumen_ml::GpuRuntime> {
+pub fn gpu_runtime() -> Option<lucem_ml::GpuRuntime> {
     let r = RUNTIME_CUDA.as_ref()?;
     let installed = own_cuda_library().is_some();
     let cudnn = cudnn_found();
@@ -222,18 +222,18 @@ pub fn gpu_runtime() -> Option<lumen_ml::GpuRuntime> {
         (true, false) => "The GPU build is installed but cuDNN 9 is not found (install cudnn9-cuda-13): the CPU build runs".into(),
         (true, true) => "The GPU build is installed and cuDNN 9 found: SAM runs on the GPU".into(),
     };
-    Some(lumen_ml::GpuRuntime { installed, usable: installed && cudnn, bytes: r.bytes, detail })
+    Some(lucem_ml::GpuRuntime { installed, usable: installed && cudnn, bytes: r.bytes, detail })
 }
 
 fn install_release(r: &RuntimeRelease, progress: &mut dyn FnMut(u64, u64)) -> Result<PathBuf, String> {
-    let archive = lumen_hub::cache_dir("runtime").join(format!("{}.tgz", r.folder));
-    lumen_hub::fetch_archive(r.url, &archive, r.sha256, r.bytes, &release_dir(r), progress)?;
+    let archive = lucem_hub::cache_dir("runtime").join(format!("{}.tgz", r.folder));
+    lucem_hub::fetch_archive(r.url, &archive, r.sha256, r.bytes, &release_dir(r), progress)?;
     // The archive is no longer needed once unpacked (the GPU build is large)
     let _ = std::fs::remove_file(&archive);
     library_in(&release_dir(r)).ok_or_else(|| "the ONNX Runtime archive has no library".to_string())
 }
 
-/// Downloads and verifies ONNX Runtime into lumen's cache.
+/// Downloads and verifies ONNX Runtime into lucem's cache.
 pub fn install_runtime(progress: &mut dyn FnMut(u64, u64)) -> Result<(), String> {
     let r = RUNTIME.as_ref().ok_or("no ONNX Runtime build is published for this platform here: set ORT_DYLIB_PATH")?;
     install_release(r, progress).map(|_| ())
@@ -246,14 +246,14 @@ pub fn install_runtime_cuda(progress: &mut dyn FnMut(u64, u64)) -> Result<(), St
     install_release(r, progress).map(|_| ())
 }
 
-/// The ONNX Runtime library to load: `ORT_DYLIB_PATH`, else lumen's GPU build (when cuDNN 9 is
-/// there and `LUMEN_ML_EP` is not `cpu`), else its CPU build, else the `onnxruntime` Python
+/// The ONNX Runtime library to load: `ORT_DYLIB_PATH`, else lucem's GPU build (when cuDNN 9 is
+/// there and `LUCEM_ML_EP` is not `cpu`), else its CPU build, else the `onnxruntime` Python
 /// package, else the system's.
 fn find_library() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from).filter(|p| p.is_file()) {
         return Some(p);
     }
-    let cpu_only = std::env::var("LUMEN_ML_EP").is_ok_and(|v| v.eq_ignore_ascii_case("cpu"));
+    let cpu_only = std::env::var("LUCEM_ML_EP").is_ok_and(|v| v.eq_ignore_ascii_case("cpu"));
     if !cpu_only
         && cudnn_found()
         && let Some(p) = own_cuda_library()
@@ -263,7 +263,7 @@ fn find_library() -> Option<PathBuf> {
     if let Some(p) = own_library() {
         return Some(p);
     }
-    let python = std::env::var("LUMEN_PYTHON").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "python3".into());
+    let python = std::env::var("LUCEM_PYTHON").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "python3".into());
     let probe = "import onnxruntime, os; print(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi'))";
     if let Ok(out) = std::process::Command::new(&python).args(["-c", probe]).output() {
         let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
@@ -280,11 +280,11 @@ fn find_library() -> Option<PathBuf> {
 
 /// Whether the loaded ONNX Runtime has its CUDA provider (the GPU build ships
 /// `libonnxruntime_providers_cuda` beside the library). The CPU build must not be asked for CUDA:
-/// some builds abort instead of declining. `LUMEN_ML_EP=cpu` forces the CPU.
+/// some builds abort instead of declining. `LUCEM_ML_EP=cpu` forces the CPU.
 static CUDA: OnceLock<bool> = OnceLock::new();
 
 fn has_cuda(lib: &std::path::Path) -> bool {
-    if std::env::var("LUMEN_ML_EP").is_ok_and(|v| v.eq_ignore_ascii_case("cpu")) {
+    if std::env::var("LUCEM_ML_EP").is_ok_and(|v| v.eq_ignore_ascii_case("cpu")) {
         return false;
     }
     let Some(dir) = lib.parent() else { return false };
@@ -307,13 +307,13 @@ pub fn init_runtime() -> RuntimeStatus {
                 detail: format!("ONNX Runtime is not installed: Install it here ({}, {:.0} MB, verified), or set ORT_DYLIB_PATH", RUNTIME.as_ref().map_or("?", |r| r.version), RUNTIME.as_ref().map_or(0.0, |r| r.bytes as f64 / 1e6)),
                 gpu: gpu_runtime(),
             },
-            Some(lib) => match ort::init_from(&lib).map_err(|e| e.to_string()).and_then(|b| b.with_name("lumen-ml-sam").build().map_err(|e| e.to_string())) {
+            Some(lib) => match ort::init_from(&lib).map_err(|e| e.to_string()).and_then(|b| b.with_name("lucem-ml-sam").build().map_err(|e| e.to_string())) {
                 Ok(env) => {
                     let _ = ENV.set(env);
                     let cuda = *CUDA.get_or_init(|| has_cuda(&lib));
                     RuntimeStatus { ready: true, detail: format!("ONNX Runtime on the {} ({})", if cuda { "GPU (CUDA), else the CPU" } else { "CPU" }, lib.display()), gpu: gpu_runtime() }
                 }
-                Err(e) => RuntimeStatus { ready: false, detail: format!("ONNX Runtime at {} did not load ({e}); lumen needs ONNX Runtime 1.31 or newer: pip install -U onnxruntime", lib.display()), gpu: gpu_runtime() },
+                Err(e) => RuntimeStatus { ready: false, detail: format!("ONNX Runtime at {} did not load ({e}); lucem needs ONNX Runtime 1.31 or newer: pip install -U onnxruntime", lib.display()), gpu: gpu_runtime() },
             },
     };
     if status.ready {
@@ -382,8 +382,8 @@ impl Sam2 {
         if !installed(s) {
             return Err(format!("{} is not installed (Settings → Models)", s.name));
         }
-        let enc = lumen_hub::read_verified(&path_of(s.files[0].0), s.files[0].2)?;
-        let dec = lumen_hub::read_verified(&path_of(s.files[1].0), s.files[1].2)?;
+        let enc = lucem_hub::read_verified(&path_of(s.files[0].0), s.files[0].2)?;
+        let dec = lucem_hub::read_verified(&path_of(s.files[1].0), s.files[1].2)?;
         Ok(Self { spec: s, encoder: session(&enc)?, decoder: session(&dec)?, last: None })
     }
 

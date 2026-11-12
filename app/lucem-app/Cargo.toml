@@ -1,0 +1,20 @@
+[package]
+name = "lucem-app"
+description = "Lucem desktop application (GPUI): the app core as a binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "lucem-app"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit.workspace = true
+kitchen-ui.workspace = true
+# `lucem-app --mcp-bridge <socket>`: the app's own program as an agent's MCP server
+kitchen-agent.workspace = true
+lucem-app-core.workspace = true

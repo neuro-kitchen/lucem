@@ -2,36 +2,36 @@
 resolver = "2"
 members = [
     # Image-processing library
-    "crates/lumen",
-    "crates/lumen-core",
-    "crates/lumen-io",
-    "crates/lumen-ops",
-    "crates/lumen-ml",
+    "crates/lucem",
+    "crates/lucem-core",
+    "crates/lucem-io",
+    "crates/lucem-ops",
+    "crates/lucem-ml",
     # Histology workflows (stains, tissue, cells, classifiers, densities, export)
-    "crates/lumen-hist",
+    "crates/lucem-hist",
     # Verified downloads of published artifacts (model weights); all network access of the models
-    "hub/lumen-hub",
+    "hub/lucem-hub",
     # Models, one crate per upstream family, each under its upstream's licence (as dsp-kitchen's
     # sorters); the app never links them: plugins/ml programs run them
     "models/sam",
     "models/stardist",
     # Pipeline engine
-    "engine/lumen-pipeline",
+    "engine/lucem-pipeline",
     # Serving
-    "serve/lumen-view",
-    "serve/lumen-stream",
+    "serve/lucem-view",
+    "serve/lucem-stream",
     # Front ends
-    "app/lumen-cli",
-    # Tools for agents (MCP): what lumen-cli serves as `lumen mcp`, and later the app
-    "app/lumen-mcp",
-    "app/lumen-app-core",
-    "app/lumen-app",
+    "app/lucem-cli",
+    # Tools for agents (MCP): what lucem-cli serves as `lucem mcp`, and later the app
+    "app/lucem-mcp",
+    "app/lucem-app-core",
+    "app/lucem-app",
     # Plugins: ml/ programs the app and the command line run (one per model family, never
-    # linked, so ONNX Runtime and model licences stay out of lumen itself)
-    "plugins/ml/lumen-ml-sam",
-    "plugins/ml/lumen-ml-stardist",
+    # linked, so ONNX Runtime and model licences stay out of lucem itself)
+    "plugins/ml/lucem-ml-sam",
+    "plugins/ml/lucem-ml-stardist",
     # Bindings
-    "bindings/python/lumen-py",
+    "bindings/python/lucem-py",
 ]
 
 [workspace.package]
@@ -43,16 +43,16 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Workspace crates
-lumen-core = { path = "crates/lumen-core", version = "0.1.0", default-features = false }
-lumen-io = { path = "crates/lumen-io", version = "0.1.0" }
-lumen-ops = { path = "crates/lumen-ops", version = "0.1.0", default-features = false }
-lumen-ml = { path = "crates/lumen-ml", version = "0.1.0" }
-lumen-hist = { path = "crates/lumen-hist", version = "0.1.0", default-features = false }
-lumen-pipeline = { path = "engine/lumen-pipeline", version = "0.1.0" }
-lumen-view = { path = "serve/lumen-view", version = "0.1.0" }
-lumen-stream = { path = "serve/lumen-stream", version = "0.1.0" }
-lumen-mcp = { path = "app/lumen-mcp" }
-lumen-app-core = { path = "app/lumen-app-core", version = "0.1.0" }
+lucem-core = { path = "crates/lucem-core", version = "0.1.0", default-features = false }
+lucem-io = { path = "crates/lucem-io", version = "0.1.0" }
+lucem-ops = { path = "crates/lucem-ops", version = "0.1.0", default-features = false }
+lucem-ml = { path = "crates/lucem-ml", version = "0.1.0" }
+lucem-hist = { path = "crates/lucem-hist", version = "0.1.0", default-features = false }
+lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.1.0" }
+lucem-view = { path = "serve/lucem-view", version = "0.1.0" }
+lucem-stream = { path = "serve/lucem-stream", version = "0.1.0" }
+lucem-mcp = { path = "app/lucem-mcp" }
+lucem-app-core = { path = "app/lucem-app-core", version = "0.1.0" }
 
 # Latest stable versions on crates.io 2026-11-08 (cubecl 0.12 / burn 0.23 are pre-releases only);
 # add each to a crate with `<name>.workspace = true`.
@@ -103,14 +103,14 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 rustls-pki-types = "1.16.0"
 sha2 = "0.11.1"
 # Machine learning plugins: ONNX Runtime loaded at run time (no download at build, nothing in the
-# app); HTTP for verified weight downloads (lumen-hub)
+# app); HTTP for verified weight downloads (lucem-hub)
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std", "api-31", "cuda"] }
 ureq = "3.5.1"
 flate2 = "1.1.11"
 tar = "0.4.46"
-lumen-hub = { path = "hub/lumen-hub", version = "0.1.0" }
-lumen-model-sam = { path = "models/sam", version = "0.1.0" }
-lumen-model-stardist = { path = "models/stardist", version = "0.1.0", default-features = false }
+lucem-hub = { path = "hub/lucem-hub", version = "0.1.0" }
+lucem-model-sam = { path = "models/sam", version = "0.1.0" }
+lucem-model-stardist = { path = "models/stardist", version = "0.1.0", default-features = false }
 # Keras weights (HDF5) read without the C library, written as safetensors
 hdf5-reader = "0.12.1"
 # Parallel loops over host data (objects, chunks): work stealing
@@ -158,7 +158,7 @@ opt-level = 1
 opt-level = 3
 
 # wgpu-core's lock tracing (debug assertions only) aborts when a CubeCL device runner shuts down at
-# exit (lumen-core `shutdown_devices`).
+# exit (lucem-core `shutdown_devices`).
 [profile.dev.package.wgpu-core]
 debug-assertions = false
 

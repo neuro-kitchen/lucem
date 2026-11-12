@@ -7,7 +7,7 @@ sidebar:
 
 ## A model plugin
 
-A plugin is a program named `lumen-ml-<family>`. lumen asks it what it offers and sends it work
+A plugin is a program named `lucem-ml-<family>`. lucem asks it what it offers and sends it work
 as JSON lines on its standard input; images and masks travel as raw files in a scratch folder.
 
 | Command or request | Does |
@@ -18,7 +18,7 @@ as JSON lines on its standard input; images and masks travel as raw files in a s
 | `segment` | A mask from prompts (points, boxes) |
 | `instances` | Every object of a region, as a label image |
 
-The contract is the `lumen-ml` crate; `plugins/ml/lumen-ml-stardist` is a complete example.
+The contract is the `lucem-ml` crate; `plugins/ml/lucem-ml-stardist` is a complete example.
 
 ## A script step
 
@@ -27,6 +27,6 @@ it in your editor; when you save it, it runs again.
 
 ## An operation
 
-Operations live in `crates/lumen-ops` (the GPU kernels, in CubeCL) and are listed in
-`engine/lumen-pipeline` (`Op`), where each gets its typed inputs and output. A new one appears
-in the menus, the search and `lumen ops` from there.
+Operations live in `crates/lucem-ops` (the GPU kernels, in CubeCL) and are listed in
+`engine/lucem-pipeline` (`Op`), where each gets its typed inputs and output. A new one appears
+in the menus, the search and `lucem ops` from there.

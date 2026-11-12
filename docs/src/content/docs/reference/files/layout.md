@@ -10,7 +10,7 @@ analysis.
 
 ```json
 {
-  "lumen_layout": 1,
+  "lucem_layout": 1,
   "explore": { "views": ["Plane", "3D"] },
   "analyze": {
     "table": true,

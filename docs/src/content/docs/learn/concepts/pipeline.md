@@ -19,7 +19,7 @@ Nodes are:
 - **Sources**: a channel of an image, or the annotations of a class as a mask.
 - **Operations**: filters, thresholds, morphology, segmentation, measurement. Each has typed
   inputs and one typed output, so a wrong connection is refused before anything runs. See
-  [Operations](/lumen/reference/operations/).
+  [Operations](/lucem/reference/operations/).
 - **Views**: a result drawn over the image in Explore and listed in Analyze.
 - **Scripts**: a Python or Rust file as a step; edit it, save it, it runs again.
 - **Models**: a model plugin as a step (for example StarDist nuclei → labels), run from the
@@ -37,5 +37,5 @@ image file changes.
 The same graph runs without the app over a whole image, block by block:
 
 ```sh
-lumen run pipeline.json image.ome.zarr result.ome.zarr
+lucem run pipeline.json image.ome.zarr result.ome.zarr
 ```

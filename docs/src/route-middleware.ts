@@ -7,7 +7,7 @@ const hrefs = (entries: Entry[]): string[] =>
 
 /**
  * Previous / Next stay inside the page's topic. starlight-sidebar-topics does this itself, but
- * compares paths without the site's base (/lumen), so its check never matches here.
+ * compares paths without the site's base (/lucem), so its check never matches here.
  * Runs after the other middleware, when the sidebar is already the topic's.
  */
 export const onRequest = defineRouteMiddleware(async (context, next) => {

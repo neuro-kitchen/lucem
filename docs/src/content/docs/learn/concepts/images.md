@@ -1,12 +1,12 @@
 ---
 title: Images and pyramids
-description: "How lumen reads large images: levels, channels, planes and pixel size."
+description: "How lucem reads large images: levels, channels, planes and pixel size."
 sidebar:
   order: 1
 ---
 
 A whole-slide image can be 100,000 pixels across, far more than fits on a screen or in a GPU's
-memory. lumen reads images as **pyramids**: the full-resolution image (level 0) and smaller
+memory. lucem reads images as **pyramids**: the full-resolution image (level 0) and smaller
 copies of it (levels 1, 2, …, each a fraction of the one before), cut into tiles. The app draws
 the level that matches the zoom, and reads only the tiles on screen.
 
@@ -23,6 +23,6 @@ pixel size is known), whatever level was read to compute them.
 
 ## OME-Zarr
 
-OME-Zarr is lumen's home format: a folder of chunked arrays with the pyramid and its metadata. Label
+OME-Zarr is lucem's home format: a folder of chunked arrays with the pyramid and its metadata. Label
 images (cells, nuclei) are written inside it, under `labels/`, and open as images of their own.
-Make one from any image with `lumen run` or the app's export.
+Make one from any image with `lucem run` or the app's export.

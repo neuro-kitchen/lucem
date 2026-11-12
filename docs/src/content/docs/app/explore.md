@@ -50,6 +50,6 @@ The rail on the right opens one panel at a time: **Layers**, **Histology**, **Me
 - **Layers**: channels, results, shapes and detections. Select a channel to edit its colour
   (wheel) and levels (histogram, black and white points, gamma); its processing is listed under
   them. The Navigator sits at the bottom.
-- **Histology**: the recipes; see [Histology](/lumen/histology/).
+- **Histology**: the recipes; see [Histology](/lucem/histology/).
 - **Selection**: what is selected, with its measurements (the mean of each, for many).
 - **History**: every change, to step back to; then the session's analysis steps.
