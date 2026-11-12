@@ -292,3 +292,53 @@ fn the_activity_view_shows_what_was_done(cx: &mut TestAppContext) {
     assert!(acts.iter().any(|a| a.lane.as_ref() == "Focus"), "time in each workspace");
     assert!(cx.update(|cx| analyze.read(cx).activity_panel.is_some()));
 }
+
+/// What an agent does: looks (a snapshot with the shapes), draws a region and names its class,
+/// runs a histology step and gets what it found when its job ends, not `null` at once.
+#[gpui_kit::test]
+fn an_agent_can_see_point_and_get_results(cx: &mut TestAppContext) {
+    use serde_json::{json, Value};
+    let (window, store, app) = open(cx);
+    open_sample(cx, window, &store);
+    let registry = cx.update(|cx| app.read(cx).registry.clone());
+    let run = |cx: &mut TestAppContext, id: &str, args: Value| cx.update_window(window, |_, window, cx| registry.run(id, args, window, cx)).unwrap();
+
+    // A snapshot: a PNG, its size and the scale to image pixels
+    let snap = run(cx, "view.snapshot", json!({"max_side": 256})).expect("snapshot");
+    let png = snap["image"]["data"].as_str().expect("image data");
+    assert!(png.starts_with("iVBOR"), "a base64 PNG");
+    assert_eq!(snap["image"]["mime_type"], "image/png");
+    let side = snap["snapshot_px"][0].as_u64().unwrap().max(snap["snapshot_px"][1].as_u64().unwrap());
+    assert!(side <= 256, "fits the size asked: {side}");
+    assert!(snap["image_px_per_snapshot_px"].as_f64().unwrap() >= 1.0);
+
+    // Draw a region, then name its class (made when new)
+    let drawn = run(cx, "shapes.draw", json!({"kind": "rect", "points": [[10.0, 10.0], [120.0, 90.0]], "class": "Region"})).expect("drawn");
+    let id = drawn["id"].as_str().expect("its id").to_string();
+    assert!(!id.is_empty());
+    run(cx, "shapes.set_class", json!({"ids": [id.clone()], "class": "Tissue core"})).expect("class set");
+    frame(cx, window);
+    let listed = run(cx, "shapes.list", json!({"class": "Tissue core"})).expect("listed");
+    assert_eq!(listed["shapes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(listed["shapes"][0]["id"], json!(id));
+    assert!(cx.update(|cx| store.read(cx).doc.class("Tissue core").is_some()), "the class was made");
+    // Arguments that do not fit are refused with the reason
+    assert!(run(cx, "shapes.draw", json!({"kind": "polygon", "points": [[0.0, 0.0]]})).is_err());
+
+    // A histology step returns its job; when the job ends it has left what it found. The GPU
+    // starts on first use: until then a step says so (an agent runs it again)
+    let early = run(cx, "hist.find_tissue", Value::Null);
+    if let Err(why) = &early {
+        assert!(why.contains("device"), "it says why: {why}");
+    }
+    cx.update(|cx| store.update(cx, |s, cx| s.ensure_device(cx)));
+    wait_until(cx, window, "the device", |cx| cx.update(|cx| store.read(cx).device.is_some()));
+    let started = run(cx, "hist.find_tissue", Value::Null).expect("the step starts");
+    let job = kitchen_shell::jobs::job_of(&started).expect("it returns its job");
+    wait_until(cx, window, "the tissue job", |_| !kitchen_shell::jobs::is_running(job));
+    frame(cx, window);
+    let outcome = kitchen_shell::jobs::outcome(job).expect("an outcome");
+    let found = outcome.expect("the step succeeds");
+    assert!(found["summary"].is_string(), "a summary: {found}");
+    assert!(found["steps"].is_array());
+}
