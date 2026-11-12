@@ -401,7 +401,13 @@ pub fn register(registry: &Registry, c: &Ctx) {
         .read_only(),
     );
     // Analyze: find and measure (in the selected regions)
-    let hist = |id: &str, title: &str, icon: IconName, hint: &str, f: fn(&mut Store, &mut gpui_kit::Context<Store>)| CommandSpec::new(id.to_string(), title.to_string(), icon, st(f)).group("Analyze").hint(hint.to_string()).enabled(needs_image(s));
+    // A histology step runs as a job: the command returns it (`{"job": id}`), and whoever waits
+    // on it (an agent through the MCP host) gets what it found when it ends
+    let job = |f: fn(&mut Store, &mut gpui_kit::Context<Store>)| -> kitchen_shell::command::RunFn {
+        let store = s.clone();
+        Rc::new(move |_: Value, _: &mut Window, cx: &mut App| job_result(&store, f, cx))
+    };
+    let hist = |id: &str, title: &str, icon: IconName, hint: &str, f: fn(&mut Store, &mut gpui_kit::Context<Store>)| CommandSpec::raw(id.to_string(), title.to_string(), icon, None, job(f)).group("Analyze").hint(hint.to_string()).enabled(needs_image(s));
     let (b1, a1) = (s.clone(), s.clone());
     list.extend([
         hist("hist.find_tissue", "Find tissue", IconName::ScanSearch, "Regions of class Tissue", |s, cx| s.hist_detect_tissue(cx)),
@@ -424,7 +430,7 @@ pub fn register(registry: &Registry, c: &Ctx) {
         .hint("The threshold (built in) or a nucleus model"),
     ]);
     // Classify
-    let classify = |id: &str, title: &str, icon: IconName, hint: &str, f: fn(&mut Store, &mut gpui_kit::Context<Store>)| CommandSpec::new(id.to_string(), title.to_string(), icon, st(f)).group("Classify").hint(hint.to_string()).enabled(needs_image(s));
+    let classify = |id: &str, title: &str, icon: IconName, hint: &str, f: fn(&mut Store, &mut gpui_kit::Context<Store>)| CommandSpec::raw(id.to_string(), title.to_string(), icon, None, job(f)).group("Classify").hint(hint.to_string()).enabled(needs_image(s));
     list.extend([
         classify("hist.train", "Train from the classed shapes", IconName::BrainCircuit, "Random Trees on cells and tiles", |s, cx| s.hist_train_classifier(cx)),
         classify("hist.intensity", "Intensity classes (1+ / 2+ / 3+)", IconName::Gauge, "Cells by one measurement", |s, cx| s.hist_apply_intensity(cx)),
@@ -444,6 +450,48 @@ pub fn register(registry: &Registry, c: &Ctx) {
         .group("Automate")
         .hint("Python or Rust over the table"),
     ]);
+    // What an agent needs to see and point: a snapshot, the shapes, drawing and naming them
+    let (n1, n2, n3, n4, n5, n6) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+    list.extend([
+        CommandSpec::with_args::<SnapshotArgs>("view.snapshot", "Snapshot of the image", IconName::Camera, move |a, _, cx| snapshot(n1.read(cx), a.max_side.unwrap_or(1024).clamp(64, 2048)))
+            .group("View")
+            .hint("The shown image as a picture (its channels as displayed, the shapes outlined), with every shape's id, class and box in image pixels")
+            .enabled(needs_image(s))
+            .read_only(),
+        CommandSpec::with_args::<ListArgs>("shapes.list", "List the shapes", IconName::Shapes, move |a, _, cx| Ok(shapes_of(n2.read(cx), a.class.as_deref())))
+            .group("Shapes")
+            .hint("The shapes of the shown image: id, class, kind, box and area in image pixels (and µm)")
+            .enabled(needs_image(s))
+            .read_only(),
+        CommandSpec::with_args::<DrawArgs>("shapes.draw", "Draw a shape", IconName::Shapes, move |a, _, cx| n3.update(cx, |s, cx| draw_shape(s, a, cx)))
+            .group("Shapes")
+            .hint("A rectangle or ellipse (two corners), a polygon (three points or more) or a point, in image pixels, of a class (made when new)")
+            .enabled(needs_image(s)),
+        CommandSpec::with_args::<IdsClassArgs>("shapes.set_class", "Set the shapes' class", IconName::Tag, move |a, _, cx| {
+            n4.update(cx, |s, cx| {
+                ensure_class(s, &a.class, cx);
+                s.execute(Command::SetAnnotationsClass { ids: a.ids.clone(), class: a.class.clone() }, cx).map_err(|e| e.to_string())?;
+                Ok(json!({ "ids": a.ids, "class": a.class }))
+            })
+        })
+        .group("Shapes")
+        .hint("Moves shapes (by id) to a class, made when new: \"call that region tissue\""),
+        CommandSpec::with_args::<IdsArgs>("shapes.delete", "Delete shapes", IconName::Trash, move |a, _, cx| {
+            n5.update(cx, |s, cx| s.execute(Command::RemoveAnnotations { ids: a.ids.clone() }, cx).map(|_| json!({ "deleted": a.ids })).map_err(|e| e.to_string()))
+        })
+        .group("Shapes")
+        .hint("Removes shapes by id"),
+        CommandSpec::with_args::<ClassArgs>("classes.add", "Add a class", IconName::Plus, move |a, _, cx| {
+            n6.update(cx, |s, cx| {
+                let color = a.color.unwrap_or_else(|| crate::data::hist::hashed_color(&a.name));
+                s.execute(Command::SetClass { class: crate::domain::annotation::ClassDoc { name: a.name.clone(), color, visible: true, opacity: 1.0 } }, cx).map_err(|e| e.to_string())?;
+                Ok(json!({ "class": a.name, "color": color }))
+            })
+        })
+        .group("Shapes")
+        .hint("A shape class (or recolours one with that name)"),
+    ]);
+
     // Help, Settings sections, where lumen runs
     let (h, m1) = (c.toggle_help.clone(), c.clone());
     list.extend([
@@ -462,6 +510,219 @@ pub fn register(registry: &Registry, c: &Ctx) {
     ]);
     registry.extend(list);
     providers(registry, s);
+}
+
+/// Runs a histology step and returns its job (`{"job": id}`), or why it did not start.
+fn job_result(store: &Entity<Store>, f: fn(&mut Store, &mut gpui_kit::Context<Store>), cx: &mut App) -> Result<Value, String> {
+    store.update(cx, |s, cx| {
+        s.hist.started = None;
+        s.hist.outcome = None;
+        f(s, cx);
+        match (s.hist.started.take(), &s.hist.outcome) {
+            (Some(id), _) => Ok(kitchen_shell::jobs::job_reply(id)),
+            (None, Some((false, why))) => Err(why.clone()),
+            (None, Some((true, said))) => Ok(json!({ "summary": said })),
+            (None, None) => Ok(json!({ "status": s.status })),
+        }
+    })
+}
+
+/// A snapshot's size.
+#[derive(Deserialize, JsonSchema)]
+struct SnapshotArgs {
+    /// Its longest side in pixels (default 1024).
+    #[serde(default)]
+    max_side: Option<usize>,
+}
+
+/// Which shapes.
+#[derive(Deserialize, JsonSchema)]
+struct ListArgs {
+    /// Only this class.
+    #[serde(default)]
+    class: Option<String>,
+}
+
+/// A shape to draw.
+#[derive(Deserialize, JsonSchema)]
+struct DrawArgs {
+    /// "rect", "ellipse" (two corners of its box), "polygon" (3 points or more) or "point".
+    kind: String,
+    /// Points in image pixels (level 0), `[x, y]`.
+    points: Vec<[f64; 2]>,
+    /// Its class (made when new; default "Region").
+    #[serde(default)]
+    class: Option<String>,
+}
+
+/// Shapes and a class.
+#[derive(Deserialize, JsonSchema)]
+struct IdsClassArgs {
+    ids: Vec<String>,
+    class: String,
+}
+
+/// Shapes by id.
+#[derive(Deserialize, JsonSchema)]
+struct IdsArgs {
+    ids: Vec<String>,
+}
+
+/// A class.
+#[derive(Deserialize, JsonSchema)]
+struct ClassArgs {
+    name: String,
+    /// `[r, g, b]` (default: from the name).
+    #[serde(default)]
+    color: Option<[u8; 3]>,
+}
+
+/// Makes the class `name` when there is none.
+fn ensure_class(s: &mut Store, name: &str, cx: &mut gpui_kit::Context<Store>) {
+    if s.doc.class(name).is_none() {
+        let class = crate::domain::annotation::ClassDoc { name: name.to_string(), color: crate::data::hist::hashed_color(name), visible: true, opacity: 1.0 };
+        let _ = s.execute(Command::SetClass { class }, cx);
+    }
+}
+
+/// Draws a shape of the shown image and returns its id.
+fn draw_shape(s: &mut Store, a: DrawArgs, cx: &mut gpui_kit::Context<Store>) -> Result<Value, String> {
+    use crate::domain::annotation::{Annotation, Shape};
+    let image = s.doc.active_image.clone().ok_or("Open an image first")?;
+    let p = &a.points;
+    let corners = || -> Result<(f64, f64, f64, f64), String> {
+        if p.len() < 2 {
+            return Err("two corners: [[x0, y0], [x1, y1]]".into());
+        }
+        Ok((p[0][0].min(p[1][0]), p[0][1].min(p[1][1]), p[0][0].max(p[1][0]), p[0][1].max(p[1][1])))
+    };
+    let shape = match a.kind.to_ascii_lowercase().as_str() {
+        "rect" | "rectangle" => {
+            let (x0, y0, x1, y1) = corners()?;
+            Shape::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+        }
+        "ellipse" => {
+            let (x0, y0, x1, y1) = corners()?;
+            Shape::Ellipse { cx: (x0 + x1) / 2.0, cy: (y0 + y1) / 2.0, rx: (x1 - x0) / 2.0, ry: (y1 - y0) / 2.0 }
+        }
+        "polygon" if p.len() >= 3 => Shape::Polygon { points: p.clone() },
+        "polygon" => return Err("a polygon needs three points or more".into()),
+        "point" if !p.is_empty() => Shape::Point { x: p[0][0], y: p[0][1] },
+        other => return Err(format!("unknown kind {other:?}: rect, ellipse, polygon or point")),
+    };
+    let class = a.class.unwrap_or_else(|| "Region".to_string());
+    ensure_class(s, &class, cx);
+    let before: std::collections::HashSet<String> = s.doc.annotations.iter().map(|a| a.id.clone()).collect();
+    s.execute(Command::AddAnnotation { annotation: Annotation { id: String::new(), image, shape, class: class.clone(), note: String::new(), z: None } }, cx).map_err(|e| e.to_string())?;
+    let id = s.doc.annotations.iter().find(|a| !before.contains(&a.id)).map(|a| a.id.clone()).unwrap_or_default();
+    Ok(json!({ "id": id, "class": class }))
+}
+
+/// The shapes of the shown image: id, class, kind, box (image pixels) and area (px², µm²).
+fn shapes_of(s: &Store, class: Option<&str>) -> Value {
+    let Some(image) = s.doc.active_image.clone() else { return json!([]) };
+    let um = s.pyramids.get(&image).and_then(|p| p.pixel_size_um);
+    let list: Vec<Value> = s
+        .doc
+        .annotations
+        .iter()
+        .filter(|a| a.image == image && class.is_none_or(|c| a.class == c))
+        .map(|a| {
+            let (x0, y0, x1, y1) = a.shape.bounds();
+            let outline = a.shape.outline();
+            let area = if a.shape.is_region() && outline.len() > 2 {
+                outline.iter().zip(outline.iter().cycle().skip(1)).map(|(p, q)| p[0] * q[1] - q[0] * p[1]).sum::<f64>().abs() / 2.0
+            } else {
+                0.0
+            };
+            let kind = serde_json::to_value(&a.shape).ok().and_then(|v| v.as_object().and_then(|m| m.keys().next().cloned())).unwrap_or_default();
+            json!({ "id": a.id, "class": a.class, "kind": kind, "bbox_px": [x0, y0, x1, y1], "area_px2": area, "area_um2": um.map(|u| area * u * u) })
+        })
+        .collect();
+    json!({ "image": image, "pixel_size_um": um, "shapes": list })
+}
+
+/// Base64 (standard alphabet, padded).
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { A[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { A[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// The shown image as a PNG at most `max_side` pixels on its longest side: a level of its pyramid
+/// that fits (one read of that level; nothing at full resolution), its channels as displayed, the
+/// shapes outlined in their class colours; with the shapes' ids, classes and boxes in image pixels
+/// and the scale between the two.
+fn snapshot(s: &Store, max_side: usize) -> Result<Value, String> {
+    use lumen_view::{composite_bgra, ChannelDisplay};
+    let image = s.doc.active_image.clone().ok_or("Open an image first")?;
+    let py = s.pyramids.get(&image).ok_or("The image is still opening")?;
+    let img = s.doc.image(&image).ok_or("no such image")?;
+    let level = (0..py.levels.len()).find(|&l| py.levels[l].width.max(py.levels[l].height) <= max_side).unwrap_or(py.coarsest());
+    let l = py.levels[level].clone();
+    let plane = l.depth / 2;
+    let mut planes = Vec::new();
+    for (ch, c) in img.channels.iter().enumerate().filter(|(_, c)| c.visible) {
+        let d = ChannelDisplay { visible: true, color: [c.color[0] as f32 / 255.0, c.color[1] as f32 / 255.0, c.color[2] as f32 / 255.0], min: c.min, max: c.max, gamma: c.gamma };
+        planes.push((py.read_region_at(level, ch, plane, 0, 0, l.width, l.height).map_err(|e| e.to_string())?, d));
+    }
+    let refs: Vec<(&[f32], ChannelDisplay)> = planes.iter().map(|(v, d)| (v.as_slice(), *d)).collect();
+    let (w, h) = (l.width, l.height);
+    let bgra = if refs.is_empty() { vec![0u8; w * h * 4] } else { composite_bgra(&refs, w * h) };
+    let mut rgb: Vec<u8> = bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]).collect();
+    // The shapes, outlined (level-0 pixels → this level)
+    let ds = l.downsample;
+    let mut put = |x: i64, y: i64, c: [u8; 3]| {
+        if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+            let i = (y as usize * w + x as usize) * 3;
+            rgb[i..i + 3].copy_from_slice(&c);
+        }
+    };
+    for a in s.doc.annotations.iter().filter(|a| a.image == image) {
+        let color = s.doc.class(&a.class).map(|c| c.color).unwrap_or([255, 255, 0]);
+        let pts: Vec<(f64, f64)> = a.shape.outline().iter().map(|p| (p[0] / ds, p[1] / ds)).collect();
+        let closed = a.shape.is_region();
+        let segments = if closed { pts.len() } else { pts.len().saturating_sub(1) };
+        for k in 0..segments {
+            let (p, q) = (pts[k], pts[(k + 1) % pts.len()]);
+            let steps = ((q.0 - p.0).abs().max((q.1 - p.1).abs()).ceil() as usize).max(1);
+            for t in 0..=steps {
+                let f = t as f64 / steps as f64;
+                let (x, y) = ((p.0 + (q.0 - p.0) * f).round() as i64, (p.1 + (q.1 - p.1) * f).round() as i64);
+                // Two pixels wide, to read at this size
+                put(x, y, color);
+                put(x + 1, y, color);
+                put(x, y + 1, color);
+            }
+        }
+        if pts.len() == 1 {
+            let (x, y) = (pts[0].0.round() as i64, pts[0].1.round() as i64);
+            for dy in -3..=3 {
+                for dx in -3..=3 {
+                    put(x + dx, y + dy, color);
+                }
+            }
+        }
+    }
+    let mut png = Vec::new();
+    image::ImageEncoder::write_image(image::codecs::png::PngEncoder::new(&mut png), &rgb, w as u32, h as u32, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
+    let full = &py.levels[0];
+    let mut out = shapes_of(s, None);
+    if let Some(m) = out.as_object_mut() {
+        m.insert("image".into(), json!({ "data": base64(&png), "mime_type": "image/png" }));
+        m.insert("snapshot_px".into(), json!([w, h]));
+        m.insert("image_px".into(), json!([full.width, full.height]));
+        m.insert("image_px_per_snapshot_px".into(), json!(ds));
+        m.insert("note".into(), json!("Shapes are outlined in their class colours. Positions (bbox_px, points for shapes_draw) are in image pixels: a snapshot pixel (x, y) is image pixel (x · image_px_per_snapshot_px, y · image_px_per_snapshot_px)."));
+    }
+    Ok(out)
 }
 
 /// The menu entries that follow what the project holds.
