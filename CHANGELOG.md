@@ -7,6 +7,22 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
+### lumen is now lucem (2026-11-13)
+
+- **The name.** lumen was taken on the registries; it is now **lucem** (Latin for light): the
+  crates (`lucem-core`, `lucem-io`, `lucem-ops`, `lucem-pipeline`, `lucem-hist`, `lucem-ml`,
+  `lucem-hub`, `lucem-view`, `lucem-stream`, the `lucem` umbrella), the programs (`lucem`,
+  `lucem-app`, the `lucem-ml-*` plugins), the Python package, the app's title, the
+  `LUCEM_*` variables, `project.lucem.json`, `<image>.lucem.zarr`, the MCP server (`lucem_app`).
+- **What was kept under the old name keeps working:** `LUMEN_*` variables are read when the
+  `LUCEM_*` one is not set; the `lumen` folders under the config, data and cache folders move to
+  `lucem` once, on first start; `project.lumen.json` opens (and is saved as `project.lucem.json`);
+  sessions and projects with `lumen_session` / `lumen_project` read; `# lumen:` script headers
+  read; plugin programs installed as `lumen-ml-*` are found. The serving protocol is
+  `lucem-stream/1` (a server and its clients update together; nothing was released before).
+- kitchen comes from its released v0.0.4 tag (it was the `version/v0.0.4` branch).
+- Entries below this one name lumen as it was then.
+
 ### Tools an agent can use (2026-11-13)
 
 - **Steps answer with what they found.** A histology step run by an agent (tissue, cells,
