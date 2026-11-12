@@ -345,6 +345,9 @@ pub struct AnalyzeView {
     pub(crate) dock: Entity<DockArea>,
     pub(crate) table_panel: Option<Entity<AnalyzePanel>>,
     pub(crate) plot_panels: Vec<(usize, Entity<AnalyzePanel>)>,
+    /// The activity timeline's panel, when shown, and the timeline (made when first shown).
+    pub(crate) activity_panel: Option<Entity<AnalyzePanel>>,
+    pub(crate) activity: Option<Entity<kitchen_ui::timeline::Timeline>>,
     /// The hierarchy (left) and the side pane (right) shown.
     show_hierarchy: bool,
     show_side: bool,
@@ -387,6 +390,8 @@ impl AnalyzeView {
         Self {
             dock,
             table_panel: Some(table_panel),
+            activity_panel: None,
+            activity: None,
             plot_panels: Vec::new(),
             show_hierarchy: true,
             show_side: true,
@@ -994,7 +999,31 @@ impl AnalyzeView {
         let table = ViewOption::new("Table", IconName::Table2, "The rows, filtered, searched and sorted");
         let mut out = vec![if self.table_panel.is_some() { table.unavailable("Already shown") } else { table }];
         out.extend(Plot::ALL.iter().map(|k| ViewOption::new(k.title(), k.icon(), k.hint())));
+        let activity = ViewOption::new("Activity", IconName::ChartGantt, "What you and the agent did, as a timeline of episodes");
+        out.push(if self.activity_panel.is_some() { activity.unavailable("Already shown") } else { activity });
         out
+    }
+
+    /// Shows the activity timeline beside the other views.
+    pub(crate) fn add_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.activity_panel.is_some() {
+            return;
+        }
+        if self.activity.is_none() {
+            self.activity = Some(kitchen_shell::activity::view("What you and the agent did", cx));
+        }
+        let me = cx.weak_entity();
+        let panel = cx.new(|cx| AnalyzePanel::new(me, PanelKind::Activity, cx));
+        let next_to = self.plot_panels.last().map(|(_, p)| (p.entity_id(), Placement::Bottom)).or_else(|| self.table_panel.as_ref().map(|p| (p.entity_id(), Placement::Bottom)));
+        self.activity_panel = Some(panel.clone());
+        self.place(panel, next_to, window, cx);
+    }
+
+    fn activity_view(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        if self.activity.is_none() {
+            self.activity = Some(kitchen_shell::activity::view("What you and the agent did", cx));
+        }
+        self.activity.clone().map(|t| t.into_any_element()).unwrap_or_else(|| div().into_any_element())
     }
 
     /// The shared "Add view or container" dialog.
@@ -1006,7 +1035,8 @@ impl AnalyzeView {
             match *e {
                 DialogEvent::Arrange(how) => this.arrange(how, window, cx),
                 DialogEvent::Add(0) => this.add_table(window, cx),
-                DialogEvent::Add(i) => this.add_plot(Plot::ALL[i - 1], window, cx),
+                DialogEvent::Add(i) if i <= Plot::ALL.len() => this.add_plot(Plot::ALL[i - 1], window, cx),
+                DialogEvent::Add(_) => this.add_activity(window, cx),
                 DialogEvent::Close => {}
             }
             cx.notify();
@@ -1030,6 +1060,7 @@ impl AnalyzeView {
     pub(crate) fn removed(&mut self, kind: PanelKind, cx: &mut Context<Self>) {
         match kind {
             PanelKind::Table => self.table_panel = None,
+            PanelKind::Activity => self.activity_panel = None,
             PanelKind::Plot(id) => {
                 self.plots.retain(|p| p.id != id);
                 self.plot_panels.retain(|(i, _)| *i != id);
@@ -1109,6 +1140,10 @@ impl AnalyzeView {
             })
             .group("Analyze")
             .hint("A histogram, a scatter plot, a box plot or counts"),
+            CommandSpec::new("analyze.add_activity", "Activity timeline", IconName::ChartGantt, with(|a, window, cx| a.add_activity(window, cx)))
+                .group("Analyze")
+                .hint("What you and the agent did, as episodes over time, with where each thing came from")
+                .read_only(),
             CommandSpec::new("analyze.hierarchy", "Hierarchy", IconName::PanelLeft, with(|a, _, cx| {
                 a.show_hierarchy = !a.show_hierarchy;
                 cx.notify();
@@ -1156,7 +1191,7 @@ impl AnalyzeView {
             MenuSpec::new("Table", vec![MenuItem::label("Show"), MenuItem::provided("analyze.tables"), MenuItem::Separator, c("analyze.export_csv"), c("analyze.code")]),
             MenuSpec::new(
                 "View",
-                vec![c("analyze.add_dialog"), MenuItem::Separator, MenuItem::label("Add a view"), c("analyze.add_table"), MenuItem::provided("analyze.plots"), MenuItem::Separator, c("analyze.hierarchy"), c("analyze.side")],
+                vec![c("analyze.add_dialog"), MenuItem::Separator, MenuItem::label("Add a view"), c("analyze.add_table"), MenuItem::provided("analyze.plots"), c("analyze.add_activity"), MenuItem::Separator, c("analyze.hierarchy"), c("analyze.side")],
             ),
         ]
     }
@@ -1798,6 +1833,8 @@ mod tests {
 pub enum PanelKind {
     Table,
     Plot(usize),
+    /// The activity timeline: what you and the agent did (kitchen-ui's timeline).
+    Activity,
 }
 
 /// A view of Analyze's dock (the table, or one plot): its content is drawn by the Analyze view,
@@ -1826,6 +1863,7 @@ impl Render for AnalyzePanel {
         let body = a.update(cx, |a, cx| match kind {
             PanelKind::Table => a.table_view(window, cx),
             PanelKind::Plot(id) => a.plot_view(id, cx),
+            PanelKind::Activity => a.activity_view(cx),
         });
         div().id("analyze-panel").track_focus(&self.focus).size_full().bg(color::panel()).child(body).into_any_element()
     }
@@ -1847,7 +1885,7 @@ impl BasePanel for AnalyzePanel {
     /// Plots close; the table only while a plot is left (a view always stays).
     fn closable(&self, cx: &gpui_kit::App) -> bool {
         match self.kind {
-            PanelKind::Plot(_) => true,
+            PanelKind::Plot(_) | PanelKind::Activity => true,
             PanelKind::Table => self.analyze.upgrade().is_some_and(|a| !a.read(cx).plot_panels.is_empty()),
         }
     }
@@ -1878,6 +1916,7 @@ impl Panel for AnalyzePanel {
         let _ = cx;
         Some(match self.kind {
             PanelKind::Table => container::tab_buttons("analyze-table", &[ViewOption::new("Table", IconName::Table2, "The rows, filtered, searched and sorted")], Some(0), |_, _, _| {}, add),
+            PanelKind::Activity => container::tab_buttons("analyze-activity", &[ViewOption::new("Activity", IconName::ChartGantt, "What you and the agent did")], Some(0), |_, _, _| {}, add),
             PanelKind::Plot(id) => {
                 let current = a.upgrade().and_then(|a| a.read(cx).plots.iter().find(|p| p.id == id).map(|p| p.kind)).and_then(|k| Plot::ALL.iter().position(|x| *x == k));
                 let options: Vec<ViewOption> = Plot::ALL.iter().map(|k| ViewOption::new(k.title(), k.icon(), k.hint())).collect();
@@ -1891,6 +1930,7 @@ impl Panel for AnalyzePanel {
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let text = match (self.kind, self.analyze.upgrade()) {
             (PanelKind::Table, _) => "Table".to_string(),
+            (PanelKind::Activity, _) => "Activity".to_string(),
             (PanelKind::Plot(id), Some(a)) => a.read(cx).plot_title(id),
             _ => String::new(),
         };
