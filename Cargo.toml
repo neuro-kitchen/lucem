@@ -40,6 +40,7 @@ edition = "2024"
 rust-version = "1.95"   # burn 0.22 minimum
 authors = ["jesusdpa1"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/neuro-kitchen/lucem"
 
 [workspace.dependencies]
 # Workspace crates
