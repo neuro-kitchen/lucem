@@ -7,6 +7,20 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
+### Tools an agent can use (2026-11-13)
+
+- **Steps answer with what they found.** A histology step run by an agent (tissue, cells,
+  superpixels, density, classifiers) returns its job, and the agent gets the step's outcome when
+  the job ends (the summary, each step's numbers, the ids of the shapes it made) instead of `null`
+  at once. A step that cannot start says why (no image, the GPU still starting, no region
+  selected). This was why "Find tissue" seemed to find nothing: the device was still starting.
+- **`view.snapshot`:** the shown image as a picture (its channels as displayed, the shapes outlined
+  in their class colours, at most 1024 px from a level of the pyramid that fits: one read, nothing
+  at full resolution), with every shape's id, class and box in image pixels and the scale.
+- **Shapes by id:** `shapes.list`, `shapes.draw` (rectangle, ellipse, polygon, point in image
+  pixels), `shapes.set_class` ("call that region tissue"), `shapes.delete`, `classes.add`; each
+  returns the ids it touched.
+
 ### Agents, the code editor and environments (2026-11-12)
 
 - **Agents workspace:** the chat. It runs the agent you already have (Antigravity `agy acp`, or
