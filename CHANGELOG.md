@@ -15,6 +15,9 @@ No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
   anything that changes the project asks first (Allow / Deny), and every call shows in the
   conversation and on the Activity timeline. Agent menu: start, stop, a new session, which agent.
   Settings › Agents: what an agent may run without asking. Sessions are saved.
+  The agent reaches lumen as `lumen_app` (not `lumen`, the headless server it may already have),
+  is told before each session's first prompt that it works inside the open app through those
+  tools and what is open, and sees each command under a tool name it accepts (`hist_find_cells`).
 - **The code editor in the app:** a script node's code opens in the Pipeline's Inspector
   (highlighted, line numbers); Save and run writes the file and runs the node again; the errors of
   its last run are marked on their lines (Python tracebacks, Rust compiler messages); Revert puts

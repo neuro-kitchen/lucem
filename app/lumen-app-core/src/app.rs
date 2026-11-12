@@ -160,6 +160,25 @@ pub struct LumenApp {
 /// What an agent is told about lumen when it connects.
 const AGENT_INSTRUCTIONS: &str = "lumen is a GPU workstation for histology and microscopy. Its tools are the app's own commands, run in the open window as the person would: open images, find tissue and cells, classify, add pipeline steps (process.op.*), show views, export. Commands that change something wait for the person to allow them. Every call is recorded in the session.";
 
+/// The name the app's tools have in the agent (`mcp_lumen_app_hist_find_cells` in Antigravity).
+const AGENT_SERVER: &str = "lumen_app";
+
+/// What the agent is told before each session's first prompt: it works inside the running app,
+/// through the `lumen_app` tools, and what the app holds now.
+fn agent_preamble(store: &Entity<Store>, cx: &App) -> String {
+    let s = store.read(cx);
+    let images: Vec<String> = s.doc.images.iter().map(|i| {
+        let shown = if s.doc.active_image.as_deref() == Some(i.id.as_str()) { ", shown" } else { "" };
+        format!("{} (id {}, {} channels{shown})", i.name, i.id, i.channels.len())
+    }).collect();
+    let project = if s.project_file.is_some() { s.doc.name.clone() } else { format!("{} (not saved)", s.doc.name) };
+    format!(
+        "[Context from lumen] You are working inside lumen, a running GPU app for histology and microscopy, beside the person. Act through the `{AGENT_SERVER}` tools: each one is a command of the open app and runs in its window as if the person chose it (open images, find tissue and cells, classify, add pipeline steps with process_op_*, change views, export). Commands that change something wait for the person to allow them. Do not read or write files to find out about lumen; the tools are the way in. Project: {project}. Images: {}. Workspace shown: {}.",
+        if images.is_empty() { "none open".to_string() } else { images.join("; ") },
+        s.workspace.title()
+    )
+}
+
 /// The agent the chat starts: the one chosen in Settings, else the first installed.
 fn chosen_agent(store: &Entity<Store>, cx: &App) -> AgentSpec {
     let known = kitchen_agent::known_agents();
@@ -181,10 +200,15 @@ fn start_agent(agents: &Entity<AgentWorkspace>, store: &Entity<Store>, socket: &
         return;
     }
     let Ok(exe) = std::env::current_exe() else { return };
-    let mcp = vec![McpStdio { name: "lumen".into(), command: exe, args: vec!["--mcp-bridge".into(), socket.display().to_string()] }];
+    // Not "lumen": that name is often the headless `lumen mcp` already registered in the agent
+    let mcp = vec![McpStdio { name: AGENT_SERVER.into(), command: exe, args: vec!["--mcp-bridge".into(), socket.display().to_string()] }];
     let cwd = store.read(cx).project_file.as_ref().and_then(|f| f.parent().map(|p| p.to_path_buf())).or_else(|| std::env::var_os("HOME").map(Into::into)).unwrap_or_else(std::env::temp_dir);
     let client = AcpClient::start(spec, cwd, mcp);
-    agents.update(cx, |w, cx| w.connect(client, cx));
+    let preamble = agent_preamble(store, cx);
+    agents.update(cx, |w, cx| {
+        w.set_preamble(Some(preamble));
+        w.connect(client, cx)
+    });
 }
 
 /// The Agents workspace's commands: start, stop, a new session, which agent.
@@ -366,6 +390,9 @@ impl LumenApp {
             }),
             cx.subscribe(&store, |this, _, e: &AppEvent, cx| {
                 this.sync_shell(e, cx);
+                // The agent's note follows what is open
+                let preamble = agent_preamble(&this.store, cx);
+                this.agents.update(cx, |w, _| w.set_preamble(Some(preamble)));
                 cx.notify();
             }),
             // A theme that follows the system follows it while running
