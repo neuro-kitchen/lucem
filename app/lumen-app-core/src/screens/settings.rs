@@ -36,7 +36,7 @@ impl Section {
             Section::Views => "Views",
             Section::Compute => "Compute",
             Section::Models => "Models",
-            Section::Tools => "Tools",
+            Section::Tools => "Environment",
             Section::Performance => "Performance",
             Section::About => "About",
         }
@@ -63,12 +63,15 @@ pub struct SettingsView {
     /// Each tool's `--version` (Tools), and the paths it was read for.
     versions: Vec<(Tool, Result<String, String>)>,
     versions_for: Option<ToolPaths>,
+    /// What the last environment action said (sync, pin), and whether one runs.
+    env_note: Option<Result<String, String>>,
+    env_busy: bool,
     _subs: Vec<Subscription>,
 }
 
 impl SettingsView {
     pub fn new(store: Entity<Store>) -> Self {
-        Self { store, versions: Vec::new(), versions_for: None, _subs: Vec::new() }
+        Self { store, versions: Vec::new(), versions_for: None, env_note: None, env_busy: false, _subs: Vec::new() }
     }
 
     /// The settings of `section`.
@@ -301,7 +304,7 @@ impl SettingsView {
             })
             .detach();
         }
-        let mut col = v_flex().child(div().pb(px(theme::SM)).text_xs().text_color(color::text_muted()).child("lumen uses these programs as they are on this computer. Each is looked for at the path set here, then at its variable (LUMEN_PYTHON…), then on the PATH."));
+        let mut col = v_flex().child(self.environment(cx)).child(div().pt(px(theme::LG)).pb(px(theme::SM)).text_xs().text_color(color::text_muted()).child("Programs. lumen uses them as they are on this computer: each is looked for at the path set here, then at its variable (LUMEN_PYTHON…), then on the PATH. A Python set here is used instead of the environment."));
         for tool in Tool::ALL {
             let found = tools::find(tool);
             let source = match &found {
@@ -341,6 +344,75 @@ impl SettingsView {
             col = col.child(Self::row(tool.title(), tool.what(), "", control));
         }
         col.into_any_element()
+    }
+
+    /// The project's environments: the Python its scripts run in (the project's own, the active
+    /// one or lumen's default), and the Rust toolchain pinned for its Rust scripts.
+    fn environment(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let dir = tools::scripts_dir();
+        let py = tools::python_env();
+        let (py_line, py_detail) = match &py {
+            Some(env) => (
+                format!("{} · Python {}", env.source.title(), env.version().unwrap_or_else(|| "?".into())),
+                format!("{} · {} packages", crate::domain::paths::short_path(&env.root), env.packages().len()),
+            ),
+            None => ("None yet".to_string(), "Scripts run with the Python found (Programs below). Make one so every computer runs them the same.".to_string()),
+        };
+        let has_project_env = py.as_ref().is_some_and(|e| e.source == kitchen_shell::env::PythonSource::Project);
+        let run = |label: &'static str, id: &'static str, primary: bool, f: fn() -> Result<String, String>, cx: &mut Context<Self>| {
+            let b = Button::new(id).small().label(label).disabled(self.env_busy);
+            let b = if primary { b.primary() } else { b.outline() };
+            b.on_click(cx.listener(move |this, _, _, cx| {
+                this.env_busy = true;
+                this.env_note = None;
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    let r = cx.background_executor().spawn(async move { f() }).await;
+                    this.update(cx, |s, cx| {
+                        s.env_busy = false;
+                        s.env_note = Some(r);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }))
+        };
+        let python = v_flex()
+            .items_end()
+            .gap(px(theme::XS))
+            .child(div().text_xs().text_color(color::text()).child(py_line))
+            .child(div().text_xs().font_family("monospace").text_color(color::text_muted()).max_w(px(400.)).child(py_detail))
+            .child(
+                h_flex()
+                    .gap(px(theme::XS))
+                    .child(run(if has_project_env { "Sync the project's" } else { "Make the project's" }, "env-sync-project", !has_project_env, tools::sync_project_env, cx))
+                    .child(run("Sync lumen's default", "env-sync-default", false, tools::sync_default_env, cx)),
+            );
+        let pin = tools::rust_toolchain();
+        let rust = v_flex()
+            .items_end()
+            .gap(px(theme::XS))
+            .child(div().text_xs().text_color(color::text()).child(match &pin {
+                Some(v) => format!("Pinned: Rust {v}"),
+                None => "Not pinned: the default toolchain builds them".to_string(),
+            }))
+            .child(run(if pin.is_some() { "Pin the compiler found now" } else { "Pin the compiler found" }, "env-pin-rust", pin.is_none(), tools::pin_rust, cx));
+        let note = match &self.env_note {
+            _ if self.env_busy => Some(div().text_xs().text_color(color::text_muted()).child("Working…")),
+            Some(Ok(t)) => Some(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(t.lines().last().unwrap_or("Done").to_string())),
+            Some(Err(e)) => Some(div().text_xs().text_color(color::danger()).child(e.clone())),
+            None => None,
+        };
+        v_flex()
+            .child(div().pb(px(theme::SM)).text_xs().text_color(color::text_muted()).child(format!(
+                "The project's scripts folder ({}) holds its environments: pyproject.toml, uv.lock and .venv for Python, rust-toolchain.toml for Rust. The locks travel with the project, so its scripts run the same on another computer.",
+                crate::domain::paths::short_path(&dir)
+            )))
+            .child(Self::row("Python", "The environment scripts and table code run in. uv makes and syncs it from the lock.", "", python))
+            .child(Self::row("Rust", "The compiler the project's Rust scripts are built with (rust-toolchain.toml).", "", rust))
+            .children(note)
+            .into_any_element()
     }
 
     fn performance(&self, p: &Prefs) -> AnyElement {
