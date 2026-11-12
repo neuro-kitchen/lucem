@@ -1,0 +1,129 @@
+# Release on a version tag (v0.0.2, ...), as dsp-kitchen and kitchen do: check the tag against the workspace
+# version and package the publishable crates, then publish them to crates.io through trusted
+# publishing (no stored token). The publish job runs in the GitHub environment `crates-io`, which
+# only accepts `v*` tags and waits for a required reviewer's approval; crates.io only accepts
+# tokens from this workflow and environment. Then the GitHub release of the tag, with this
+# version's CHANGELOG.md section as its notes.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check version and package crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The workspace includes the GPUI app (not published); resolving and checking it needs these
+      - name: System libraries for GPUI
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev
+      - name: Tag matches the workspace version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "lucem-core") | .version')
+          test "v${version}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != workspace version ${version}"; exit 1; }
+      - name: CHANGELOG.md has this version's section
+        run: grep -q "^## \[${GITHUB_REF_NAME#v}\]" CHANGELOG.md || { echo "CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; exit 1; }
+      - name: Package and verify the publishable crates
+        run: cargo publish --dry-run --workspace
+      # Nothing is published with a known vulnerability, a yanked crate or a licence not allowed
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: check
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write # exchanged for a short-lived crates.io token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: System libraries for GPUI
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+      # Only crates with `publish = true` (the library crates; the app, CLI and MCP server wait for
+      # kitchen-agent on crates.io). Crates already on crates.io at this
+      # version are left out, so "Re-run failed jobs" finishes a partial publish. Every published
+      # crate needs a trusted publisher on crates.io (this repository, workflow release.yml,
+      # environment crates-io), or its upload is refused with 403. A crate new to crates.io cannot
+      # be created by trusted publishing: it is skipped here, published once by hand from the tag
+      # (`cargo publish -p <crate>`), then given its trusted publisher.
+      - name: Publish the crates not yet on crates.io
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "lucem-core") | .version')
+          skip=()
+          left=0
+          new=()
+          agent="lucem-release (github.com/neuro-kitchen/lucem)"
+          for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.publish != []) | .name'); do
+            if curl -sf -A "$agent" "https://crates.io/api/v1/crates/$crate/$version" > /dev/null; then
+              echo "$crate $version is already on crates.io: skipped"
+              skip+=(--exclude "$crate")
+            elif ! curl -sf -A "$agent" "https://crates.io/api/v1/crates/$crate" > /dev/null; then
+              echo "::warning::$crate is new to crates.io: publish it once by hand from this tag, then add its trusted publisher"
+              skip+=(--exclude "$crate")
+              new+=("$crate")
+            else
+              left=$((left + 1))
+            fi
+          done
+          if [ "$left" -eq 0 ]; then
+            echo "every crate is already published at $version (new, to publish by hand: ${new[*]:-none})"
+            exit 0
+          fi
+          cargo publish --workspace "${skip[@]}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  github-release:
+    name: GitHub release
+    needs: publish-crates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # CHANGELOG.md is the one source: this version's section ("## [0.0.2] - date") is the notes
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" 'index($0, "## [" v "]") == 1 { f = 1; next } /^## / { f = 0 } f' CHANGELOG.md > release-notes.md
+          test -s release-notes.md || { echo "CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; exit 1; }
+          cat >> release-notes.md <<'NOTES'
+
+          ## Install
+
+          The library crates from crates.io: `cargo add lucem` (core, io, ops, ml) and the others
+          (`lucem-hist`, `lucem-pipeline`, `lucem-view`, `lucem-hub`). The app and the `lucem`
+          command build from this tag: `cargo install --git https://github.com/neuro-kitchen/lucem --tag <this tag> lucem-cli`.
+          NOTES
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --verify-tag --notes-file release-notes.md
