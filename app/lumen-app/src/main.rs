@@ -8,6 +8,19 @@ use lumen_app_core::data::store::Store;
 use lumen_app_core::navigation::actions;
 
 fn main() {
+    // An agent's MCP server: the running app's commands, through its socket
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--mcp-bridge") {
+        let Some(socket) = args.get(2) else {
+            eprintln!("usage: lumen-app --mcp-bridge <socket>");
+            std::process::exit(2);
+        };
+        if let Err(e) = kitchen_agent::bridge::bridge_stdio(std::path::Path::new(socket)) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // `lumen-app <path>` opens an image, an OME-Zarr container or a project
     let open = std::env::args().nth(1).map(std::path::PathBuf::from);
     gpui_kit::application().with_assets(kitchen_ui::icons::AppAssets::new().all_icons()).run(move |cx| {

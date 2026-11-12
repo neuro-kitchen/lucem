@@ -148,7 +148,72 @@ pub fn program(tool: Tool) -> PathBuf {
 
 /// The command that runs a Python file: uv (with NumPy, and the chosen Python if one is set) when
 /// uv is found, else Python itself.
+/// The project's scripts folder (where its environments live), set when a project opens.
+static SCRIPTS: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Sets the project's scripts folder (`None`: no project; the user's scripts folder).
+pub fn set_scripts_dir(dir: Option<PathBuf>) {
+    *SCRIPTS.write().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
+/// The scripts folder of the project open, else the user's.
+pub fn scripts_dir() -> PathBuf {
+    SCRIPTS.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| crate::data::script::scripts_dir(None))
+}
+
+/// lumen's own Python environment, for projects that have none (`<config>/python/.venv`).
+pub fn default_env_dir() -> PathBuf {
+    crate::data::prefs::Prefs::dir().unwrap_or_else(std::env::temp_dir).join("python")
+}
+
+/// The Python environment scripts run in: the project's (`scripts/.venv`), else the one active
+/// (`$VIRTUAL_ENV`), else lumen's default; `None` when none was made.
+pub fn python_env() -> Option<kitchen_shell::env::PythonEnv> {
+    kitchen_shell::env::PythonEnv::find(Some(&scripts_dir()), &default_env_dir().join(".venv"))
+}
+
+/// Makes or syncs the project's Python environment with uv (`scripts/pyproject.toml`,
+/// `uv.lock`, `.venv`; NumPy, which script nodes need, in a new one).
+pub fn sync_project_env() -> Result<String, String> {
+    let dir = scripts_dir();
+    let name = dir.parent().and_then(|p| p.file_name()).map_or("lumen-scripts".to_string(), |n| format!("{}-scripts", n.to_string_lossy()));
+    kitchen_shell::env::sync_python(&dir, &name, &["numpy"])
+}
+
+/// Makes or syncs lumen's default Python environment (for projects without their own).
+pub fn sync_default_env() -> Result<String, String> {
+    kitchen_shell::env::sync_python(&default_env_dir(), "lumen-default", &["numpy"])
+}
+
+/// The Rust toolchain the project pins (`scripts/rust-toolchain.toml`).
+pub fn rust_toolchain() -> Option<String> {
+    kitchen_shell::env::rust_toolchain(&scripts_dir())
+}
+
+/// Pins the compiler found now in `scripts/rust-toolchain.toml` (rustup then builds the
+/// project's Rust scripts with it, on any computer).
+pub fn pin_rust() -> Result<String, String> {
+    let dir = scripts_dir();
+    let v = kitchen_shell::env::rustc_version().ok_or("rustc was not found")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("rust-toolchain.toml"), format!("# The compiler this project's Rust scripts are built with (rustup reads it).\n[toolchain]\nchannel = \"{v}\"\n")).map_err(|e| e.to_string())?;
+    Ok(v)
+}
+
+/// Where Rust builds run, so rustup uses the project's pin: the scripts folder when it pins one.
+pub fn rust_dir() -> Option<PathBuf> {
+    let d = scripts_dir();
+    d.join("rust-toolchain.toml").is_file().then_some(d)
+}
+
+/// How Python runs: the path set in Settings when there is one; else the project's environment
+/// (or the active or default one); else through uv with NumPy; else `python3` on the `PATH`.
 pub fn python_command() -> Command {
+    if Tool::Python.set_path(&PATHS.read().unwrap_or_else(|e| e.into_inner())).is_none()
+        && let Some(env) = python_env()
+    {
+        return env.command();
+    }
     match find(Tool::Uv) {
         Found::Missing => Command::new(program(Tool::Python)),
         uv => {

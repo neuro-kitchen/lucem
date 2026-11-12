@@ -18,6 +18,8 @@ gpui-kit.workspace = true
 kitchen-ui.workspace = true
 # The shared frame: command registry, menus, search, status bar, Settings, jobs
 kitchen-shell.workspace = true
+# The Agents workspace: the chat (an ACP agent) and lumen's commands served over MCP
+kitchen-agent.workspace = true
 sysinfo.workspace = true
 lumen-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
 lumen-io.workspace = true

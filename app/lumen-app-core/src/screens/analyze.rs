@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use kitchen_ui::widgets::{CodeLanguage, CodeView};
 use gpui_kit::base::dock::{DockArea, DockLayout, Panel as BasePanel, PanelEvent};
 use gpui_kit::base::Placement;
 use gpui_kit::component::dock::{panel_handle, Panel};
@@ -361,7 +362,7 @@ pub struct AnalyzeView {
     // Code on the table
     code_open: bool,
     lang: Language,
-    editor: Entity<EditorState>,
+    editor: Entity<CodeView>,
     steps: Vec<Step>,
     /// The last result, shown instead of the source while `show_result`.
     result: Option<(u64, DataFrame)>,
@@ -374,7 +375,7 @@ pub struct AnalyzeView {
 impl AnalyzeView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search every column…"));
-        let editor = cx.new(|cx| EditorState::new(window, cx).language("python").default_value(script::table_template(Language::Python)));
+        let editor = cx.new(|cx| CodeView::new(CodeLanguage::Python, script::table_template(Language::Python), window, cx).editable(true));
         let subs = vec![
             cx.subscribe(&store, |_, _, e: &AppEvent, cx| {
                 if matches!(e, AppEvent::Document(_) | AppEvent::Results) {
@@ -785,8 +786,8 @@ impl AnalyzeView {
             return;
         }
         self.lang = lang;
-        let name = if lang == Language::Python { "python" } else { "rust" };
-        self.editor = cx.new(|cx| EditorState::new(window, cx).language(name).default_value(script::table_template(lang)));
+        let code_lang = if lang == Language::Python { CodeLanguage::Python } else { CodeLanguage::Rust };
+        self.editor = cx.new(|cx| CodeView::new(code_lang, script::table_template(lang), window, cx).editable(true));
         cx.notify();
     }
 
@@ -798,7 +799,7 @@ impl AnalyzeView {
         let Some(m) = self.model(cx) else { return };
         let order = self.order(&m, cx);
         let csv = m.csv(&order);
-        let code = self.editor.read(cx).value().to_string();
+        let code = self.editor.read(cx).text(cx);
         let lang = self.lang;
         self.running = true;
         self.code_error = None;
@@ -1534,7 +1535,7 @@ impl AnalyzeView {
                     .child(Button::new("code-template").ghost().xsmall().label("Example").on_click(move |_, window, cx| {
                         let _ = tmpl.update(cx, |a, cx| {
                             let t = script::table_template(lang);
-                            a.editor.update(cx, |e, cx| e.set_value(t, window, cx));
+                            a.editor.update(cx, |e, cx| e.set_text(t, window, cx));
                         });
                     }))
                     .child(Button::new("code-export").ghost().xsmall().icon(Icon::new(IconName::Download)).label("Export steps").disabled(self.steps.is_empty()).on_click(move |_, _, cx| {
@@ -1547,7 +1548,7 @@ impl AnalyzeView {
                     })),
             )
             .children(self.code_error.clone().map(|e| div().flex_none().max_h(px(64.)).overflow_hidden().px(px(theme::SM)).text_xs().font_family("monospace").text_color(color::danger()).child(e)))
-            .child(div().flex_1().min_h_0().px(px(theme::SM)).pb(px(theme::SM)).child(Editor::new(&self.editor).h_full()))
+            .child(div().flex_1().min_h_0().px(px(theme::SM)).pb(px(theme::SM)).child(self.editor.clone()))
     }
 }
 
@@ -1746,7 +1747,7 @@ impl Render for AnalyzeView {
                             let code = code.clone();
                             let _ = me.update(cx, |a, cx| {
                                 a.set_lang(lang, window, cx);
-                                a.editor.update(cx, |e, cx| e.set_value(code, window, cx));
+                                a.editor.update(cx, |e, cx| e.set_text(code, window, cx));
                                 a.code_open = true;
                                 cx.notify();
                             });

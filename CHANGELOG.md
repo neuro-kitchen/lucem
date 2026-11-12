@@ -7,6 +7,28 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
+### Agents, the code editor and environments (2026-11-12)
+
+- **Agents workspace:** the chat. It runs the agent you already have (Antigravity `agy acp`, or
+  Claude Code through its ACP adapter) with your own login: no API key in lumen. The agent works
+  through lumen's own commands (MCP, through the app's program as a bridge to its socket):
+  anything that changes the project asks first (Allow / Deny), and every call shows in the
+  conversation and on the Activity timeline. Agent menu: start, stop, a new session, which agent.
+  Settings › Agents: what an agent may run without asking. Sessions are saved.
+  The agent reaches lumen as `lumen_app` (not `lumen`, the headless server it may already have),
+  is told before each session's first prompt that it works inside the open app through those
+  tools and what is open, and sees each command under a tool name it accepts (`hist_find_cells`).
+- **The code editor in the app:** a script node's code opens in the Pipeline's Inspector
+  (highlighted, line numbers); Save and run writes the file and runs the node again; the errors of
+  its last run are marked on their lines (Python tracebacks, Rust compiler messages); Revert puts
+  back the file. Analyze's code on the table uses the same editor. The external editor stays as a
+  button.
+- **Environments** (Settings › Environment, was Tools): scripts run in the project's Python
+  environment (`scripts/.venv`), else the one active, else lumen's default; uv makes and syncs it
+  from `scripts/pyproject.toml` and `uv.lock` (NumPy in a new one). Rust scripts build with the
+  compiler the project pins (`scripts/rust-toolchain.toml`, "Pin the compiler found"). A Python set
+  under Programs is still used first.
+
 ### The shared frame (2026-11-12)
 
 - **Activity** (Analyze › View › Activity timeline, or the search): an episodic memory of the

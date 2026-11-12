@@ -348,7 +348,11 @@ fn compile_rust(source: &str, crates: &[String]) -> Result<PathBuf, String> {
     if crates.is_empty() {
         let src = dir.join("main.rs");
         std::fs::write(&src, source).map_err(|e| e.to_string())?;
-        run_program(Command::new(rustc()).args(["--edition", "2021", "-O", "--crate-name", "lumen_script", "-o"]).arg(&bin).arg(&src), "rustc")?;
+        let mut c = Command::new(rustc());
+        if let Some(d) = crate::data::tools::rust_dir() {
+            c.current_dir(d);
+        }
+        run_program(c.args(["--edition", "2021", "-O", "--crate-name", "lumen_script", "-o"]).arg(&bin).arg(&src), "rustc")?;
         return Ok(bin);
     }
     let package = format!("lumen_script_{id}");
@@ -357,7 +361,12 @@ fn compile_rust(source: &str, crates: &[String]) -> Result<PathBuf, String> {
     let manifest = format!("[package]\nname = \"{package}\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n[dependencies]\n{}\n\n[workspace]\n", crates.join("\n"));
     std::fs::write(dir.join("Cargo.toml"), manifest).map_err(|e| e.to_string())?;
     let target = cache_dir().join("target");
-    run_program(Command::new(cargo()).args(["build", "--release", "--quiet", "--manifest-path"]).arg(dir.join("Cargo.toml")).env("CARGO_TARGET_DIR", &target), "cargo")?;
+    let mut c = Command::new(cargo());
+    // In the project's scripts folder, so rustup uses its toolchain pin
+    if let Some(d) = crate::data::tools::rust_dir() {
+        c.current_dir(d);
+    }
+    run_program(c.args(["build", "--release", "--quiet", "--manifest-path"]).arg(dir.join("Cargo.toml")).env("CARGO_TARGET_DIR", &target), "cargo")?;
     let built = target.join("release").join(if cfg!(windows) { format!("{package}.exe") } else { package });
     std::fs::rename(&built, &bin).or_else(|_| std::fs::copy(&built, &bin).map(|_| ())).map_err(|e| format!("{}: {e}", crate::domain::paths::short_path(&built)))?;
     Ok(bin)
@@ -775,5 +784,47 @@ mod tests {
         assert_eq!(read_npy(&npy_bytes(&a, false)).unwrap(), a);
         let m = HostArray { width: 2, height: 2, data: vec![0.0, 1.0, 1.0, 0.0] };
         assert_eq!(read_npy(&npy_bytes(&m, true)).unwrap(), m);
+    }
+}
+
+/// The lines of the script `file` (its file name) that an error names, with the message: Python
+/// tracebacks (`File ".../name.py", line 12` then the error on the last line) and Rust compiler
+/// messages (`--> .../name.rs:12:5` under `error[...]: message`). Other lines are left out.
+pub fn error_lines(file: &str, text: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let last = lines.iter().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).unwrap_or_default();
+    let mut out: Vec<(usize, String)> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let t = l.trim();
+        // Python: File "/x/name.py", line 12, in run
+        if let Some(rest) = t.strip_prefix("File \"")
+            && let Some((path, tail)) = rest.split_once('"')
+            && path.ends_with(file)
+            && let Some(n) = tail.split("line ").nth(1).and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next()).and_then(|s| s.parse::<usize>().ok())
+        {
+            out.push((n, last.clone()));
+        }
+        // Rust: --> /x/name.rs:12:5, under "error[E0308]: mismatched types"
+        if let Some(rest) = t.strip_prefix("--> ")
+            && let Some((path, pos)) = rest.split_once(':')
+            && (path.ends_with(file) || path.ends_with("main.rs"))
+            && let Some(n) = pos.split(':').next().and_then(|s| s.parse::<usize>().ok())
+        {
+            let msg = lines[..i].iter().rev().find(|p| p.trim_start().starts_with("error")).map(|p| p.trim().to_string()).unwrap_or_else(|| last.clone());
+            out.push((n, msg));
+        }
+    }
+    out.dedup();
+    out
+}
+
+#[cfg(test)]
+mod error_line_tests {
+    #[test]
+    fn python_and_rust_errors_name_their_lines() {
+        let py = "Traceback (most recent call last):\n  File \"/tmp/run.py\", line 40, in <module>\n  File \"/p/scripts/blur.py\", line 7, in run\n    return x / 0\nZeroDivisionError: division by zero\n";
+        assert_eq!(super::error_lines("blur.py", py), vec![(7, "ZeroDivisionError: division by zero".to_string())]);
+        let rs = "error[E0308]: mismatched types\n --> /c/lumen/abc/main.rs:12:5\n   |\n";
+        assert_eq!(super::error_lines("blur.rs", rs), vec![(12, "error[E0308]: mismatched types".to_string())]);
     }
 }

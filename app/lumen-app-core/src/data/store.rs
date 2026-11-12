@@ -306,6 +306,7 @@ impl Store {
         self.undo.record(before, "New project".into());
         self.sel.layers.clear();
         self.project_file = None;
+        crate::data::tools::set_scripts_dir(None);
         self.hist = Default::default();
         self.pyramids.clear();
         self.results.clear();
@@ -330,6 +331,7 @@ impl Store {
         match self.doc.save(&file) {
             Ok(()) => {
                 self.project_file = Some(file.clone());
+                crate::data::tools::set_scripts_dir(file.parent().map(|d| crate::data::script::scripts_dir(Some(d))));
                 self.prefs.push_recent(&file);
                 self.save_prefs();
                 self.hist_persist_all(cx);
@@ -348,6 +350,7 @@ impl Store {
                 self.sel.layers.clear();
                 self.doc = doc;
                 self.project_file = Some(file.clone());
+                crate::data::tools::set_scripts_dir(file.parent().map(|d| crate::data::script::scripts_dir(Some(d))));
                 self.pyramids.clear();
                 self.results.clear();
                 self.sel.shapes.clear();
