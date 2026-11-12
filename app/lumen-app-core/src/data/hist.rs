@@ -110,6 +110,8 @@ pub struct HistState {
     /// How the last step went (`true`: done; `false`: a problem or what is missing), shown
     /// under the button that ran it.
     pub outcome: Option<(bool, String)>,
+    /// The job the last step started (a command returns it, so an agent can wait for it).
+    pub started: Option<u64>,
     /// Every step that changed the analysis, in order (`session.json` next to the project;
     /// `lumen session run` runs it again on other images).
     pub session: lumen_hist::session::Session,
@@ -346,6 +348,7 @@ impl Default for HistState {
             detector: None,
             recipe: Recipe::Count,
             outcome: None,
+            started: None,
             session: Default::default(),
         }
     }
@@ -362,7 +365,7 @@ pub fn intensity_color(c: IntensityClass) -> [u8; 3] {
 }
 
 /// A colour per class name, stable (classes the project does not have).
-fn hashed_color(name: &str) -> [u8; 3] {
+pub(crate) fn hashed_color(name: &str) -> [u8; 3] {
     let h = name.bytes().fold(2_166_136_261u32, |h, b| (h ^ b as u32).wrapping_mul(16_777_619));
     lumen_view::label_color(h | 1)
 }
@@ -535,6 +538,7 @@ impl Store {
     pub fn hist_run(&mut self, actions: Vec<Action>, what: &str, cx: &mut Context<Self>) {
         let z = self.hist_selected_regions().first().map_or(0, |r| r.1);
         let Some((image, p, device, job)) = self.hist_job(what, cx) else { return };
+        self.hist.started = Some(job.id);
         let mut a = self.hist_analysis(&image);
         let (tx, rx) = async_channel::unbounded::<()>();
         let task = cx.background_spawn(async move {
@@ -557,8 +561,8 @@ impl Store {
                     }
                 }
             }
-            drop(job);
-            (a, actions, outcomes, error)
+            // The job stays open until its results are in the project (see below)
+            (a, actions, outcomes, error, job)
         });
         // Redrawn as the job moves on
         cx.spawn(async move |this, cx| {
@@ -570,15 +574,19 @@ impl Store {
         })
         .detach();
         cx.spawn(async move |this, cx| {
-            let (a, actions, outcomes, error) = task.await;
-            let _ = this.update(cx, |s, cx| s.hist_take(image, a, &actions[..outcomes.len()], &outcomes, error, cx));
+            let (a, actions, outcomes, error, job) = task.await;
+            let result = this.update(cx, |s, cx| s.hist_take(image, a, &actions[..outcomes.len()], &outcomes, error, cx));
+            // What an agent waiting on the job reads: each step's outcome, the shapes made
+            job.finish(result.unwrap_or_else(|e| Err(e.to_string())));
+            drop(job);
         })
         .detach();
     }
 
     /// Takes a run's results into the project: objects, classifiers, tissue annotations, maps;
     /// records each step done and reports.
-    fn hist_take(&mut self, image: String, a: Analysis, done: &[Action], outcomes: &[Outcome], error: Option<String>, cx: &mut Context<Self>) {
+    fn hist_take(&mut self, image: String, a: Analysis, done: &[Action], outcomes: &[Outcome], error: Option<String>, cx: &mut Context<Self>) -> Result<serde_json::Value, String> {
+        let before: std::collections::HashSet<String> = self.doc.annotations.iter().map(|a| a.id.clone()).collect();
         for action in done {
             match action {
                 Action::Tissue { .. } if !a.tissue.is_empty() => {
@@ -640,12 +648,34 @@ impl Store {
             self.hist_persist(vec![image], cx);
         }
         let said: Vec<String> = outcomes.iter().map(Outcome::summary).collect();
-        match error {
-            Some(e) if e.contains("cancelled") => self.hist_report(false, "Cancelled: what was there before is kept", cx),
-            Some(e) => self.hist_report(false, if said.is_empty() { e } else { format!("{}; then: {e}", said.join("; ")) }, cx),
-            None => self.hist_report(true, said.join("; "), cx),
-        }
+        // The shapes the steps made (tissue regions), for whoever asked
+        let created: Vec<serde_json::Value> = self
+            .doc
+            .annotations
+            .iter()
+            .filter(|a| !before.contains(&a.id))
+            .map(|a| {
+                let (x0, y0, x1, y1) = a.shape.bounds();
+                serde_json::json!({ "id": a.id, "class": a.class, "bbox_px": [x0, y0, x1, y1] })
+            })
+            .collect();
+        let result = match error {
+            Some(e) if e.contains("cancelled") => {
+                self.hist_report(false, "Cancelled: what was there before is kept", cx);
+                Err("cancelled: what was there before is kept".to_string())
+            }
+            Some(e) => {
+                let msg = if said.is_empty() { e } else { format!("{}; then: {e}", said.join("; ")) };
+                self.hist_report(false, msg.clone(), cx);
+                Err(msg)
+            }
+            None => {
+                self.hist_report(true, said.join("; "), cx);
+                Ok(serde_json::json!({ "summary": said.join("; "), "steps": outcomes, "created": created }))
+            }
+        };
         cx.notify();
+        result
     }
 
     /// Fits the stains to the (first) selected region.
