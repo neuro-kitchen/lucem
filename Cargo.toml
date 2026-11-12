@@ -35,7 +35,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.95"   # burn 0.22 minimum
 authors = ["jesusdpa1"]
@@ -44,16 +44,16 @@ repository = "https://github.com/neuro-kitchen/lucem"
 
 [workspace.dependencies]
 # Workspace crates
-lucem-core = { path = "crates/lucem-core", version = "0.1.0", default-features = false }
-lucem-io = { path = "crates/lucem-io", version = "0.1.0" }
-lucem-ops = { path = "crates/lucem-ops", version = "0.1.0", default-features = false }
-lucem-ml = { path = "crates/lucem-ml", version = "0.1.0" }
-lucem-hist = { path = "crates/lucem-hist", version = "0.1.0", default-features = false }
-lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.1.0" }
-lucem-view = { path = "serve/lucem-view", version = "0.1.0" }
-lucem-stream = { path = "serve/lucem-stream", version = "0.1.0" }
+lucem-core = { path = "crates/lucem-core", version = "0.0.1", default-features = false }
+lucem-io = { path = "crates/lucem-io", version = "0.0.1" }
+lucem-ops = { path = "crates/lucem-ops", version = "0.0.1", default-features = false }
+lucem-ml = { path = "crates/lucem-ml", version = "0.0.1" }
+lucem-hist = { path = "crates/lucem-hist", version = "0.0.1", default-features = false }
+lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.0.1" }
+lucem-view = { path = "serve/lucem-view", version = "0.0.1" }
+lucem-stream = { path = "serve/lucem-stream", version = "0.0.1" }
 lucem-mcp = { path = "app/lucem-mcp" }
-lucem-app-core = { path = "app/lucem-app-core", version = "0.1.0" }
+lucem-app-core = { path = "app/lucem-app-core", version = "0.0.1" }
 
 # Latest stable versions on crates.io 2026-11-08 (cubecl 0.12 / burn 0.23 are pre-releases only);
 # add each to a crate with `<name>.workspace = true`.
@@ -109,9 +109,9 @@ ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dy
 ureq = "3.5.1"
 flate2 = "1.1.11"
 tar = "0.4.46"
-lucem-hub = { path = "hub/lucem-hub", version = "0.1.0" }
-lucem-model-sam = { path = "models/sam", version = "0.1.0" }
-lucem-model-stardist = { path = "models/stardist", version = "0.1.0", default-features = false }
+lucem-hub = { path = "hub/lucem-hub", version = "0.0.1" }
+lucem-model-sam = { path = "models/sam", version = "0.0.1" }
+lucem-model-stardist = { path = "models/stardist", version = "0.0.1", default-features = false }
 # Keras weights (HDF5) read without the C library, written as safetensors
 hdf5-reader = "0.12.1"
 # Parallel loops over host data (objects, chunks): work stealing

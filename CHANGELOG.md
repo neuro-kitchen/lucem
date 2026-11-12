@@ -5,9 +5,14 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
-No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
+## [0.0.1] - 2026-11-12
 
-### lumen is now lucem (2026-11-13)
+The first release: lucem's library crates on crates.io (`lucem-core`, `lucem-io`, `lucem-ops`,
+`lucem-pipeline`, `lucem-hist`, `lucem-ml`, `lucem-hub`, `lucem-view` and the `lucem` umbrella).
+The app, the command line and the MCP server follow once kitchen-agent is on crates.io. The
+work of the `version/v0.0.1` branch, newest first:
+
+### lumen is now lucem (2026-11-12)
 
 - **The name.** lumen was taken on the registries; it is now **lucem** (Latin for light): the
   crates (`lucem-core`, `lucem-io`, `lucem-ops`, `lucem-pipeline`, `lucem-hist`, `lucem-ml`,
@@ -23,7 +28,7 @@ No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 - kitchen comes from its released v0.0.4 tag (it was the `version/v0.0.4` branch).
 - Entries below this one name lumen as it was then.
 
-### Tools an agent can use (2026-11-13)
+### Tools an agent can use (2026-11-12)
 
 - **Steps answer with what they found.** A histology step run by an agent (tissue, cells,
   superpixels, density, classifiers) returns its job, and the agent gets the step's outcome when
