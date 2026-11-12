@@ -13,7 +13,6 @@ fn main() {
     gpui_kit::application().with_assets(kitchen_ui::icons::AppAssets::new().all_icons()).run(move |cx| {
         gpui_kit::init(cx);
         actions::bind_keys(cx);
-        cx.on_action(|_: &actions::Quit, cx| cx.quit());
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         let prefs_path = Prefs::path();
         let store = cx.new(|_| Store::new(Prefs::load(prefs_path.as_deref()), prefs_path));

@@ -1,23 +1,24 @@
-//! Settings (Ctrl+,): sections on the left, their settings on the right. Every setting says what
-//! it does and what its default is, and takes effect at once (the theme too).
+//! lumen's sections of Settings (Ctrl+,): the frame (kitchen-shell) draws Settings, with its own
+//! Appearance first (theme, accent, text size), then these. Every setting says what it does and
+//! what its default is, and takes effect at once.
 
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
-use gpui_kit::{div, px, AnyElement, App, AppContext as _, Context, Entity, Subscription, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
+use gpui_kit::{div, px, AnyElement, App, Context, Entity, Subscription, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Window};
 
 use crate::data::prefs::Prefs;
 use crate::data::tools::{self, Found, Tool, ToolPaths};
 use crate::data::store::Store;
 use crate::ui::theme::{self, color, PASTEBOARDS};
-use crate::ui::widgets::{stepper, AccentChanged, AccentPicker, MenuSelect};
+use crate::ui::widgets::{stepper, MenuSelect};
 use gpui_kit::prelude::FluentBuilder as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Section {
-    Appearance,
+pub enum Section {
+    Display,
     Views,
     Compute,
     Models,
@@ -27,11 +28,11 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 7] = [Section::Appearance, Section::Views, Section::Compute, Section::Models, Section::Tools, Section::Performance, Section::About];
+    pub const ALL: [Section; 7] = [Section::Display, Section::Views, Section::Compute, Section::Models, Section::Tools, Section::Performance, Section::About];
 
-    fn title(self) -> &'static str {
+    pub fn title(self) -> &'static str {
         match self {
-            Section::Appearance => "Appearance",
+            Section::Display => "Display",
             Section::Views => "Views",
             Section::Compute => "Compute",
             Section::Models => "Models",
@@ -41,9 +42,9 @@ impl Section {
         }
     }
 
-    fn icon(self) -> IconName {
+    pub fn icon(self) -> IconName {
         match self {
-            Section::Appearance => IconName::Palette,
+            Section::Display => IconName::Monitor,
             Section::Views => IconName::LayoutGrid,
             Section::Compute => IconName::Cpu,
             Section::Models => IconName::Sparkles,
@@ -54,12 +55,11 @@ impl Section {
     }
 }
 
+/// A setting's action.
+type Run = Rc<dyn Fn(&mut Window, &mut App)>;
+
 pub struct SettingsView {
     store: Entity<Store>,
-    section: Section,
-    on_close: crate::screens::palette::Run,
-    /// The accent picker (made on the first draw: it needs the window).
-    accent: Option<Entity<AccentPicker>>,
     /// Each tool's `--version` (Tools), and the paths it was read for.
     versions: Vec<(Tool, Result<String, String>)>,
     versions_for: Option<ToolPaths>,
@@ -67,8 +67,22 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    pub fn new(store: Entity<Store>, on_close: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        Self { store, section: Section::Appearance, on_close: Rc::new(on_close), accent: None, versions: Vec::new(), versions_for: None, _subs: Vec::new() }
+    pub fn new(store: Entity<Store>) -> Self {
+        Self { store, versions: Vec::new(), versions_for: None, _subs: Vec::new() }
+    }
+
+    /// The settings of `section`.
+    pub fn body(&mut self, section: Section, cx: &mut Context<Self>) -> AnyElement {
+        let prefs = self.store.read(cx).prefs.clone();
+        match section {
+            Section::Display => self.display(&prefs),
+            Section::Views => self.views(&prefs, cx),
+            Section::Compute => self.compute(&prefs, cx),
+            Section::Models => self.models(&prefs, cx),
+            Section::Tools => self.tools(&prefs, cx),
+            Section::Performance => self.performance(&prefs),
+            Section::About => self.about(&prefs),
+        }
     }
 
     /// Changes the preferences; the look follows at once.
@@ -110,7 +124,8 @@ impl SettingsView {
         }))
     }
 
-    fn appearance(&self, p: &Prefs) -> AnyElement {
+    /// What the frame's Appearance does not have: a theme that follows the system, the pasteboard.
+    fn display(&self, p: &Prefs) -> AnyElement {
         let st = self.store.clone();
         let theme_now = match p.theme {
             None => 0,
@@ -119,23 +134,18 @@ impl SettingsView {
         };
         let s1 = st.clone();
         let theme = Self::choices("set-theme", &["System", "Dark", "Light"], theme_now, move |i, w, cx| Self::set(&s1, |p| p.theme = [None, Some(true), Some(false)][i], w, cx));
-        let accents = self.accent.clone().map(|a| a.into_any_element()).unwrap_or_else(|| div().into_any_element());
         let s3 = st.clone();
         let paste = Self::choices("set-paste", &PASTEBOARDS, p.pasteboard as usize, move |i, w, cx| Self::set(&s3, |p| p.pasteboard = i as u8, w, cx));
-        let s4 = st.clone();
-        let size = stepper("set-font", format!("{:.0} px", p.font_size), move |d, w, cx| Self::set(&s4, |p| p.font_size = (p.font_size + d).clamp(12.0, 18.0), w, cx));
         v_flex()
-            .child(Self::row("Theme", "Dark or light, or as the system is set (follows it while running).", "Dark", theme))
-            .child(Self::row("Accent", "The colour of selections, the active tool and primary buttons: lumen's blue, a suggested colour or any colour (kept readable in both themes).", "Blue", accents))
+            .child(Self::row("Theme", "Dark or light, or as the system is set (follows it while running). Appearance has the accent and the text size.", "Dark", theme))
             .child(Self::row("Pasteboard", "What is around the image. Grey shows the edges of dark images.", "Grey", paste))
-            .child(Self::row("Interface size", "Text size of the whole interface (drag the number).", "15 px", size))
             .into_any_element()
     }
 
     fn views(&self, p: &Prefs, cx: &App) -> AnyElement {
         let st = self.store.clone();
         let tool = self.store.read(cx).tool.clone();
-        let toggle = |id: &'static str, on: bool, f: crate::screens::palette::Run| Self::choices(id, &["Off", "On"], usize::from(on), move |i, w, cx| {
+        let toggle = |id: &'static str, on: bool, f: Run| Self::choices(id, &["Off", "On"], usize::from(on), move |i, w, cx| {
             if (i == 1) != on {
                 f(w, cx)
             }
@@ -369,90 +379,5 @@ impl SettingsView {
             ))
             .child(Self::row("Reset", "Every setting back to its default (recent files stay).", "—", reset))
             .into_any_element()
-    }
-}
-
-impl Render for SettingsView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let prefs = self.store.read(cx).prefs.clone();
-        let picker = match &self.accent {
-            Some(p) => p.clone(),
-            None => {
-                let p = cx.new(|cx| AccentPicker::new(prefs.accent, window, cx));
-                self._subs.push(cx.subscribe_in(&p, window, |this, _, e: &AccentChanged, window, cx| {
-                    let accent = e.0;
-                    Self::set(&this.store, |p| p.accent = accent, window, cx);
-                }));
-                self.accent = Some(p.clone());
-                p
-            }
-        };
-        if picker.read(cx).current() != prefs.accent {
-            picker.update(cx, |p, cx| p.set_current(prefs.accent, cx));
-        }
-        // Left-aligned, icon then name (`jakobs-law`, `text-alignment`)
-        let nav = v_flex().flex_none().w(px(190.)).h_full().p(px(theme::SM)).gap(px(2.)).bg(color::chrome()).border_r_1().border_color(color::border()).children(Section::ALL.into_iter().map(|sec| {
-            let on = sec == self.section;
-            h_flex()
-                .id(SharedString::from(format!("settings-{}", sec.title())))
-                .h(px(30.))
-                .px(px(theme::SM))
-                .gap(px(theme::SM))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .when(on, |d| d.bg(color::control()))
-                .when(!on, |d| d.hover(|d| d.bg(color::hover())))
-                .child(Icon::new(sec.icon()).small().text_color(if on { color::accent_mark() } else { color::text_muted() }))
-                .child(div().text_sm().child(sec.title()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.section = sec;
-                    cx.notify();
-                }))
-        }));
-        let body = match self.section {
-            Section::Appearance => self.appearance(&prefs),
-            Section::Views => self.views(&prefs, cx),
-            Section::Compute => self.compute(&prefs, cx),
-            Section::Models => self.models(&prefs, cx),
-            Section::Tools => self.tools(&prefs, cx),
-            Section::Performance => self.performance(&prefs),
-            Section::About => self.about(&prefs),
-        };
-        let (close_a, close_b) = (self.on_close.clone(), self.on_close.clone());
-        div()
-            .id("settings-backdrop")
-            .absolute()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(gpui_kit::black().opacity(0.45))
-            .on_click(move |_, w, cx| close_a(w, cx))
-            .child(
-                v_flex()
-                    .id("settings")
-                    .w(px(780.))
-                    .h(px(540.))
-                    .rounded(px(10.))
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(color::border())
-                    .bg(color::panel())
-                    .shadow_lg()
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(
-                        h_flex()
-                            .flex_none()
-                            .h(px(44.))
-                            .px(px(theme::LG))
-                            .border_b_1()
-                            .border_color(color::border())
-                            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Settings"))
-                            .child(div().flex_1())
-                            .child(div().text_xs().text_color(color::text_muted()).child("Changes apply at once · Esc closes"))
-                            .child(Button::new("settings-close").ghost().small().icon(Icon::new(IconName::X)).on_click(move |_, w, cx| close_b(w, cx))),
-                    )
-                    .child(h_flex().flex_1().min_h_0().child(nav).child(v_flex().id("settings-body").flex_1().min_w_0().h_full().overflow_y_scroll().px(px(theme::XL)).py(px(theme::SM)).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).py(px(theme::SM)).child(self.section.title())).child(body))),
-            )
     }
 }
