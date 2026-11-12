@@ -9,6 +9,11 @@ No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
 ### The shared frame (2026-11-12)
 
+- **Activity** (Analyze › View › Activity timeline, or the search): an episodic memory of the
+  work (kitchen-ui's timeline over kitchen-shell's activity log): what you did and what an agent
+  did, the time in each workspace and every job, summarised into a few episodes (or every
+  action); hover a bar for its card, click it for each action, where it came from (workspace,
+  menu, key, search, agent) and what it produced.
 - **kitchen-shell's frame.** The title bar (the Lumen menu, Help, the workspaces, the project,
   where lumen runs, the panel toggles, the theme), the workspace's menu row, the status bar
   (status line, every job with its cancel button, lumen's readings, CPU and memory), Settings and
