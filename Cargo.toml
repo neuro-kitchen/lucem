@@ -74,10 +74,10 @@ gpui-kit = "0.9.1"
 # [patch."https://github.com/neuro-kitchen/kitchen"]
 # kitchen-ui = { path = "../kitchen/crates/kitchen-ui" }
 # kitchen-shell = { path = "../kitchen/crates/kitchen-shell" }
-kitchen-ui = { git = "https://github.com/neuro-kitchen/kitchen", branch = "version/v0.0.4" }
-kitchen-shell = { git = "https://github.com/neuro-kitchen/kitchen", branch = "version/v0.0.4" }
+kitchen-ui = { git = "https://github.com/neuro-kitchen/kitchen", tag = "v0.0.4" }
+kitchen-shell = { git = "https://github.com/neuro-kitchen/kitchen", tag = "v0.0.4" }
 # The agent workspace (chat over ACP) and the MCP host inside the app
-kitchen-agent = { git = "https://github.com/neuro-kitchen/kitchen", branch = "version/v0.0.4" }
+kitchen-agent = { git = "https://github.com/neuro-kitchen/kitchen", tag = "v0.0.4" }
 # The status bar's CPU and memory meters
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 # Analytics & columnar data (Arrow + Polars)
