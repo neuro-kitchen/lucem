@@ -22,7 +22,19 @@ jobs:
   rust:
     name: Rust (check, CPU-runtime tests)
     runs-on: ubuntu-latest
+    env:
+      # No debug info in CI: the workspace's test build otherwise fills the runner's disk
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
+      # The runner image ships ~30 GB of toolchains lumen never uses (.NET, Android, Haskell,
+      # CodeQL bundles, Boost); the debug build of the workspace needs that room
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
