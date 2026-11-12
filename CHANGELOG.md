@@ -28,6 +28,8 @@ No release has been made yet. Work on the `version/v0.0.1` branch, newest first.
 
 ### Shared UI (2026-11-11)
 
+- **kitchen-ui 0.0.2** (from crates.io, released 2026-11-12): CodeView, DiffView, TextView and the
+  chat pane are available to the app; nothing in lumen changed for it.
 - **kitchen-ui.** The app's tokens, widgets and parameter editor now come from
   [`kitchen-ui`](https://crates.io/crates/kitchen-ui) 0.0.1, shared with dsp-kitchen: plain-grey
   neutrals, the 8 px spacing grid, radii by tier, and text, outlines and slider fills in a
