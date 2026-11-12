@@ -1,6 +1,6 @@
 [project]
 name = "lucem-dev"
-version = "0.1.0"
+version = "0.0.1"
 description = "Development environment of the lucem repository (playground scripts, tests); the Python package is bindings/python"
 readme = "README.md"
 authors = [{ name = "jesusdpa1" }]
