@@ -13,10 +13,33 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
   (environment `crates-io`, approved by a maintainer; crates already at that version are skipped),
   then the GitHub release takes this file's section as its notes. The app, the CLI and the MCP
   server stay off crates.io until kitchen-agent is published.
-- The `lucem` Python package goes to PyPI from the same tag: abi3 wheels (CPython 3.12+) for
-  Linux x86_64 (manylinux 2.28), Windows x64 and macOS arm64, and the sdist, by trusted
-  publishing in the environment `pypi` (approved by a maintainer). The "Private :: Do Not Upload"
-  classifier that blocked uploads is gone. The package holds only `__version__` for now.
+- The Python packages go to PyPI from the same tag, by trusted publishing (approved by a
+  maintainer): `lucem` and `lucem-hist` (abi3 wheels for CPython 3.12+ on Linux x86_64, glibc
+  2.34+, Windows x64 and macOS arm64, and `lucem`'s sdist) in the environment `pypi`; the app and
+  the model plugins (`lucem-app`, `lucem-ml-stardist`, `lucem-ml-sam`) each in its own
+  (`pypi-app`, `pypi-ml-stardist`, `pypi-ml-sam`), so a failure there holds up nothing else.
+  The extras' pins are checked against the workspace version. The "Private :: Do Not Upload"
+  classifier that blocked uploads is gone.
+
+### Added
+
+- **Python packages, as dsp-kitchen's:** `pip install lucem` gives `lucem.runtime`, `lucem.io`
+  (images of any size read by block, plane or region; OME-Zarr written block by block),
+  `lucem.ops` (every operator of the catalog on NumPy arrays, and pipelines that stay on the
+  device), `lucem.custom` (your own functions over an image of any size, with halos and objects
+  joined across blocks) and `lucem.ml` (the model plugins: found, asked for their models, run on
+  an array). Extras: `lucem[hist]` adds `lucem.hist` (stains and deconvolution, tissue, cells
+  found or grown from a model's nuclei, the app's steps built in Python or read from a
+  `session.json` and run through the app's engine, tables and GeoJSON); `lucem[app]` the desktop
+  app (`lucem app`); `lucem[stardist]`, `lucem[sam]` and `lucem[ml]` the model plugins as
+  programs, kept apart from lucem as before (their weights download on first use); `lucem[all]`
+  everything. The `lucem-hist` wheel is the whole extension built with histology, and `lucem`
+  loads it in place of its own when it is there: one device per runtime. The binding crates
+  (`lucem-py-core`, `lucem-py-hist`) register into the one extension, `lucem-py`.
+- **Brush size from the keyboard:** <kbd>Ctrl</kbd>+<kbd>+</kbd> and <kbd>Ctrl</kbd>+<kbd>−</kbd>
+  make the brush bigger or smaller while the Brush, Eraser or Wand is in hand (they zoom
+  otherwise, as <kbd>+</kbd> and <kbd>−</kbd>), next to <kbd>[</kbd> and <kbd>]</kbd>. The
+  toolbar's stepper and both keys share one step.
 
 ### Changed
 
