@@ -53,8 +53,8 @@ pub const FAMILIES: &[Family] = &[
         task: lucem_ml::Task::Segmentation,
         domains: &["histology", "fluorescence"],
         licence: "Apache-2.0",
-        licence_checked: false,
-        what: "Nuclei and cells in brightfield and multiplexed fluorescence (any number of channels), fast on the CPU.",
+        licence_checked: true,
+        what: "Nuclei as pixel embeddings, fast on the CPU: the brightfield and single-channel nucleus models (plugins/ml/lucem-ml-instanseg); the channel-invariant nuclei-and-cells model for multiplexed fluorescence is not ported yet.",
     },
     Family {
         id: "cellpose",
