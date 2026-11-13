@@ -1,0 +1,23 @@
+[package]
+name = "lucem-view"
+description = "Viewing support for lucem: multiscale pyramids and tiles for display"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+async-channel.workspace = true
+cubecl.workspace = true
+gpui-kit.workspace = true
+image.workspace = true
+lucem-core = { workspace = true, default-features = false, features = ["compute"] }
+lucem-io.workspace = true
+serde.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+lucem-core = { workspace = true, features = ["compute", "wgpu", "cuda", "cpu"] }

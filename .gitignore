@@ -57,6 +57,8 @@ secrets.yml
 .pypirc
 .cargo/credentials
 .cargo/credentials.toml
+# Local overrides, such as [patch.crates-io] kitchen-ui = { path = "../kitchen/crates/kitchen-ui" }
+.cargo/config.toml
 .streamlit/secrets.toml
 *.kdbx
 
@@ -82,6 +84,8 @@ eggs/
 .eggs/
 sdist/
 wheels/
+# ...but the Python packages' wheel projects are source
+!bindings/python/wheels/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -156,3 +160,14 @@ docs/api/python/site/
 .DS_Store
 Thumbs.db
 tempCodeRunnerFile.py
+
+# Analysis outputs and model weights (never in git)
+*.lucem.zarr/
+*.pik.zarr/
+*.objects.json.gz
+*.safetensors
+*.onnx
+*.h5
+*.ckpt
+*.pt
+*.pth

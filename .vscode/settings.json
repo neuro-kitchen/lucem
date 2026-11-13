@@ -1,5 +1,5 @@
 {
-  // lumen workspace settings. Line width 120 everywhere: rulers here, `max_width` in rustfmt.toml,
+  // lucem workspace settings. Line width 120 everywhere: rulers here, `max_width` in rustfmt.toml,
   // `line-length` in pyproject.toml.
 
   // ---- Editor ----
@@ -73,7 +73,7 @@
   },
   "evenBetterToml.formatter.alignComments": false,
 
-  // ---- Markdown (README, docs, .knowledge) ----
+  // ---- Markdown (README, docs) ----
   "[markdown]": {
     "editor.defaultFormatter": "yzhang.markdown-all-in-one",
     "editor.wordWrap": "wordWrapColumn",

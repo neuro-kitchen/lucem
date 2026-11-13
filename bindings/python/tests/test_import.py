@@ -1,5 +1,8 @@
-import lumen
+from importlib.metadata import version
+
+import lucem
 
 
 def test_version():
-    assert lumen.__version__ == "0.1.0"
+    # The extension's version is the installed package's (the workspace version, set at build)
+    assert lucem.__version__ == version("lucem")

@@ -1,4 +1,4 @@
-# Contributing to lumen
+# Contributing to lucem
 
 Thanks for helping. Issues are welcome for bugs, results that differ from their reference, and
 features (the forms ask for what we need to reproduce). For a security problem, see
@@ -10,9 +10,9 @@ The code of conduct and support pages are shared across
 ## Setup
 
 ```bash
-git clone https://github.com/neuro-kitchen/lumen && cd lumen
+git clone https://github.com/neuro-kitchen/lucem && cd lucem
 uv sync                                                # Python development environment
-cargo run -p lumen-app                                 # the desktop application
+cargo run -p lucem-app                                 # the desktop application
 cargo build --workspace --profile validate             # every crate, for tests and benchmarks
 ```
 
@@ -26,12 +26,12 @@ The workspace is heavy (CubeCL, wgpu, GPUI, Polars), and other feature sets or p
 it from scratch, so:
 
 - write all the changes first and build once;
-- use `cargo run -p lumen-app` for the application, and `--profile validate` for tests and
+- use `cargo run -p lucem-app` for the application, and `--profile validate` for tests and
   benchmarks (dependencies optimized, our crates with debug assertions);
 - build and test as separate steps: build with `--no-run` first, then run the test binaries;
 - prefer `--workspace` to a list of packages: a package subset resolves features differently and
   can rebuild everything;
-- pick runtimes at run time, not at build time: `LUMEN_TEST_RUNTIMES=cuda` (or `wgpu`, `cpu`).
+- pick runtimes at run time, not at build time: `LUCEM_TEST_RUNTIMES=cuda` (or `wgpu`, `cpu`).
 
 ## Tests
 
@@ -51,7 +51,7 @@ it from scratch, so:
 
 ## Licences
 
-lumen is MIT OR Apache-2.0. Code written from another project's source keeps its licence and
+lucem is MIT OR Apache-2.0. Code written from another project's source keeps its licence and
 notice: say where it comes from (file, version) in the module docs. Code written from a paper says
 so and cites it.
 

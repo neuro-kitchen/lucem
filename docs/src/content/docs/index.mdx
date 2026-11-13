@@ -1,0 +1,28 @@
+---
+title: lucem
+description: GPU image analysis for histology and microscopy, from a slide to a headless pipeline.
+template: splash
+editUrl: false
+lastUpdated: false
+hero:
+  title: GPU image analysis for slides and volumes
+  tagline: Look at whole-slide and 3D images, find tissue and cells, build pipelines, and run the same analysis on a server over a folder of slides.
+  actions:
+    - text: Get started
+      link: learn/
+    - text: View on GitHub
+      link: https://github.com/neuro-kitchen/lucem
+      variant: minimal
+---
+
+import EntryPoints from '../../components/EntryPoints.astro';
+
+<p class="install">Built from source with Rust: <code>cargo run -p lucem-app</code> for the app, <code>cargo build -p lucem-cli</code> for the <code>lucem</code> command.</p>
+
+<figure>
+  <img class="light:sl-hidden" src="/lucem/screenshots/main-dark.png" alt="lucem-app in Explore: a multispectral lung-cancer scan with a tissue region drawn on it, the channels and shapes in the Layers panel" />
+  <img class="dark:sl-hidden" src="/lucem/screenshots/main-light.png" alt="lucem-app in Explore: a multispectral lung-cancer scan with a tissue region drawn on it, the channels and shapes in the Layers panel" />
+  <figcaption>Explore: a whole-slide multispectral scan (5 channels) drawn from its pyramid, a tissue region drawn on it. Sample image © PerkinElmer / Akoya Biosciences, <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</figcaption>
+</figure>
+
+<EntryPoints />

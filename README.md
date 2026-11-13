@@ -1,44 +1,111 @@
-# lumen
+# lucem
 
-An application for fluorescence brain-section analysis, written in Rust: GPU image processing with
-CubeCL, models with Burn, and a desktop UI with GPUI (gpui-kit).
+GPU image analysis for histology and microscopy, written in Rust. Look at whole-slide and 3D
+images, find tissue and cells, classify and measure them, build pipelines, and run the same
+analysis headless over a folder of slides. Image operations are written once in
+[CubeCL](https://github.com/tracel-ai/cubecl) and run on any GPU (Vulkan, Metal, CUDA, ROCm) or the
+CPU; models run on [Burn](https://burn.dev); the desktop app is built on GPUI.
 
-## Status
-Skeleton workspace (2026-11-05): every crate below exists and builds, none has code yet.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/img/app/main-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/img/app/main-light.png">
+  <img alt="lucem-app: a multispectral lung-cancer scan (DAPI, FITC, CY3, Texas Red, CY5) in Explore, with a region drawn around the tissue, the channels and shapes in the Layers panel, and the GPU in the status bar" src="assets/img/app/main-dark.png">
+</picture>
 
-## Layout (as in dsp-kitchen)
-All operations are general purpose, so there is no domain folder like dsp-kitchen's `synapse/`.
+*`lucem-app` in Explore: a whole-slide multispectral scan (5 channels, 24960 × 34560 px) drawn
+from its pyramid, a tissue region drawn on it. Sample image © PerkinElmer / Akoya Biosciences,
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).*
 
-| Path | Purpose |
-|---|---|
-| `crates/lumen` | Umbrella crate: re-exports core, io, ops, ml |
-| `crates/lumen-core` | Core types (images, channels, pixel types) and the compute layer (runtime selection, launch geometry, device buffers) |
-| `crates/lumen-io` | Readers and writers: OME-Zarr, OME-TIFF, vendor microscopy formats |
-| `crates/lumen-ops` | Image operations in CubeCL: filters, morphology, thresholds, statistics |
-| `crates/lumen-ml` | Models on Burn: nuclei and cell segmentation, classifiers |
-| `engine/lumen-pipeline` | Chains operations on the device over tiles of large images |
-| `serve/lumen-view` | Multiscale pyramids and display tiles |
-| `app/lumen-cli` | Command-line interface (binary `lumen`) |
-| `app/lumen-app` | Desktop application (GPUI) |
-| `bindings/python/` | Python package: `lumen-py` crate (native module `lumen._native`), `python/lumen`, `tests/` |
-| `playground/` | Experiments and small test programs |
-| `docs/` | Documentation |
-| `.knowledge/` | Notes, decisions, references (not in git) |
-| `assets/` | Icons, fonts, themes |
+> **Status:** early (0.0.1). It works and is tested, but not ready for production. Testers and
+> contributors are welcome.
+
+## What it does
+
+- **Images:** OME-Zarr pyramids and common image files; whole slides and volumes read tile by
+  tile, nothing at full resolution unless you zoom there.
+- **Histology:** stain separation, tissue detection, cell detection and measurement (a threshold,
+  or StarDist and Segment Anything as plugins), object and pixel classifiers, density maps,
+  multiplexed phenotypes, superpixels, measurement tables.
+- **Pipelines:** chains of GPU operations over tiles of large images, on a canvas in the app or as
+  a JSON spec for the `lucem` command.
+- **Sessions:** every step you take is recorded, and `lucem session run` replays it over many
+  slides, headless.
+- **Agents:** the app's commands are tools an agent can use (MCP): it sees the image, draws and
+  names regions and runs steps, asking you before it changes anything.
+- **Serving:** `lucem serve` serves images to enrolled clients over QUIC and TLS.
+
+## Install
+
+The library crates are on crates.io:
+
+```bash
+cargo add lucem          # the umbrella crate: core, io, ops, ml
+cargo add lucem-hist     # histology workflows
+```
+
+The Python package, with the app and the model plugins as extras, goes to PyPI with a coming
+release; until then it builds from this repository (`pip install ./bindings/python`). Once there:
+
+```bash
+pip install lucem                # io, ops, your own functions over large images, the model client
+pip install "lucem[hist]"        # + histology (lucem.hist)
+pip install "lucem[app]"         # + the desktop app: `lucem app`
+pip install "lucem[ml]"          # + the model plugins (StarDist, InstanSeg, SAM); or lucem[stardist], lucem[instanseg], lucem[sam]
+pip install "lucem[all]"         # everything
+```
+
+The app and the command line build from this repository (they follow on crates.io once
+kitchen-agent is published):
+
+```bash
+cargo run -p lucem-app --release     # the desktop app
+cargo install --path app/lucem-cli   # the `lucem` command
+```
+
+## Crates and folders
+
+| Path | Crate | What it is |
+|---|---|---|
+| `crates/lucem` | `lucem` | Umbrella crate: re-exports core, io, ops and ml |
+| `crates/lucem-core` | `lucem-core` | Run-time choice of the CubeCL runtime (wgpu, CUDA, HIP, CPU), launch geometry, device arrays and memory reuse |
+| `crates/lucem-io` | `lucem-io` | Readers and writers: OME-Zarr pyramids, common image files (TIFF, PNG, JPEG, …) |
+| `crates/lucem-ops` | `lucem-ops` | GPU image operations: filters, morphology, thresholds, statistics |
+| `crates/lucem-hist` | `lucem-hist` | Histology workflows: stains, tissue, cells, classifiers, density, phenotypes, exports |
+| `crates/lucem-ml` | `lucem-ml` | The contract of the model plugins: manifests, protocol, discovery, client |
+| `engine/lucem-pipeline` | `lucem-pipeline` | Chains operations on the device over tiles of large images |
+| `serve/lucem-view` | `lucem-view` | Multiscale pyramids and display tiles |
+| `serve/lucem-stream` | | Serving images over QUIC and TLS to enrolled clients |
+| `hub/lucem-hub` | `lucem-hub` | Verified downloads and the local cache of model weights |
+| `app/lucem-app`, `app/lucem-app-core` | | The desktop app (GPUI) |
+| `app/lucem-cli` | | The `lucem` command |
+| `app/lucem-mcp` | | lucem's tools for agents (Model Context Protocol) |
+| `plugins/ml/lucem-ml-sam`, `lucem-ml-stardist` | | Model plugins: Segment Anything 2, StarDist (separate programs, their own licences) |
+| `models/sam`, `models/stardist` | | The models the plugins run |
+| `bindings/python/` | | Python package `lucem` (maturin, native module `lucem._native`) |
+| `docs/` | | The documentation site |
 
 ## Toolchain
-Rust 1.99 stable (minimum 1.95 for burn 0.22), edition 2024. CUDA 13.4 is available for CubeCL's CUDA backend.
+
+Rust stable (minimum 1.95, edition 2024). GPU runtimes need no toolkit for wgpu; CUDA and ROCm
+use their drivers when present.
 
 ## Python (maturin + uv)
-As in dsp-kitchen: `bindings/python/pyproject.toml` is the `lumen` package (maturin, native module
-`lumen._native`, abi3 for CPython ≥ 3.12). The root `pyproject.toml` is the development environment
-(`lumen-dev`, not a package) and installs `lumen` from `bindings/python` in editable mode
+As in dsp-kitchen: `bindings/python/pyproject.toml` is the `lucem` package (maturin, native module
+`lucem._native`, abi3 for CPython ≥ 3.12); `bindings/python/wheels/` builds `lucem-hist` (the same
+extension with histology), `lucem-app` and the `lucem-ml-*` plugins (programs in wheels). See
+[bindings/python/README.md](bindings/python/README.md). The root `pyproject.toml` is the development environment
+(`lucem-dev`, not a package) and installs `lucem` from `bindings/python` in editable mode
 (Python 3.13, `.python-version`).
 
 ```bash
 uv sync                       # builds the Rust extension via maturin and installs it (editable)
-uv run python -c "import lumen; print(lumen.__version__)"
-uv run maturin develop --uv -m bindings/python/lumen-py/Cargo.toml   # rebuild after Rust changes (add --release for speed)
+uv run python -c "import lucem; print(lucem.__version__)"
+uv run maturin develop --uv -m bindings/python/lucem-py/Cargo.toml   # rebuild after Rust changes (add --release for speed)
 uv run pytest -q bindings/python/tests
 cargo test --workspace        # Rust side (extension-module feature off)
 ```
+
+## Licence
+
+MIT or Apache-2.0, at your option. The model plugins carry their own licences (Segment Anything 2:
+Apache-2.0; StarDist: BSD-3-Clause).

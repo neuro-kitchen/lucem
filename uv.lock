@@ -21,21 +21,37 @@ wheels = [
 ]
 
 [[package]]
-name = "lumen"
+name = "lucem"
 source = { editable = "bindings/python" }
 dependencies = [
     { name = "numpy" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "numpy", specifier = ">=2.5" }]
+requires-dist = [
+    { name = "lucem-app", marker = "extra == 'all'", specifier = "==0.0.2" },
+    { name = "lucem-app", marker = "extra == 'app'", specifier = "==0.0.2" },
+    { name = "lucem-hist", marker = "extra == 'all'", specifier = "==0.0.2" },
+    { name = "lucem-hist", marker = "extra == 'hist'", specifier = "==0.0.2" },
+    { name = "lucem-ml-instanseg", marker = "extra == 'all'", specifier = "==0.0.2" },
+    { name = "lucem-ml-instanseg", marker = "extra == 'instanseg'", specifier = "==0.0.2" },
+    { name = "lucem-ml-instanseg", marker = "extra == 'ml'", specifier = "==0.0.2" },
+    { name = "lucem-ml-sam", marker = "extra == 'all'", specifier = "==0.0.2" },
+    { name = "lucem-ml-sam", marker = "extra == 'ml'", specifier = "==0.0.2" },
+    { name = "lucem-ml-sam", marker = "extra == 'sam'", specifier = "==0.0.2" },
+    { name = "lucem-ml-stardist", marker = "extra == 'all'", specifier = "==0.0.2" },
+    { name = "lucem-ml-stardist", marker = "extra == 'ml'", specifier = "==0.0.2" },
+    { name = "lucem-ml-stardist", marker = "extra == 'stardist'", specifier = "==0.0.2" },
+    { name = "numpy", specifier = ">=2.5" },
+]
+provides-extras = ["all", "app", "hist", "instanseg", "ml", "sam", "stardist"]
 
 [[package]]
-name = "lumen-dev"
-version = "0.1.0"
+name = "lucem-dev"
+version = "0.0.2"
 source = { virtual = "." }
 dependencies = [
-    { name = "lumen" },
+    { name = "lucem" },
     { name = "numpy" },
 ]
 
@@ -48,7 +64,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "lumen", editable = "bindings/python" },
+    { name = "lucem", editable = "bindings/python" },
     { name = "numpy", specifier = ">=2.5" },
 ]
 

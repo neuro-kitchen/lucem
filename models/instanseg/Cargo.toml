@@ -1,0 +1,28 @@
+[package]
+name = "lucem-model-instanseg"
+description = "InstanSeg (Goldsborough, Bankhead et al.) for lucem on Burn: the published brightfield and single-channel nucleus models, their TorchScript weights fetched from GitHub, verified through lucem-hub and turned into safetensors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+# InstanSeg's code and its published models are Apache-2.0
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = ["wgpu", "cpu", "cuda"]
+wgpu = ["burn/wgpu"]
+cpu = ["burn/cpu"]
+cuda = ["burn/cuda"]
+
+[dependencies]
+lucem-ml = { path = "../../crates/lucem-ml" }
+lucem-hub.workspace = true
+# `safetensors`: Burn's store, which loads the converted weights into the modules
+burn = { workspace = true, features = ["std", "fusion", "autotune", "safetensors"] }
+# The same CubeCL as Burn's: its runtime configuration (compiled-kernel cache) is set here
+cubecl.workspace = true
+safetensors.workspace = true
+# The bioimage.io package (a zip) and the TorchScript archive inside it (a zip too)
+zip.workspace = true
+rayon.workspace = true

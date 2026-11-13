@@ -1,0 +1,30 @@
+[package]
+name = "lucem-hist"
+description = "Histology workflows for lucem: stain separation, tissue detection, areas, cell detection and measurement, object and pixel classifiers, intensity scores, density maps, multiplexed phenotypes, superpixels and measurement export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[features]
+default = ["wgpu", "cuda", "cpu"]
+wgpu = ["lucem-core/wgpu", "lucem-ops/wgpu"]
+cpu = ["lucem-core/cpu", "lucem-ops/cpu"]
+cuda = ["lucem-core/cuda", "lucem-ops/cuda"]
+
+[dependencies]
+rayon.workspace = true
+polars.workspace = true
+lucem-io.workspace = true
+cubecl.workspace = true
+lucem-core = { workspace = true, features = ["compute"] }
+lucem-ops.workspace = true
+lucem-ml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Provenance names an image far from its results by a hash, not its path
+sha2.workspace = true
+thiserror.workspace = true

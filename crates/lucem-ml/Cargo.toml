@@ -1,0 +1,14 @@
+[package]
+name = "lucem-ml"
+description = "The contract of lucem's machine-learning plugins: model manifests, the request protocol, discovery of plugin programs and a client (no model code, no ML runtime)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

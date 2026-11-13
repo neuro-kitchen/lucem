@@ -1,0 +1,26 @@
+[package]
+name = "lucem-ops"
+description = "GPU image operations for lucem, written once in CubeCL (filters, morphology, thresholds, statistics)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[features]
+default = ["wgpu", "cuda", "cpu"]
+wgpu = ["lucem-core/wgpu", "cubecl/wgpu"]
+cpu = ["lucem-core/cpu", "cubecl/cpu"]
+cuda = ["lucem-core/cuda", "cubecl/cuda"]
+hip = ["lucem-core/hip", "cubecl/hip"]
+
+[dependencies]
+arrow.workspace = true
+cubecl.workspace = true
+lucem-core = { workspace = true, default-features = false, features = ["compute"] }
+num-traits.workspace = true
+polars.workspace = true
+serde.workspace = true
+thiserror.workspace = true

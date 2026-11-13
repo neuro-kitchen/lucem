@@ -1,6 +1,6 @@
 # cargo-deny: supply-chain checks run in CI (`cargo deny check`) and locally.
 # - advisories: no crate with a known vulnerability (RustSec), none yanked;
-# - licenses: only the licences listed (lumen itself is MIT OR Apache-2.0);
+# - licenses: only the licences listed (lucem itself is MIT OR Apache-2.0);
 # - bans: no wildcard version requirements;
 # - sources: crates.io only (no git dependencies, no other registries).
 
@@ -10,10 +10,18 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-# A crate no longer maintained is an error when lumen depends on it directly; deep in the GUI
+# A crate no longer maintained is an error when lucem depends on it directly; deep in the GUI
 # (fonts, D-Bus) and Burn stacks it is the upstream's to replace, and CI would fail on every one
 unmaintained = "workspace"
-ignore = []
+ignore = [
+    # quick-xml < 0.41: quadratic time on a start tag with many attributes, and unbounded
+    # namespace declarations in NsReader (denial of service, both).
+    # Reached only through polars' object_store (cloud storage responses); lucem parses no
+    # untrusted XML with it. object_store 0.13 pins quick-xml 0.39 and polars 0.55.2 (the newest)
+    # uses object_store 0.13: remove this when polars moves to object_store 0.14.
+    { id = "RUSTSEC-2026-0194", reason = "only via polars' object_store; no fixed version reachable yet" },
+    { id = "RUSTSEC-2026-0195", reason = "only via polars' object_store; no fixed version reachable yet" },
+]
 
 [licenses]
 version = 2
@@ -51,3 +59,5 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# kitchen-agent is not on crates.io yet: the app takes kitchen from its release tag
+allow-git = ["https://github.com/neuro-kitchen/kitchen"]

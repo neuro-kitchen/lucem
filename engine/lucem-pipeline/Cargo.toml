@@ -1,0 +1,24 @@
+[package]
+name = "lucem-pipeline"
+description = "Pipeline engine of lucem: chains operations on the device over tiles of large images"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+arrow.workspace = true
+lucem-core = { workspace = true, default-features = false, features = ["compute"] }
+lucem-io.workspace = true
+lucem-ops = { workspace = true, default-features = false }
+polars.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+lucem-core = { workspace = true, features = ["compute", "wgpu", "cuda", "cpu"] }

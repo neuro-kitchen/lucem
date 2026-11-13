@@ -1,0 +1,142 @@
+/* lucem's look, from the stain itself: hematoxylin's violet ink for the dark theme's surfaces, an
+   eosin rose for the accent, and glass-slide white for the light theme. Starlight's dark theme is
+   the base (:root); light is :root[data-theme='light']. Its gray scale runs from "white" (the
+   strongest text) to "black" (the page) in both themes.
+
+   Checked against the designparser rules:
+   - wcag-contrast: every text colour is at least 4.9:1 on the page and on panels, in both themes;
+     the accent 8.0:1 (dark) and 6.2:1 (light).
+   - dark-mode-color-adaptation: the accent keeps its hue (≈ 336°) in both themes; in the dark one
+     its chroma is lower and its tone higher, so it does not glow.
+   - 60-30-10 and saturation-control: ink and slide neutrals carry the page, the rose only marks
+     what is current or can be clicked. */
+
+:root {
+  --sl-font: 'IBM Plex Sans Variable', system-ui, sans-serif;
+  --sl-font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  --sl-color-accent-low: #3b2233;
+  --sl-color-accent: #f28ab3;
+  --sl-color-accent-high: #ffd3e4;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e8e5f2;
+  --sl-color-gray-2: #b9b3cc;
+  --sl-color-gray-3: #8e87a6;
+  --sl-color-gray-4: #433c5a;
+  --sl-color-gray-5: #2d2840;
+  --sl-color-gray-6: #1f1b2c;
+  --sl-color-black: #15121f;
+  --sl-color-text-invert: #15121f;
+
+  /* Hematoxylin, for the second voice in figures (nuclei outlines). */
+  --lm-hematoxylin: #9c8cf0;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #fbe1ec;
+  --sl-color-accent: #b0285f;
+  --sl-color-accent-high: #7d1640;
+  --sl-color-white: #15121f;
+  --sl-color-gray-1: #241f35;
+  --sl-color-gray-2: #463f5c;
+  --sl-color-gray-3: #5f5876;
+  --sl-color-gray-4: #aea8c2;
+  --sl-color-gray-5: #d3cfe0;
+  --sl-color-gray-6: #e9e6f2;
+  --sl-color-gray-7: #f4f2fa;
+  --sl-color-black: #fcfbff;
+  --sl-color-text-invert: #fcfbff;
+
+  --lm-hematoxylin: #4b3aa8;
+}
+
+/* Reading: about 66 characters a line (line-length), body 1.6 and headings 1.2 (line-height). */
+.sl-markdown-content {
+  line-height: 1.6;
+}
+.sl-markdown-content :is(p, li, blockquote):not(:where(.not-content *)) {
+  max-width: 68ch;
+}
+.sl-markdown-content :is(h1, h2, h3, h4) {
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+/* Notes in the accent instead of Starlight's blue. */
+.starlight-aside--note {
+  --sl-color-asides-text-accent: var(--sl-color-text-accent);
+  --sl-color-asides-border: var(--sl-color-accent);
+  background-color: var(--sl-color-accent-low);
+}
+
+/* The landing hero: the headline large and tight, left-aligned like the fields under it. */
+.hero h1 {
+  font-size: clamp(2.5rem, 5vw, 3.75rem);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  max-width: 17ch;
+}
+.hero .tagline {
+  max-width: 48ch;
+}
+.hero {
+  padding-block: 3rem 1rem;
+}
+.hero,
+.hero > .stack {
+  text-align: start;
+  align-items: flex-start;
+}
+.hero .actions {
+  justify-content: flex-start;
+}
+.install {
+  color: var(--sl-color-gray-2);
+}
+
+/* Room in the header for the topic tabs (src/components/Header.astro). */
+:root {
+  --lm-tabs: 2.5rem;
+  --lm-nav-base: 3.5rem;
+  --sl-nav-height: calc(var(--lm-nav-base) + var(--lm-tabs));
+}
+@media (min-width: 50em) {
+  :root {
+    --lm-nav-base: 4rem;
+    --sl-nav-height: calc(var(--lm-nav-base) + var(--lm-tabs));
+  }
+}
+/* The logo and the phone menu button keep to the top row, not the whole header with the tabs. */
+.site-title img {
+  height: calc(var(--lm-nav-base) - 2 * var(--sl-nav-pad-y));
+}
+.sl-menu-button {
+  top: calc((var(--lm-nav-base) - var(--sl-menu-button-size)) / 2);
+}
+
+/* Reference pages: a command's or a field's name as the heading, in the code face, no box. */
+.sl-markdown-content :is(h3, h4) > code {
+  padding: 0;
+  background: none;
+  font-size: 0.9em;
+  font-weight: 600;
+}
+/* Parameter lists (a name in bold code first): no bullets, a gap between entries. */
+.sl-markdown-content ul:has(> li > strong:first-child > code) {
+  list-style: none;
+  padding-inline-start: 0;
+}
+.sl-markdown-content li:has(> strong:first-child > code) + li {
+  margin-top: 0.85rem;
+}
+
+/* Keyboard keys. */
+.sl-markdown-content kbd {
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--sl-color-gray-4);
+  border-block-end-width: 2px;
+  border-radius: 0.3rem;
+  font-family: var(--sl-font-mono);
+  font-size: 0.85em;
+}

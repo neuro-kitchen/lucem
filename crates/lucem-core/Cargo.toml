@@ -1,0 +1,26 @@
+[package]
+name = "lucem-core"
+description = "Core of lucem: run-time choice of the CubeCL runtime (wgpu, CUDA, HIP, CPU), launch geometry, device arrays and memory reuse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[features]
+default = ["wgpu", "cuda", "cpu"]
+# The compute layer (CubeCL): device arrays, buffers, launch geometry. Off for crates that only
+# need the runtime names and shapes (e.g. lucem-io).
+compute = ["dep:cubecl", "dep:num-traits"]
+wgpu = ["compute", "cubecl/wgpu"]
+cpu = ["compute", "cubecl/cpu"]
+cuda = ["compute", "cubecl/cuda"]
+hip = ["compute", "cubecl/hip"]
+
+[dependencies]
+cubecl = { workspace = true, optional = true }
+num-traits = { workspace = true, optional = true }
+serde.workspace = true
+thiserror.workspace = true

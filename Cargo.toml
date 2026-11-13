@@ -2,55 +2,94 @@
 resolver = "2"
 members = [
     # Image-processing library
-    "crates/lumen",
-    "crates/lumen-core",
-    "crates/lumen-io",
-    "crates/lumen-ops",
-    "crates/lumen-ml",
+    "crates/lucem",
+    "crates/lucem-core",
+    "crates/lucem-io",
+    "crates/lucem-ops",
+    "crates/lucem-ml",
+    # Histology workflows (stains, tissue, cells, classifiers, densities, export)
+    "crates/lucem-hist",
+    # Verified downloads of published artifacts (model weights); all network access of the models
+    "hub/lucem-hub",
+    # Models, one crate per upstream family, each under its upstream's licence (as dsp-kitchen's
+    # sorters); the app never links them: plugins/ml programs run them
+    "models/sam",
+    "models/stardist",
+    "models/instanseg",
     # Pipeline engine
-    "engine/lumen-pipeline",
+    "engine/lucem-pipeline",
     # Serving
-    "serve/lumen-view",
+    "serve/lucem-view",
+    "serve/lucem-stream",
     # Front ends
-    "app/lumen-cli",
-    "app/lumen-app-core",
-    "app/lumen-app",
-    # Bindings
-    "bindings/python/lumen-py",
+    "app/lucem-cli",
+    # Tools for agents (MCP): what lucem-cli serves as `lucem mcp`, and later the app
+    "app/lucem-mcp",
+    "app/lucem-app-core",
+    "app/lucem-app",
+    # Plugins: ml/ programs the app and the command line run (one per model family, never
+    # linked, so ONNX Runtime and model licences stay out of lucem itself)
+    "plugins/ml/lucem-ml-sam",
+    "plugins/ml/lucem-ml-stardist",
+    "plugins/ml/lucem-ml-instanseg",
+    # Bindings: lucem-py is the one extension; the binding crates register into it
+    "bindings/python/lucem-py",
+    "bindings/python/lucem-py-core",
+    "bindings/python/lucem-py-hist",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.95"   # burn 0.22 minimum
 authors = ["jesusdpa1"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/neuro-kitchen/lucem"
 
 [workspace.dependencies]
 # Workspace crates
-lumen-core = { path = "crates/lumen-core", version = "0.1.0", default-features = false }
-lumen-io = { path = "crates/lumen-io", version = "0.1.0" }
-lumen-ops = { path = "crates/lumen-ops", version = "0.1.0", default-features = false }
-lumen-ml = { path = "crates/lumen-ml", version = "0.1.0" }
-lumen-pipeline = { path = "engine/lumen-pipeline", version = "0.1.0" }
-lumen-view = { path = "serve/lumen-view", version = "0.1.0" }
-lumen-app-core = { path = "app/lumen-app-core", version = "0.1.0" }
+lucem-core = { path = "crates/lucem-core", version = "0.0.2", default-features = false }
+lucem-io = { path = "crates/lucem-io", version = "0.0.2" }
+lucem-ops = { path = "crates/lucem-ops", version = "0.0.2", default-features = false }
+lucem-ml = { path = "crates/lucem-ml", version = "0.0.2" }
+lucem-hist = { path = "crates/lucem-hist", version = "0.0.2", default-features = false }
+lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.0.2" }
+lucem-view = { path = "serve/lucem-view", version = "0.0.2" }
+lucem-stream = { path = "serve/lucem-stream", version = "0.0.2" }
+lucem-mcp = { path = "app/lucem-mcp" }
+lucem-app-core = { path = "app/lucem-app-core", version = "0.0.2" }
+lucem-py-core = { path = "bindings/python/lucem-py-core", default-features = false }
+lucem-py-hist = { path = "bindings/python/lucem-py-hist", default-features = false }
 
 # Latest stable versions on crates.io 2026-11-08 (cubecl 0.12 / burn 0.23 are pre-releases only);
 # add each to a crate with `<name>.workspace = true`.
 # Compute (as in dsp-kitchen)
 # `persistence`: autotune decisions survive the process; with the compiled-kernel cache turned on
-# in the runtime setup (.knowledge/gpu/01-compute-layer.md), start-up drops from minutes to seconds
-cubecl = { version = "0.11.3", default-features = false, features = ["std", "stdlib", "persistence"] }
+# in the runtime setup (neuro-kitchen/knowledge/cubecl/02-compute-layer.md), start-up drops from minutes to seconds
+cubecl = { version = "0.11.4", default-features = false, features = ["std", "stdlib", "persistence"] }
 burn = { version = "0.22.1", default-features = false }
 # Python bindings (built by maturin, see pyproject.toml)
 pyo3 = { version = "0.30.1" }
 numpy = "0.30.0"
 # UI: GPUI through gpui-kit (re-exports gpui, gpui-base, gpui-component)
-gpui-kit = "0.9.0"
+gpui-kit = "0.9.1"
+# The neuro-kitchen apps' shared UI (github.com/neuro-kitchen/kitchen): kitchen-ui (tokens,
+# widgets, the parameter editor, icon bundling) and kitchen-shell (the frame, the command
+# registry, menus, search, jobs). Both from the same git revision: kitchen-shell depends on
+# kitchen-ui by path inside that repository, so a kitchen-ui from crates.io would be a second
+# copy (a second `Theme` global). Working on both: a git-ignored .cargo/config.toml with
+# [patch."https://github.com/neuro-kitchen/kitchen"]
+# kitchen-ui = { path = "../kitchen/crates/kitchen-ui" }
+# kitchen-shell = { path = "../kitchen/crates/kitchen-shell" }
+kitchen-ui = { git = "https://github.com/neuro-kitchen/kitchen", tag = "v0.0.4" }
+kitchen-shell = { git = "https://github.com/neuro-kitchen/kitchen", tag = "v0.0.4" }
+# The agent workspace (chat over ACP) and the MCP host inside the app
+kitchen-agent = { git = "https://github.com/neuro-kitchen/kitchen", tag = "v0.0.4" }
+# The status bar's CPU and memory meters
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 # Analytics & columnar data (Arrow + Polars)
 arrow = { version = "60.1.0", default-features = false }
-polars = { version = "0.55.2", default-features = false, features = ["lazy", "fmt"] }
+polars = { version = "0.55.2", default-features = false, features = ["lazy", "fmt", "parquet"] }
 # Image I/O
 image = "0.25.10"
 tiff = "0.11.3"
@@ -60,6 +99,40 @@ serde_json = "1.0.154"
 thiserror = "2.0.21"
 num-traits = "0.2.19"
 smallvec = "1.16.5"
+# Serving: QUIC and TLS, as in dsp-kitchen
+quinn = "0.11.12"
+rcgen = "0.14.10"
+# Pairing a computer with a server by a short code
+spake2 = "0.4.0"
+hmac = "0.13.0"
+getrandom = "0.4.3"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1.16.0"
+sha2 = "0.11.1"
+# Machine learning plugins: ONNX Runtime loaded at run time (no download at build, nothing in the
+# app); HTTP for verified weight downloads (lucem-hub)
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std", "api-31", "cuda"] }
+ureq = "3.5.1"
+flate2 = "1.1.11"
+tar = "0.4.46"
+lucem-hub = { path = "hub/lucem-hub", version = "0.0.2" }
+lucem-model-sam = { path = "models/sam", version = "0.0.2" }
+lucem-model-stardist = { path = "models/stardist", version = "0.0.2", default-features = false }
+lucem-model-instanseg = { path = "models/instanseg", version = "0.0.2", default-features = false }
+# InstanSeg's published models: a bioimage.io zip holding a TorchScript archive (also a zip)
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+# Keras weights (HDF5) read without the C library, written as safetensors
+hdf5-reader = "0.12.1"
+# Parallel loops over host data (objects, chunks): work stealing
+rayon = "1.12.0"
+# Boolean operations on shapes (add, subtract, intersect, xor)
+geo = "0.33.1"
+safetensors = "0.8.0"
+tokio = { version = "1.54.1", features = ["full"] }
+# Model Context Protocol (agents), the official Rust SDK
+rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
 # Background results into the UI; JSON Schema of the project document (for agents / MCP)
 async-channel = "2.5.0"
 schemars = "1.2.3"
@@ -95,7 +168,7 @@ opt-level = 1
 opt-level = 3
 
 # wgpu-core's lock tracing (debug assertions only) aborts when a CubeCL device runner shuts down at
-# exit (lumen-core `shutdown_devices`).
+# exit (lucem-core `shutdown_devices`).
 [profile.dev.package.wgpu-core]
 debug-assertions = false
 
