@@ -7,8 +7,8 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## [0.0.2] - 2026-11-13
 
-lucem on PyPI: the Python package (`pip install lucem`) with histology, the desktop app and the
-model plugins as extras (`lucem[hist]`, `lucem[app]`, `lucem[ml]`, `lucem[all]`); InstanSeg's
+The Python packages (`lucem`, with histology, the desktop app and the model plugins as extras;
+built from the repository for now, on PyPI from a later release); InstanSeg's
 nucleus models on Burn, and both model plugins 3–10× faster on a GPU; `lucem autotune` for the
 whole machine; pairing codes kept out of logs; releases from a tag of `main` by trusted
 publishing to crates.io and PyPI; brush size from the keyboard.
@@ -21,8 +21,9 @@ publishing to crates.io and PyPI; brush size from the keyboard.
   (environment `crates-io`, approved by a maintainer; crates already at that version are skipped),
   then the GitHub release takes this file's section as its notes. The app, the CLI and the MCP
   server stay off crates.io until kitchen-agent is published.
-- The Python packages go to PyPI from the same tag, by trusted publishing (approved by a
-  maintainer): `lucem` and `lucem-hist` (abi3 wheels for CPython 3.12+ on Linux x86_64, glibc
+- The Python packages go to PyPI from the same tag once the repository variable `PUBLISH_PYPI`
+  is `true` (until then a tag publishes the crates and the GitHub release only), by trusted
+  publishing (approved by a maintainer): `lucem` and `lucem-hist` (abi3 wheels for CPython 3.12+ on Linux x86_64, glibc
   2.34+, Windows x64 and macOS arm64, and `lucem`'s sdist) in the environment `pypi`; the app and
   the model plugins (`lucem-app`, `lucem-ml-stardist`, `lucem-ml-sam`) each in its own
   (`pypi-app`, `pypi-ml-stardist`, `pypi-ml-sam`), so a failure there holds up nothing else.
@@ -31,7 +32,8 @@ publishing to crates.io and PyPI; brush size from the keyboard.
 
 ### Added
 
-- **Python packages, as dsp-kitchen's:** `pip install lucem` gives `lucem.runtime`, `lucem.io`
+- **Python packages, as dsp-kitchen's** (built from the repository, `pip install ./bindings/python`,
+  until they are on PyPI): `lucem` gives `lucem.runtime`, `lucem.io`
   (images of any size read by block, plane or region; OME-Zarr written block by block),
   `lucem.ops` (every operator of the catalog on NumPy arrays, and pipelines that stay on the
   device), `lucem.custom` (your own functions over an image of any size, with halos and objects
