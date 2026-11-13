@@ -13,6 +13,10 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
   (environment `crates-io`, approved by a maintainer; crates already at that version are skipped),
   then the GitHub release takes this file's section as its notes. The app, the CLI and the MCP
   server stay off crates.io until kitchen-agent is published.
+- The `lucem` Python package goes to PyPI from the same tag: abi3 wheels (CPython 3.12+) for
+  Linux x86_64 (manylinux 2.28), Windows x64 and macOS arm64, and the sdist, by trusted
+  publishing in the environment `pypi` (approved by a maintainer). The "Private :: Do Not Upload"
+  classifier that blocked uploads is gone. The package holds only `__version__` for now.
 
 ### Changed
 
