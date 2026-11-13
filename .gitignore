@@ -84,6 +84,8 @@ eggs/
 .eggs/
 sdist/
 wheels/
+# ...but the Python packages' wheel projects are source
+!bindings/python/wheels/
 share/python-wheels/
 *.egg-info/
 .installed.cfg

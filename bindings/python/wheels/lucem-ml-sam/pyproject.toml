@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.16,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "lucem-ml-sam"
+dynamic = ["version"]
+description = "lucem's Segment Anything (interactive segmentation, on ONNX Runtime) model plugin: install with pip install lucem[sam]"
+readme = "README.md"
+authors = [{ name = "jesusdpa1" }]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+
+[project.urls]
+Repository = "https://github.com/neuro-kitchen/lucem"
+
+[tool.maturin]
+manifest-path = "../../../../plugins/ml/lucem-ml-sam/Cargo.toml"
+bindings = "bin"

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.16,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "lucem-ml-stardist"
+dynamic = ["version"]
+description = "lucem's StarDist (nuclei as star-convex polygons, on Burn) model plugin: install with pip install lucem[stardist]"
+readme = "README.md"
+authors = [{ name = "jesusdpa1" }]
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+
+[project.urls]
+Repository = "https://github.com/neuro-kitchen/lucem"
+
+[tool.maturin]
+manifest-path = "../../../../plugins/ml/lucem-ml-stardist/Cargo.toml"
+bindings = "bin"
