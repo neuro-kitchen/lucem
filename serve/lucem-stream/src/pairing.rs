@@ -54,6 +54,15 @@ impl PairingCode {
     }
 }
 
+/// A live code as listed: everything but its secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveCode {
+    pub id: String,
+    pub permission: Permission,
+    pub expires_unix: u64,
+    pub tries_left: u32,
+}
+
 /// `42-8317-2956` (spaces and dashes optional) as its id and secret.
 pub fn parse_code(code: &str) -> Option<(String, String)> {
     let digits: String = code.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
@@ -135,6 +144,28 @@ impl Authority {
         let taken = code.clone();
         self.write_codes(&codes)?;
         Ok(taken)
+    }
+
+    /// The live codes, without their secrets: what an operator may see to decide what to cancel.
+    pub fn pairing_codes(&self) -> StreamResult<Vec<LiveCode>> {
+        let now = now_unix();
+        Ok(self.read_codes()?.codes.into_iter().filter(|c| c.expires_unix > now && c.tries_left > 0).map(|c| LiveCode { id: c.id, permission: c.permission, expires_unix: c.expires_unix, tries_left: c.tries_left }).collect())
+    }
+
+    /// Cancels the live code named `id`, or every code (`None`): a code that may have been seen
+    /// stops working at once instead of at its expiry. Returns how many were cancelled.
+    pub fn cancel_pairing_codes(&self, id: Option<&str>) -> StreamResult<usize> {
+        let mut codes = self.read_codes()?;
+        let now = now_unix();
+        codes.codes.retain(|c| c.expires_unix > now && c.tries_left > 0);
+        let before = codes.codes.len();
+        match id {
+            Some(id) => codes.codes.retain(|c| c.id != id),
+            None => codes.codes.clear(),
+        }
+        let cancelled = before - codes.codes.len();
+        self.write_codes(&codes)?;
+        Ok(cancelled)
     }
 
     /// Spends the code named `id` (it paired a computer).
@@ -307,6 +338,24 @@ mod tests {
             authority.take_try(&code.id).unwrap();
         }
         assert!(authority.take_try(&code.id).is_err(), "no tries left");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_codes_list_without_secrets_and_cancel() {
+        let dir = std::env::temp_dir().join(format!("lucem-pair-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let authority = Authority::open_or_create(&dir).unwrap();
+        let a = authority.new_pairing_code(Permission::Read).unwrap();
+        let b = authority.new_pairing_code(Permission::Control).unwrap();
+        let listed = authority.pairing_codes().unwrap();
+        assert_eq!(listed.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), [a.id.as_str(), b.id.as_str()]);
+        assert_eq!(listed[1].permission, Permission::Control);
+        assert_eq!(authority.cancel_pairing_codes(Some(&a.id)).unwrap(), 1);
+        assert!(authority.take_try(&a.id).is_err(), "a cancelled code no longer works");
+        assert_eq!(authority.cancel_pairing_codes(Some("no such id")).unwrap(), 0);
+        assert_eq!(authority.cancel_pairing_codes(None).unwrap(), 1);
+        assert!(authority.pairing_codes().unwrap().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
