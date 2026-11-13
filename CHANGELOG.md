@@ -31,11 +31,19 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
   an array). Extras: `lucem[hist]` adds `lucem.hist` (stains and deconvolution, tissue, cells
   found or grown from a model's nuclei, the app's steps built in Python or read from a
   `session.json` and run through the app's engine, tables and GeoJSON); `lucem[app]` the desktop
-  app (`lucem app`); `lucem[stardist]`, `lucem[sam]` and `lucem[ml]` the model plugins as
-  programs, kept apart from lucem as before (their weights download on first use); `lucem[all]`
+  app (`lucem app`); `lucem[stardist]`, `lucem[sam]`, `lucem[instanseg]` and `lucem[ml]` the model plugins
+  as programs, kept apart from lucem as before (their weights download on first use); `lucem[all]`
   everything. The `lucem-hist` wheel is the whole extension built with histology, and `lucem`
   loads it in place of its own when it is there: one device per runtime. The binding crates
   (`lucem-py-core`, `lucem-py-hist`) register into the one extension, `lucem-py`.
+- **InstanSeg on Burn:** the `lucem-ml-instanseg` plugin runs InstanSeg's published brightfield
+  and single-channel nucleus models (Apache-2.0) on CUDA, wgpu or the CPU, as StarDist does
+  (`models/instanseg`). Each bioimage.io package is fetched and checked (SHA-256). Its
+  TorchScript archive is read in Rust, with no PyTorch: a small pickle reader and the zip, then
+  kept as safetensors with the model's thresholds. The postprocessing is ported from the
+  archive's own code: seeds, the pixel classifier, fragments and holes, overlaps joined. The
+  published test images give the published nuclei. `pip install "lucem[instanseg]"` (also in
+  `lucem[ml]`). The channel-invariant "nuclei and cells" model is not ported yet.
 - **Brush size from the keyboard:** <kbd>Ctrl</kbd>+<kbd>+</kbd> and <kbd>Ctrl</kbd>+<kbd>−</kbd>
   make the brush bigger or smaller while the Brush, Eraser or Wand is in hand (they zoom
   otherwise, as <kbd>+</kbd> and <kbd>−</kbd>), next to <kbd>[</kbd> and <kbd>]</kbd>. The
