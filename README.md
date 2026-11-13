@@ -43,6 +43,16 @@ cargo add lucem          # the umbrella crate: core, io, ops, ml
 cargo add lucem-hist     # histology workflows
 ```
 
+The Python package is on PyPI, with the app and the model plugins as extras:
+
+```bash
+pip install lucem                # io, ops, your own functions over large images, the model client
+pip install "lucem[hist]"        # + histology (lucem.hist)
+pip install "lucem[app]"         # + the desktop app: `lucem app`
+pip install "lucem[ml]"          # + the model plugins (StarDist, SAM); or lucem[stardist], lucem[sam]
+pip install "lucem[all]"         # everything
+```
+
 The app and the command line build from this repository (they follow on crates.io once
 kitchen-agent is published):
 
@@ -80,7 +90,9 @@ use their drivers when present.
 
 ## Python (maturin + uv)
 As in dsp-kitchen: `bindings/python/pyproject.toml` is the `lucem` package (maturin, native module
-`lucem._native`, abi3 for CPython ≥ 3.12). The root `pyproject.toml` is the development environment
+`lucem._native`, abi3 for CPython ≥ 3.12); `bindings/python/wheels/` builds `lucem-hist` (the same
+extension with histology), `lucem-app` and the `lucem-ml-*` plugins (programs in wheels). See
+[bindings/python/README.md](bindings/python/README.md). The root `pyproject.toml` is the development environment
 (`lucem-dev`, not a package) and installs `lucem` from `bindings/python` in editable mode
 (Python 3.13, `.python-version`).
 
