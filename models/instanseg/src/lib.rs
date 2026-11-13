@@ -486,11 +486,11 @@ impl InstanSeg {
                 // A matrix product this device cannot launch: Burn's own convolutions from now on
                 let (y, compute, readback) = match attempt() {
                     Ok(r) => r,
-                    Err(e) if net::disable_gemm() => {
+                    Err(e) if crate::gemm_cannot_launch(&e) && net::disable_gemm() => {
                         eprintln!("instanseg: the matrix-product convolutions failed on this device, using Burn's own ({e})");
-                        attempt()?
+                        attempt().map_err(crate::explain)?
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(crate::explain(e)),
                 };
                 times.compute += compute;
                 times.readback += readback;
@@ -601,9 +601,33 @@ fn resize_labels(l: &[u32], w: usize, h: usize, nw: usize, nh: usize) -> Vec<u32
     out
 }
 
+/// Whether a failed run was a matrix product that cannot launch on this device (its launch
+/// limits), the one failure the direct convolutions are a way around. Out of memory is not: the
+/// direct convolutions need memory too.
+pub(crate) fn gemm_cannot_launch(e: &str) -> bool {
+    e.contains("Unable to launch matmul") || e.contains("Cube count too big")
+}
+
+/// A run's failure in words a user can act on.
+pub(crate) fn explain(e: String) -> String {
+    if e.contains("Out of Memory") || e.contains("out of memory") || e.contains("OutOfMemory") {
+        format!("the GPU ran out of memory (another program, or another runtime of the same GPU, holds much of it): close it, choose a smaller region, or set LUCEM_RUNTIME=cpu ({e})")
+    } else {
+        e
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_launch_limits_switch_the_convolutions_and_out_of_memory_is_explained() {
+        assert!(gemm_cannot_launch("Unable to launch matmul because a required feature is unavailable: Cube count too big (1, 131072, 1)"));
+        assert!(!gemm_cannot_launch("wgpu error: Out of Memory"));
+        assert!(explain("wgpu error: Out of Memory".into()).starts_with("the GPU ran out of memory"));
+        assert_eq!(explain("something else".into()), "something else");
+    }
 
     /// A little-endian f32 `.npy` file: its shape and values.
     fn npy(path: &Path) -> (Vec<usize>, Vec<f32>) {
