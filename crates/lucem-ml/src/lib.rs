@@ -36,7 +36,7 @@ pub mod manifest;
 pub mod protocol;
 pub mod tune;
 
-pub use client::PluginProcess;
+pub use client::{set_plugin_runtime, PluginProcess};
 pub use discover::{discover, plugin_dirs, PROGRAM_PREFIX};
 pub use manifest::{GpuRuntime, ModelInfo, PluginInfo, RuntimeStatus, Task, Weight};
 pub use tune::{tune_plugins, PluginTune, TuneOutcome};

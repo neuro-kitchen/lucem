@@ -21,6 +21,9 @@ impl Device {
             Err(_) => (ComputeTarget::Cpu, ComputeTarget::Cpu.client().map_err(|e| format!("no compute device: {e}"))?),
         };
         let fallback = preferred.filter(|p| !p.is_empty()).and_then(|p| ComputeTarget::parse(p).ok()).filter(|t| *t != target).map(|t| format!(" ({} chosen: {})", t.name().to_uppercase(), t.unusable_reason().unwrap_or("not usable")));
+        // Model plugins run on the same runtime: a second GPU runtime beside the app's would share
+        // the GPU's memory with it and run out (the plugins have no ROCm build: their default then)
+        lucem_ml::set_plugin_runtime((target != ComputeTarget::Hip).then(|| target.name()));
         // Plain words: which processor, through what
         let what = match target {
             ComputeTarget::Wgpu => "GPU · Vulkan / Metal",

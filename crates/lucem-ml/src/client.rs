@@ -13,10 +13,28 @@ pub struct PluginProcess {
     stdout: BufReader<ChildStdout>,
 }
 
+/// The compute runtime plugins are started on (`LUCEM_RUNTIME` for them), when the program that
+/// starts them has chosen one ([`set_plugin_runtime`]); otherwise they inherit the environment.
+static PLUGIN_RUNTIME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Plugins started from now on run on `runtime` (`cuda`, `wgpu`, `cpu`): the app sets its own, so
+/// a model never opens a second GPU runtime beside the app's (two runtimes on one GPU share its
+/// memory, and the second runs out of it).
+pub fn set_plugin_runtime(runtime: Option<&str>) {
+    if let Ok(mut r) = PLUGIN_RUNTIME.lock() {
+        *r = runtime.map(str::to_string);
+    }
+}
+
 impl PluginProcess {
-    /// Starts `program serve`.
+    /// Starts `program serve` (on the runtime [`set_plugin_runtime`] chose, if any).
     pub fn start(program: &str) -> Result<Self, String> {
-        let mut child = Command::new(program).arg("serve").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().map_err(|e| format!("{program}: {e}"))?;
+        let mut cmd = Command::new(program);
+        cmd.arg("serve").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        if let Some(r) = PLUGIN_RUNTIME.lock().ok().and_then(|r| r.clone()) {
+            cmd.env("LUCEM_RUNTIME", r);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("{program}: {e}"))?;
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = BufReader::new(child.stdout.take().ok_or("no stdout")?);
         Ok(Self { program: program.to_string(), child, stdin, stdout })
