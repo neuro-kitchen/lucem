@@ -7,9 +7,11 @@
 //!   brightfield H&E (RGB), and "StarDist Fluorescence Nuclei Segmentation" (Zenodo 6348085,
 //!   `2D_versatile_fluo`) for one fluorescence channel; both BSD-3-Clause, the same network but
 //!   for its input channels. Its Keras weights (`stardist_weights.h5`) are fetched and verified through
-//!   `lucem-hub` (SHA-256 pinned) and turned once into safetensors in lucem's cache
-//!   ([`install`], [`convert`]); [`StarDist::load`] reads only the safetensors.
-//! - Network: [`net`] on Burn (any of its devices: CUDA, wgpu, the CPU).
+//!   `lucem-hub` (SHA-256 pinned) and turned once into safetensors in lucem's cache, named as the
+//!   Burn module's fields ([`install`], [`convert`]); [`StarDist::load`] loads them into the
+//!   module with Burn's `SafetensorsStore`.
+//! - Network: [`net`], a `#[derive(Module)]` of `burn::nn` layers (any of Burn's devices: CUDA,
+//!   wgpu, the CPU).
 //! - Prediction: [`predict`] (normalization, tiles with a halo, thresholds and NMS as StarDist's
 //!   own `predict_instances`).
 //! - Scale: the model was trained on 40× H&E; images are resampled to [`MODEL_PIXEL_UM`] µm per
@@ -202,14 +204,18 @@ pub struct Instances {
 }
 
 impl StarDist {
+    /// The precision the network runs in.
+    pub fn precision(&self) -> net::Precision {
+        self.net.precision
+    }
+
     /// Loads an installed model on `device`.
     pub fn load(s: &'static Spec, device: Device) -> Result<Self, String> {
         let path = path_of(s.safetensors);
         if !path.is_file() {
             return Err(format!("{} is not installed (lucem-ml-stardist install {})", s.name, s.id));
         }
-        let layers = convert::read_safetensors(&path, s.channels)?;
-        Ok(Self { spec: s, net: net::StarDistNet::new(layers, s.channels, device)? })
+        Ok(Self { spec: s, net: net::StarDistNet::load(&path, s.channels, device)? })
     }
 
     /// The network's output on the grid for an image (the model's channels, interleaved) at the
@@ -258,6 +264,34 @@ impl StarDist {
         };
         Ok(Instances { labels, nuclei, ms: t0.elapsed().as_secs_f64() * 1e3 })
     }
+}
+
+/// What [`tune`] did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TuneSummary {
+    pub shapes: usize,
+    pub seconds: f64,
+}
+
+/// Runs the network once on every tile shape inference meets with the default [`Tiling`] (sides
+/// in steps of 256 up to a tile with its halo), largest first, so Burn's autotuned convolutions and
+/// the compiled kernels are chosen and cached before a real image needs them (`lucem autotune`).
+pub fn tune(model: &StarDist, mut progress: impl FnMut(usize, usize)) -> Result<TuneSummary, String> {
+    let t0 = Instant::now();
+    let t = Tiling::default();
+    let max = (t.tile + 2 * t.halo).div_ceil(predict::SHAPE_STEP) * predict::SHAPE_STEP;
+    let sides: Vec<usize> = (1..=max / predict::SHAPE_STEP).map(|k| k * predict::SHAPE_STEP).collect();
+    let mut shapes: Vec<(usize, usize)> = sides.iter().flat_map(|&a| sides.iter().map(move |&b| (a, b))).collect();
+    shapes.sort_by_key(|&(a, b)| std::cmp::Reverse(a * b));
+    let c = model.spec.channels;
+    let total = shapes.len();
+    for (k, &(h, w)) in shapes.iter().enumerate() {
+        // A textured image (values over the whole range), one tile exactly this shape
+        let pixels: Vec<u8> = (0..w * h * c).map(|i| ((i * 2_654_435_761) >> 13) as u8).collect();
+        model.grid(&pixels, w, h, Tiling { tile: w.max(h), halo: 0 }, &mut |_, _| {})?;
+        progress(k + 1, total);
+    }
+    Ok(TuneSummary { shapes: total, seconds: t0.elapsed().as_secs_f64() })
 }
 
 /// Bilinear resize of `nc` interleaved channels.

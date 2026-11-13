@@ -48,7 +48,53 @@ fn current_runtime() -> PyResult<String> {
     Ok(guard.as_ref().expect("set above").0.name().to_string())
 }
 
+/// Tunes this device once, as `lucem autotune`: lucem's operators over a grid of image sides, then
+/// every model plugin found; on `runtime`, else every usable runtime. Returns, per runtime, what
+/// was done: `{"operator_runs", "operator_failures", "seconds", "plugins": {name: "tuned" | "skipped" | why}}`.
+#[pyfunction]
+#[pyo3(signature = (runtime=None, sides=None, operators=true, models=true))]
+fn autotune(py: Python<'_>, runtime: Option<&str>, sides: Option<Vec<usize>>, operators: bool, models: bool) -> PyResult<String> {
+    let targets: Vec<ComputeTarget> = match runtime {
+        Some(name) => vec![ComputeTarget::parse(name).and_then(ComputeTarget::checked).map_err(value_err)?],
+        None => ComputeTarget::ALL.into_iter().filter(|t| t.is_available() && t.unusable_reason().is_none()).collect(),
+    };
+    let sides = sides.unwrap_or_else(|| lucem_pipeline::autotune::DEFAULT_SIDES.to_vec());
+    let mut report = serde_json::Map::new();
+    for target in targets {
+        let name = target.name();
+        let entry = py.detach(|| {
+            let mut e = serde_json::json!({});
+            if operators {
+                let opened = std::panic::catch_unwind(|| target.client());
+                let Ok(Ok(client)) = opened else { return serde_json::json!({"error": "no device here"}) };
+                let s = lucem_pipeline::autotune::autotune(&client, &sides, |_, _, _| {});
+                e["operator_runs"] = (s.runs - s.failed.len()).into();
+                e["operator_failures"] = s.failed.iter().map(|(t, side, why)| serde_json::json!({"operator": t, "side": side, "why": why})).collect::<Vec<_>>().into();
+                e["seconds"] = s.seconds.into();
+            }
+            if models && target != ComputeTarget::Hip {
+                let plugins: serde_json::Map<String, serde_json::Value> = lucem_ml::tune_plugins(Some(name), |_| {})
+                    .into_iter()
+                    .map(|r| {
+                        let v = match r.outcome {
+                            lucem_ml::TuneOutcome::Tuned => "tuned".to_string(),
+                            lucem_ml::TuneOutcome::Skipped => "skipped".to_string(),
+                            lucem_ml::TuneOutcome::Failed(why) => why,
+                        };
+                        (r.name, v.into())
+                    })
+                    .collect();
+                e["plugins"] = plugins.into();
+            }
+            e
+        });
+        report.insert(name.to_string(), entry);
+    }
+    serde_json::to_string(&report).map_err(py_err)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(autotune, m)?)?;
     m.add_function(wrap_pyfunction!(runtimes, m)?)?;
     m.add_function(wrap_pyfunction!(set_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(current_runtime, m)?)?;

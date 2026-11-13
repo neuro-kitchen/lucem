@@ -3,6 +3,7 @@
 //! data for headless runs ([`spec`]), and the older single-input modifier stack with live analytics
 //! ([`modifier`], [`executor`]).
 
+pub mod autotune;
 pub mod custom;
 pub mod eval;
 pub mod executor;

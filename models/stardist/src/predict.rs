@@ -23,7 +23,7 @@ pub struct Thresholds {
 pub const HE_THRESHOLDS: Thresholds = Thresholds { prob: 0.692_478_25, nms: 0.3 };
 
 /// Tile sides are rounded up to this (a multiple of the network's 16).
-const SHAPE_STEP: usize = 256;
+pub const SHAPE_STEP: usize = 256;
 const _: () = assert!(SHAPE_STEP.is_multiple_of(DIVISOR));
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -124,10 +124,27 @@ pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Ti
                 }
             }
             let t0 = std::time::Instant::now();
-            let x = Tensor::<4>::from_data(TensorData::new(input, [1, nc, ph, pw]), &net.device);
-            let (p, d) = net.forward(x);
-            let p: Vec<f32> = p.try_into_data().map_err(|e| format!("reading the probability: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
-            let d: Vec<f32> = d.try_into_data().map_err(|e| format!("reading the distances: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+            let attempt = || -> Result<(Vec<f32>, Vec<f32>), String> {
+                // In the network's precision on the wire: half the bytes up and back in F16
+                let data = TensorData::new(input.clone(), [1, nc, ph, pw]);
+                let x = match net.precision {
+                    crate::net::Precision::F32 => Tensor::<4>::from_data(data, &net.device),
+                    crate::net::Precision::F16 => Tensor::<4>::from_data(data.convert::<burn::tensor::f16>(), (&net.device, burn::tensor::DType::F16)),
+                };
+                let (p, d) = net.forward(x);
+                let p: Vec<f32> = p.try_into_data().map_err(|e| format!("reading the probability: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+                let d: Vec<f32> = d.try_into_data().map_err(|e| format!("reading the distances: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+                Ok((p, d))
+            };
+            // A matrix product this device cannot launch: Burn's own convolutions from now on
+            let (p, d) = match attempt() {
+                Ok(r) => r,
+                Err(e) if crate::net::disable_gemm() => {
+                    eprintln!("stardist: the matrix-product convolutions failed on this device, using Burn's own ({e})");
+                    attempt()?
+                }
+                Err(e) => return Err(e),
+            };
             if crate::timing() {
                 eprintln!("stardist: tile {ph}×{pw}: network and read back {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
             }

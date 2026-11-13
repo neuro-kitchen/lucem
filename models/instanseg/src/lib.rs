@@ -11,13 +11,15 @@
 //!   thresholds in the metadata ([`install`]). [`InstanSeg::load`] reads only the safetensors.
 //!   (The fluorescence "nuclei and cells" model uses another network, the channel-invariant one,
 //!   and is not ported yet.)
-//! - Network: [`net`] on Burn (CUDA, wgpu or the CPU), BatchNorm folded into the convolutions.
+//! - Network: [`net`], Burn modules mirroring InstanSeg's PyTorch classes (CUDA, wgpu or the
+//!   CPU), loaded with Burn's `SafetensorsStore` and its PyTorch adapter.
 //! - Input: each channel's 0.1st to 99.9th percentile to 0 and 1 (the packages' `scale_range`),
 //!   clamped to −2…3 as the archive does; images resampled to the models' 0.5 µm per pixel when
 //!   their pixel size is known, and the labels back.
 //! - Output: [`post`] (seeds, the pixel classifier, fragments and holes, overlaps joined, the
 //!   smallest dropped).
 
+pub mod bench;
 pub mod net;
 pub mod post;
 pub mod torchscript;
@@ -161,18 +163,12 @@ pub fn install(s: &Spec, progress: &mut dyn FnMut(u64, u64)) -> Result<(), Strin
     convert(&archive, meta, &path_of(s.safetensors))
 }
 
-/// The weights and settings back from the safetensors.
-fn read_safetensors(path: &Path) -> Result<(BTreeMap<String, torchscript::Tensor>, Params), String> {
+/// The shapes of the weights (for the module's configuration) and the settings, from the
+/// safetensors' header; the values load into the module through Burn's store ([`net::load`]).
+fn read_header(path: &Path) -> Result<(BTreeMap<String, Vec<usize>>, Params), String> {
     let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let (_, meta) = safetensors::SafeTensors::read_metadata(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
-    let st = safetensors::SafeTensors::deserialize(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut tensors = BTreeMap::new();
-    for (name, t) in st.tensors() {
-        if t.dtype() != Dtype::F32 {
-            return Err(format!("{name}: {:?}, expected F32", t.dtype()));
-        }
-        tensors.insert(name, torchscript::Tensor { shape: t.shape().to_vec(), data: t.data().as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect() });
-    }
+    let shapes: BTreeMap<String, Vec<usize>> = meta.tensors().into_iter().map(|(name, info)| (name, info.shape.clone())).collect();
     let m = meta.metadata().clone().unwrap_or_default();
     let get = |k: &str| -> Result<f64, String> { m.get(k).ok_or_else(|| format!("{}: no {k} in the metadata", path.display()))?.parse::<f64>().map_err(|e| format!("{k}: {e}")) };
     let params = Params {
@@ -184,20 +180,30 @@ fn read_safetensors(path: &Path) -> Result<(BTreeMap<String, torchscript::Tensor
         cleanup_fragments: get("default_cleanup_fragments")? != 0.0,
         min_size: get("default_min_size")? as usize,
     };
-    Ok((tensors, params))
+    Ok((shapes, params))
 }
 
-/// The pixel classifier's layers from the weights (`pixel_classifier.fc1..`).
-fn classifier(w: &BTreeMap<String, torchscript::Tensor>) -> Result<post::PixelClassifier, String> {
+/// The pixel classifier's layers for the host postprocessing ([`post`]), read from the loaded
+/// module (Burn's `Linear` keeps `[in, out]`; the host classifier takes `[out, in]`).
+fn classifier(p: &net::ProbabilityNet) -> Result<post::PixelClassifier, String> {
     let mut layers = Vec::new();
-    for k in 1.. {
-        let Some(wt) = w.get(&format!("pixel_classifier.fc{k}.weight")) else { break };
-        let b = w.get(&format!("pixel_classifier.fc{k}.bias")).ok_or_else(|| format!("pixel_classifier.fc{k}.bias is missing"))?;
-        let [o, i] = <[usize; 2]>::try_from(wt.shape.clone()).map_err(|_| format!("pixel_classifier.fc{k}: shape {:?}", wt.shape))?;
-        layers.push((wt.data.clone(), b.data.clone(), o, i));
+    for fc in [&p.fc1, &p.fc2, &p.fc3] {
+        let w = fc.weight.val();
+        let [i, o] = w.dims();
+        let w: Vec<f32> = w.try_into_data().map_err(|e| format!("the pixel classifier: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+        let b: Vec<f32> = match &fc.bias {
+            Some(b) => b.val().try_into_data().map_err(|e| format!("the pixel classifier: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?,
+            None => vec![0.0; o],
+        };
+        let t: Vec<f32> = (0..o).flat_map(|r| (0..i).map(move |c| (r, c))).map(|(r, c)| w[c * o + r]).collect();
+        layers.push((t, b, o, i));
     }
-    match (layers.first(), layers.last()) {
-        (Some(f), Some(l)) if f.3 == 4 && l.2 == 1 => Ok(post::PixelClassifier { layers }),
+    let c = post::PixelClassifier { layers };
+    if !c.fits() {
+        return Err(format!("the pixel classifier has a layer wider than {}", post::MAX_WIDTH));
+    }
+    match (c.layers.first(), c.layers.last()) {
+        (Some(f), Some(l)) if f.3 == 4 && l.2 == 1 => Ok(c),
         _ => Err("the pixel classifier must take 4 features and give 1 value".into()),
     }
 }
@@ -298,12 +304,43 @@ pub struct Tiling {
 
 impl Default for Tiling {
     fn default() -> Self {
-        Self { tile: 1024, halo: 96 }
+        // 1088 + 2 × 96 = 1280: a full tile is exactly a multiple of SHAPE_STEP (no padding
+        // wasted). A 2048-wide tile (1856 + halos) is past what the matrix products of the 3 × 3
+        // layers can launch on a Turing GPU ("cube count too big").
+        Self { tile: 1088, halo: 96 }
     }
 }
 
 /// Tile sides are rounded up to this, so CubeCL's tuned kernels come from its cache.
-const SHAPE_STEP: usize = 256;
+pub const SHAPE_STEP: usize = 256;
+
+/// Where the time of one image went (milliseconds), and how much the network computed for it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Timings {
+    /// Percentiles and scaling on the host.
+    pub normalize: f64,
+    /// Tiles cut out and padded on the host.
+    pub prepare: f64,
+    /// Upload and the network, until the device is idle.
+    pub compute: f64,
+    /// The output back to the host.
+    pub readback: f64,
+    /// Seeds, the pixel classifier, labels.
+    pub post: f64,
+    pub tiles: usize,
+    /// Pixels the network computed (padding and halos included) per pixel of the image.
+    pub overhead: f64,
+}
+
+impl Timings {
+    pub fn total(&self) -> f64 {
+        self.normalize + self.prepare + self.compute + self.readback + self.post
+    }
+}
+
+fn ms(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1e3
+}
 
 /// `i` mirrored into `0..n`, as numpy's and PyTorch's `reflect`.
 fn reflect(i: usize, n: usize) -> usize {
@@ -315,9 +352,36 @@ fn reflect(i: usize, n: usize) -> usize {
     if k < n { k } else { period - k }
 }
 
+/// The precision the network runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    F32,
+    /// Half precision: weights, activations and the data to and from the device (half the bytes
+    /// moved), and the GPU's tensor-core convolutions.
+    F16,
+}
+
+impl Precision {
+    /// `LUCEM_INSTANSEG_PRECISION` (`f32`, `f16`), else half precision on a GPU and single
+    /// precision on the CPU runtime (`LUCEM_RUNTIME=cpu`), where half precision is slower.
+    pub fn from_env() -> Self {
+        match std::env::var("LUCEM_INSTANSEG_PRECISION").unwrap_or_default().to_lowercase().as_str() {
+            "f32" => Precision::F32,
+            "f16" => Precision::F16,
+            _ if std::env::var("LUCEM_RUNTIME").is_ok_and(|r| r.eq_ignore_ascii_case("cpu")) => Precision::F32,
+            _ => Precision::F16,
+        }
+    }
+}
+
 pub struct InstanSeg {
     pub spec: &'static Spec,
-    net: net::InstanSegNet,
+    pub precision: Precision,
+    /// The network and its pixel classifier, as Burn modules ([`net`]).
+    pub model: net::InstanSegModel,
+    pub config: net::UNetConfig,
+    device: Device,
+    /// The pixel classifier on the host, for the postprocessing.
     classifier: post::PixelClassifier,
     pub params: Params,
 }
@@ -337,31 +401,54 @@ impl InstanSeg {
         if !path.is_file() {
             return Err(format!("{} is not installed (lucem-ml-instanseg install {})", s.name, s.id));
         }
-        let (w, params) = read_safetensors(&path)?;
-        Self::from_weights(s, &w, params, device)
+        Self::load_file(s, &path, device)
     }
 
-    /// The model from weights already read (the archive's, or the safetensors').
-    pub fn from_weights(s: &'static Spec, w: &BTreeMap<String, torchscript::Tensor>, params: Params, device: Device) -> Result<Self, String> {
-        let net = net::InstanSegNet::new(w, device)?;
-        if net.channels != s.channels {
-            return Err(format!("{}: the weights take {} channel(s), the model {}", s.name, net.channels, s.channels));
+    /// The model from a safetensors file written by [`convert`].
+    pub fn load_file(s: &'static Spec, path: &Path, device: Device) -> Result<Self, String> {
+        let (shapes, params) = read_header(path)?;
+        let config = net::UNetConfig::from_shapes(&shapes)?;
+        if config.channels != s.channels {
+            return Err(format!("{}: the weights take {} channel(s), the model {}", s.name, config.channels, s.channels));
         }
-        if net.outputs != 5 {
-            return Err(format!("{}: the network gives {} channels, expected 5 (embedding, sigma, seeds)", s.name, net.outputs));
+        if config.outputs() != 5 {
+            return Err(format!("{}: the network gives {} channels, expected 5 (embedding, sigma, seeds)", s.name, config.outputs()));
         }
-        Ok(Self { spec: s, net, classifier: classifier(w)?, params })
+        let precision = Precision::from_env();
+        // BatchNorm folded in f32, the classifier read in f32, then the network cast
+        let model = net::load(path, &config, &device)?.fold_batch_norm();
+        let classifier = classifier(&model.pixel_classifier)?;
+        let model = match precision {
+            Precision::F32 => model,
+            Precision::F16 => net::InstanSegModel { fcn: model.fcn.cast(burn::tensor::FloatDType::F16), ..model },
+        };
+        // 3 × 3 convolutions as matrix products on the GPU in half precision (see
+        // `ConvNormAct::conv_gemm`); `LUCEM_INSTANSEG_CONV=gemm|direct` chooses
+        let gemm = match std::env::var("LUCEM_INSTANSEG_CONV").unwrap_or_default().to_lowercase().as_str() {
+            "gemm" => true,
+            "direct" => false,
+            _ => precision == Precision::F16,
+        };
+        let model = net::InstanSegModel { fcn: model.fcn.with_gemm(gemm), ..model };
+        Ok(Self { spec: s, precision, model, config, device, classifier, params })
     }
 
     /// The network's output (`[5, h, w]`) for `planes` (`[channels, h, w]`, normalized).
     pub fn network(&self, planes: &[f32], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<f32>, String> {
-        let no = self.net.outputs;
-        let nc = self.net.channels;
+        self.network_timed(planes, w, h, t, progress, &mut Timings::default())
+    }
+
+    /// [`Self::network`], adding where its time went to `times`.
+    pub fn network_timed(&self, planes: &[f32], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize), times: &mut Timings) -> Result<Vec<f32>, String> {
+        let no = self.config.outputs();
+        let nc = self.config.channels;
         let mut out = vec![0f32; no * w * h];
         let step = t.tile.max(net::DIVISOR);
         let (ny, nx) = (h.div_ceil(step), w.div_ceil(step));
+        let mut computed = 0usize;
         for ty in 0..ny {
             for tx in 0..nx {
+                let t0 = Instant::now();
                 let (y0, x0) = (ty * step, tx * step);
                 let (y1, x1) = ((y0 + step).min(h), (x0 + step).min(w));
                 let (ry0, rx0) = (y0.saturating_sub(t.halo), x0.saturating_sub(t.halo));
@@ -377,12 +464,40 @@ impl InstanSeg {
                         }
                     }
                 }
-                let t0 = Instant::now();
-                let y = self.net.forward(Tensor::<4>::from_data(TensorData::new(input, [1, nc, ph, pw]), &self.net.device));
-                let y: Vec<f32> = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+                computed += ph * pw;
+                times.prepare += ms(t0);
+                // The tile through the network: its output, and the ms of compute and readback
+                let attempt = || -> Result<(Vec<f32>, f64, f64), String> {
+                    let t1 = Instant::now();
+                    // In the network's precision on the wire: half the bytes up and back in F16
+                    let data = TensorData::new(input.clone(), [1, nc, ph, pw]);
+                    // Created in that dtype: `from_data` would otherwise convert to the device's default
+                    let x = match self.precision {
+                        Precision::F32 => Tensor::<4>::from_data(data, &self.device),
+                        Precision::F16 => Tensor::<4>::from_data(data.convert::<burn::tensor::f16>(), (&self.device, burn::tensor::DType::F16)),
+                    };
+                    let y = self.model.fcn.forward(x);
+                    self.device.sync().map_err(|e| format!("the device: {e:?}"))?;
+                    let compute = ms(t1);
+                    let t2 = Instant::now();
+                    let y = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+                    Ok((y, compute, ms(t2)))
+                };
+                // A matrix product this device cannot launch: Burn's own convolutions from now on
+                let (y, compute, readback) = match attempt() {
+                    Ok(r) => r,
+                    Err(e) if net::disable_gemm() => {
+                        eprintln!("instanseg: the matrix-product convolutions failed on this device, using Burn's own ({e})");
+                        attempt()?
+                    }
+                    Err(e) => return Err(e),
+                };
+                times.compute += compute;
+                times.readback += readback;
                 if timing() {
-                    eprintln!("instanseg: tile {ph}×{pw}: network and read back {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+                    eprintln!("instanseg: tile {ph}×{pw}: network {compute:.0} ms, read back {readback:.0} ms");
                 }
+                let t3 = Instant::now();
                 for c in 0..no {
                     for yy in y0..y1 {
                         let ly = yy - ry0;
@@ -390,9 +505,12 @@ impl InstanSeg {
                         out[c * w * h + yy * w + x0..c * w * h + yy * w + x1].copy_from_slice(src);
                     }
                 }
+                times.prepare += ms(t3);
                 progress(ty * nx + tx + 1, ny * nx);
             }
         }
+        times.tiles += ny * nx;
+        times.overhead = computed as f64 / (w * h).max(1) as f64;
         if out.iter().all(|&v| v == 0.0) {
             // A device that failed quietly reads back zeros: never an answer
             return Err("the network gave nothing at all (the device failed?)".into());
@@ -402,19 +520,28 @@ impl InstanSeg {
 
     /// The nuclei of an image at the model's own scale (the model's channels, interleaved).
     pub fn segment(&self, pixels: &[u8], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize)) -> Result<(Vec<u32>, Vec<Found>), String> {
+        let (labels, found, times) = self.segment_timed(pixels, w, h, t, progress)?;
+        if timing() {
+            eprintln!("instanseg: {times:?} ({} nuclei)", found.len());
+        }
+        Ok((labels, found))
+    }
+
+    /// [`Self::segment`] and where its time went.
+    pub fn segment_timed(&self, pixels: &[u8], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize)) -> Result<(Vec<u32>, Vec<Found>, Timings), String> {
         let c = self.spec.channels;
         if pixels.len() != w * h * c {
             return Err(format!("{} bytes, not {w} × {h} × {c}", pixels.len()));
         }
-        let planes = normalize(pixels, w, h, c);
+        let mut times = Timings::default();
         let t0 = Instant::now();
-        let out = self.network(&planes, w, h, t, progress)?;
+        let planes = normalize(pixels, w, h, c);
+        times.normalize = ms(t0);
+        let out = self.network_timed(&planes, w, h, t, progress, &mut times)?;
         let t1 = Instant::now();
-        let r = post::instances(&post::Output { data: &out, h, w }, &self.classifier, &self.params);
-        if timing() {
-            eprintln!("instanseg: network {:.0} ms, postprocessing {:.0} ms ({} nuclei)", (t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3, r.1.len());
-        }
-        Ok(r)
+        let (labels, found) = post::instances(&post::Output { data: &out, h, w }, &self.classifier, &self.params);
+        times.post = ms(t1);
+        Ok((labels, found, times))
     }
 
     /// The nuclei of an image (`pixel_um`: its pixel size, when known: resampled to the model's
@@ -543,9 +670,8 @@ mod tests {
         let archive = torchscript::read(&std::fs::read(dir.join("instanseg.pt")).unwrap()).unwrap();
         let tmp = std::env::temp_dir().join(format!("lucem-instanseg-test-{}-{}.safetensors", folder, std::process::id()));
         convert(&archive, HashMap::new(), &tmp).unwrap();
-        let (w8, params) = read_safetensors(&tmp).unwrap();
+        let model = InstanSeg::load_file(s, &tmp, device().unwrap()).unwrap();
         std::fs::remove_file(&tmp).ok();
-        let model = InstanSeg::from_weights(s, &w8, params, device().unwrap()).unwrap();
         let (si, input) = npy(&dir.join("test-input.npy"));
         let (so, expected) = npy(&dir.join("test-output_instance_segmentation.npy"));
         let (c, h, w) = (si[1], si[2], si[3]);

@@ -17,6 +17,9 @@ const USAGE: &str = "lucem — GPU image analysis
 USAGE
   lucem info <image>                     Describe an image
   lucem doctor                           Which compute runtimes are usable
+  lucem autotune [--runtime NAME] [--sides 256,1024,2048] [--operators-only | --models-only]
+                                         Tune this device once: lucem's operators and every
+                                         model plugin, on every usable runtime
   lucem run <spec.json> <image> <output> [--block N] [--runtime NAME]
                                          Run a pipeline over a whole image
   lucem sample <output.ome.zarr> [--size N] [--depth N]
@@ -46,6 +49,7 @@ USAGE
                                          Run an analysis saved by the app on many images
 ";
 
+mod autotune;
 mod hist;
 mod ops;
 mod session;
@@ -127,6 +131,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
     match command.as_str() {
         "info" => info(args),
         "doctor" => doctor(args),
+        "autotune" => autotune::autotune(args),
         "run" => run_pipeline(args),
         "sample" => sample(args),
         "serve" => serve(args),

@@ -224,6 +224,7 @@ pub fn register(registry: &Registry, c: &Ctx) {
         .enabled(needs_image(s)),
         CommandSpec::new("file.export_geojson", "Export as GeoJSON", IconName::FileOutput, st(|s, cx| s.export_geojson(cx))).group("File").hint("The shown image's shapes as GeoJSON").enabled(needs_image(s)),
         CommandSpec::new("file.export_cells", "Export cell measurements", IconName::Sheet, st(|s, cx| s.hist_export(cx))).group("File").hint("Cells, tiles, labels and provenance to the output store").enabled(needs_image(s)),
+        CommandSpec::new("file.tune", "Tune this device", IconName::Gauge, st(|s, cx| s.tune_device(cx))).group("File").hint("Benchmark this GPU once for lucem's operators and models, in the background"),
         CommandSpec::new("app.quit", "Quit", IconName::Power, |_, cx| cx.quit()).group("File").hint("Close lucem").key("secondary-q"),
     ];
     // Edit
@@ -808,6 +809,8 @@ pub fn app_menu() -> Vec<MenuItem> {
         MenuItem::command("file.export_geojson"),
         MenuItem::command("file.export_cells"),
         MenuItem::provided("file.recent"),
+        MenuItem::Separator,
+        MenuItem::command("file.tune"),
         MenuItem::Separator,
         MenuItem::command("app.quit"),
     ]
