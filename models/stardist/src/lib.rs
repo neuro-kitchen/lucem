@@ -204,6 +204,11 @@ pub struct Instances {
 }
 
 impl StarDist {
+    /// The precision the network runs in.
+    pub fn precision(&self) -> net::Precision {
+        self.net.precision
+    }
+
     /// Loads an installed model on `device`.
     pub fn load(s: &'static Spec, device: Device) -> Result<Self, String> {
         let path = path_of(s.safetensors);

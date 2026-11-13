@@ -11,14 +11,15 @@
 
 use std::path::Path;
 
-use burn::module::Module;
+use burn::module::{Module, ModuleMapper, Param};
 use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::interpolate::{Interpolate2d, Interpolate2dConfig, InterpolateMode};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
 use burn::nn::PaddingConfig2d;
 use burn::store::{ModuleSnapshot, SafetensorsStore};
 use burn::tensor::activation::{relu, sigmoid};
-use burn::tensor::{Device, Tensor};
+use burn::tensor::ops::PadMode;
+use burn::tensor::{Device, FloatDType, Tensor};
 
 /// A convolution of the published model: its Keras name, kernel side, filters in and out.
 #[derive(Debug, Clone, Copy)]
@@ -93,6 +94,51 @@ pub struct StarDistModule {
     dist: Conv2d,
     pool: MaxPool2d,
     up: Interpolate2d,
+    /// The 3 × 3 layers of 64 channels and more run as matrix products ([`conv_gemm`]).
+    #[module(skip)]
+    gemm: bool,
+}
+
+/// The width from which 3 × 3 convolutions run as matrix products ([`conv_gemm`]).
+const GEMM_FROM_CHANNELS: usize = 64;
+
+/// Set when a matrix product could not launch on this device: every layer runs Burn's own
+/// convolution from then on ([`disable_gemm`]).
+static GEMM_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns the matrix-product convolutions off for this process; whether they were on.
+pub fn disable_gemm() -> bool {
+    !GEMM_OFF.swap(true, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A 3 × 3 convolution as one matrix product: the input zero-padded, its nine shifted copies
+/// stacked on the channel axis (`[n, 9c, h·w]`, offset-major), times the weights reordered to
+/// match (`[o, 9c]`). Burn's tensor-core convolution asks more shared memory than a Turing GPU has
+/// (64 KB per block) for layers of 64 channels and more and falls back to its direct kernel, about
+/// 15× slower; its matrix product tunes and runs on the tensor cores there.
+fn conv_gemm(conv: &Conv2d, x: Tensor<4>) -> Tensor<4> {
+    let [n, c, h, w] = x.dims();
+    let [o, _, kh, kw] = conv.weight.dims();
+    let (ph, pw) = (kh / 2, kw / 2);
+    let xp = x.pad((pw, pw, ph, ph), PadMode::Constant(0.0));
+    let shifted: Vec<Tensor<4>> = (0..kh).flat_map(|dy| (0..kw).map(move |dx| (dy, dx))).map(|(dy, dx)| xp.clone().slice([0..n, 0..c, dy..dy + h, dx..dx + w])).collect();
+    let cols = Tensor::cat(shifted, 1).reshape([n, kh * kw * c, h * w]);
+    let weights = conv.weight.val().permute([0, 2, 3, 1]).reshape([1, o, kh * kw * c]);
+    let mut y = weights.matmul(cols);
+    if let Some(b) = &conv.bias {
+        y = y + b.val().reshape([1, o, 1]);
+    }
+    y.reshape([n, o, h, w])
+}
+
+/// Casts every float parameter of a module to `dtype`.
+struct Cast(FloatDType);
+
+impl ModuleMapper for Cast {
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
+        let dtype = self.0;
+        param.map(|t| t.cast(dtype))
+    }
 }
 
 impl StarDistModule {
@@ -123,6 +169,7 @@ impl StarDistModule {
             features: c(16),
             prob: c(17),
             dist: c(18),
+            gemm: false,
             pool: MaxPool2dConfig::new([2, 2]).with_strides([2, 2]).init(),
             up: Interpolate2dConfig::new().with_scale_factor(Some([2.0, 2.0])).with_mode(InterpolateMode::Nearest).init(),
         }
@@ -131,7 +178,12 @@ impl StarDistModule {
     /// `x`: `[n, channels, h, w]` (normalized; `h`, `w` multiples of [`DIVISOR`]) → probability
     /// `[n, 1, h/2, w/2]` and distances `[n, 32, h/2, w/2]` (input pixels).
     pub fn forward(&self, x: Tensor<4>) -> (Tensor<4>, Tensor<4>) {
-        let c = |conv: &Conv2d, x: Tensor<4>| relu(conv.forward(x));
+        let gemm = self.gemm && !GEMM_OFF.load(std::sync::atomic::Ordering::Relaxed);
+        let run = move |conv: &Conv2d, x: Tensor<4>| {
+            let [o, i, kh, _] = conv.weight.dims();
+            if gemm && kh > 1 && o.max(i) >= GEMM_FROM_CHANNELS { conv_gemm(conv, x) } else { conv.forward(x) }
+        };
+        let c = |conv: &Conv2d, x: Tensor<4>| relu(run(conv, x));
         // To the grid
         let x = self.pool.forward(c(&self.conv2d_2, c(&self.conv2d_1, x)));
         // Down
@@ -144,7 +196,29 @@ impl StarDistModule {
         let u1 = c(&self.up_level_1_no_2, c(&self.up_level_1_no_0, Tensor::cat(vec![self.up.forward(u2), s1], 1)));
         let u0 = c(&self.up_level_0_no_2, c(&self.up_level_0_no_0, Tensor::cat(vec![self.up.forward(u1), s0], 1)));
         let f = c(&self.features, u0);
-        (sigmoid(self.prob.forward(f.clone())), self.dist.forward(f))
+        (sigmoid(run(&self.prob, f.clone())), run(&self.dist, f))
+    }
+}
+
+/// The precision the network runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    F32,
+    /// Half precision: weights, activations and the data to and from the device (half the bytes
+    /// moved), and the GPU's tensor-core convolutions.
+    F16,
+}
+
+impl Precision {
+    /// `LUCEM_STARDIST_PRECISION` (`f32`, `f16`), else half precision on a GPU and single
+    /// precision on the CPU runtime (`LUCEM_RUNTIME=cpu`).
+    pub fn from_env() -> Self {
+        match std::env::var("LUCEM_STARDIST_PRECISION").unwrap_or_default().to_lowercase().as_str() {
+            "f32" => Precision::F32,
+            "f16" => Precision::F16,
+            _ if std::env::var("LUCEM_RUNTIME").is_ok_and(|r| r.eq_ignore_ascii_case("cpu")) => Precision::F32,
+            _ => Precision::F16,
+        }
     }
 }
 
@@ -153,6 +227,7 @@ pub struct StarDistNet {
     pub module: StarDistModule,
     pub device: Device,
     pub channels: usize,
+    pub precision: Precision,
 }
 
 impl StarDistNet {
@@ -165,7 +240,18 @@ impl StarDistNet {
         if !r.errors.is_empty() || !r.missing.is_empty() || !r.unused.is_empty() {
             return Err(format!("{}: errors {:?}, missing {:?}, unused {:?}", path.display(), r.errors, r.missing, r.unused));
         }
-        Ok(Self { module, device, channels })
+        let precision = Precision::from_env();
+        // The wide 3 × 3 layers as matrix products on a GPU in half precision (`conv_gemm`);
+        // `LUCEM_STARDIST_CONV=gemm|direct` chooses
+        module.gemm = match std::env::var("LUCEM_STARDIST_CONV").unwrap_or_default().to_lowercase().as_str() {
+            "gemm" => true,
+            "direct" => false,
+            _ => precision == Precision::F16,
+        };
+        if precision == Precision::F16 {
+            module = module.map(&mut Cast(FloatDType::F16));
+        }
+        Ok(Self { module, device, channels, precision })
     }
 
     pub fn forward(&self, x: Tensor<4>) -> (Tensor<4>, Tensor<4>) {

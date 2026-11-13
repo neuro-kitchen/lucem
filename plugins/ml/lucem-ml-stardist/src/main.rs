@@ -8,6 +8,8 @@
 //!                                      them into safetensors in lucem's cache
 //! lucem-ml-stardist tune [model]...    runs every installed model (or those named) on every tile
 //!                                      shape, so tuned kernels are cached (`lucem autotune` runs it)
+//! lucem-ml-stardist bench [--model ID] [--sizes 512,1024] [--runs N]
+//!                                      times whole images, cold and warm
 //! lucem-ml-stardist serve              requests on stdin, events on stdout (lucem-ml's protocol);
 //!                                      `instances`: every nucleus of an RGB image as labels
 //! ```
@@ -132,6 +134,76 @@ fn tune(ids: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// A deterministic test image: round nuclei about 8–14 px across on a textured background,
+/// dark purple on pink for 3 channels, bright on dark for 1.
+fn synthetic(w: usize, h: usize, channels: usize) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut amount = vec![0f32; w * h];
+    for cy in (0..h).step_by(20) {
+        for cx in (0..w).step_by(20) {
+            if next() < 0.15 {
+                continue;
+            }
+            let (y0, x0, r) = (cy as f64 + next() * 20.0, cx as f64 + next() * 20.0, 4.0 + next() * 3.0);
+            for y in ((y0 - r - 1.0).max(0.0) as usize)..((y0 + r + 2.0) as usize).min(h) {
+                for x in ((x0 - r - 1.0).max(0.0) as usize)..((x0 + r + 2.0) as usize).min(w) {
+                    let d = (((y as f64 - y0).powi(2) + (x as f64 - x0).powi(2)).sqrt() - r).clamp(-1.0, 1.0);
+                    let a = &mut amount[y * w + x];
+                    *a = a.max((0.5 - d * 0.5) as f32);
+                }
+            }
+        }
+    }
+    amount
+        .into_iter()
+        .flat_map(|a| {
+            let a = (a + (next() - 0.5) as f32 * 0.08).clamp(0.0, 1.0);
+            let px = if channels == 1 { vec![(20.0 + 200.0 * a) as u8] } else { [230.0 - 140.0 * a, 190.0 - 130.0 * a, 210.0 - 70.0 * a].map(|v| v.clamp(0.0, 255.0) as u8).to_vec() };
+            px
+        })
+        .collect()
+}
+
+/// The value after `flag` in `args`, if given.
+fn flag(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+}
+
+/// Times whole images (the network and the polygons), cold and the median of `--runs` warm runs.
+fn bench(args: &[String]) -> Result<(), String> {
+    let id = flag(args, "--model").unwrap_or_else(|| sd::MODELS[0].id.to_string());
+    let s = sd::spec(&id).ok_or_else(|| format!("no model {id:?}"))?;
+    let sizes: Vec<usize> = match flag(args, "--sizes") {
+        Some(v) => v.split(',').map(|x| x.trim().parse::<usize>().map_err(|e| format!("--sizes {x:?}: {e}"))).collect::<Result<_, _>>()?,
+        None => vec![512, 1024, 2048, 4096],
+    };
+    let runs: usize = flag(args, "--runs").map(|v| v.parse().map_err(|e| format!("--runs: {e}"))).transpose()?.unwrap_or(3);
+    if !sd::installed(s) {
+        install(s.id, false)?;
+    }
+    let device = sd::device()?;
+    let label = format!("{device:?}");
+    let model = StarDist::load(s, device)?;
+    eprintln!("{}: {label}, {:?}, {runs} warm run(s) per size", s.name, model.precision());
+    println!("{:>6} {:>7} {:>9} {:>9}", "side", "nuclei", "cold ms", "warm ms");
+    for side in sizes {
+        let px = synthetic(side, side, s.channels);
+        let t0 = std::time::Instant::now();
+        let r = model.instances(&px, side, side, None, &mut |_, _| {})?;
+        let cold = t0.elapsed().as_secs_f64() * 1e3;
+        let mut warm: Vec<f64> = (0..runs.max(1)).map(|_| model.instances(&px, side, side, None, &mut |_, _| {}).map(|r| r.ms)).collect::<Result<_, _>>()?;
+        warm.sort_by(f64::total_cmp);
+        println!("{side:>6} {:>7} {cold:>9.0} {:>9.1}", r.nuclei.len(), warm[warm.len() / 2]);
+    }
+    Ok(())
+}
+
 fn main() {
     lucem_ml::legacy::adopt();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -147,6 +219,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("bench") => {
+            if let Err(e) = bench(&args[1..]) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         Some("tune") => {
             if let Err(e) = tune(&args[1..]) {
                 eprintln!("{e}");
@@ -155,7 +233,7 @@ fn main() {
         }
         Some("serve") => serve(),
         _ => {
-            eprintln!("lucem-ml-stardist {}: StarDist nuclei for lucem (BSD-3-Clause)\n\nusage:\n  lucem-ml-stardist info\n  lucem-ml-stardist install <model>\n  lucem-ml-stardist tune [model]...\n  lucem-ml-stardist serve", env!("CARGO_PKG_VERSION"));
+            eprintln!("lucem-ml-stardist {}: StarDist nuclei for lucem (BSD-3-Clause)\n\nusage:\n  lucem-ml-stardist info\n  lucem-ml-stardist install <model>\n  lucem-ml-stardist tune [model]...\n  lucem-ml-stardist bench [--model ID] [--sizes 512,1024] [--runs N]\n  lucem-ml-stardist serve", env!("CARGO_PKG_VERSION"));
             std::process::exit(2);
         }
     }
