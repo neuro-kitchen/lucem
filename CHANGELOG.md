@@ -5,6 +5,14 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+## [0.0.2] - 2026-11-13
+
+lucem on PyPI: the Python package (`pip install lucem`) with histology, the desktop app and the
+model plugins as extras (`lucem[hist]`, `lucem[app]`, `lucem[ml]`, `lucem[all]`); InstanSeg's
+nucleus models on Burn, and both model plugins 3–10× faster on a GPU; `lucem autotune` for the
+whole machine; pairing codes kept out of logs; releases from a tag of `main` by trusted
+publishing to crates.io and PyPI; brush size from the keyboard.
+
 ### Release process
 
 - Releases come from a `v*` tag of `main` (`.github/workflows/release.yml`, as kitchen and
