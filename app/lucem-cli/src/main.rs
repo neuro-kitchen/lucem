@@ -1,5 +1,6 @@
 //! Command-line interface of lucem: run pipelines over images, check devices, serve images.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -280,12 +281,20 @@ fn serve(mut args: Args) -> Result<(), String> {
     let addr = bind.parse().map_err(|e| format!("--bind {bind}: {e}"))?;
     let authority = Arc::new(Authority::open_or_create(&dir).map_err(|e| e.to_string())?);
     let tls = server_config_with_clients(&authority, &identity, anonymous).map_err(|e| e.to_string())?;
+    // A pairing code is a secret: shown only to someone at a terminal. Under podman or systemd
+    // stderr is a log (the container's, the journal), and a code there could be read by whoever
+    // reads the log; that operator asks `lucem clients pair` for one instead.
+    let code = if std::io::stderr().is_terminal() { Some(authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?) } else { None };
     runtime()?.block_on(async move {
-        let code = authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?;
         let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max);
         eprintln!("serving {data} on {addr} to paired computers");
-        eprintln!("pair a computer (read only, {} minutes, once): {addr}  code {}", lucem_stream::pairing::CODE_MINUTES, code.display());
-        eprintln!("  in lucem: the server button › Pair with a lucem server…   or: lucem pair {addr} {}", code.display());
+        match code {
+            Some(code) => {
+                eprintln!("pair a computer (read only, {} minutes, once): {addr}  code {}", lucem_stream::pairing::CODE_MINUTES, code.display());
+                eprintln!("  in lucem: the server button › Pair with a lucem server…   or: lucem pair {addr} {}", code.display());
+            }
+            None => eprintln!("pair a computer: `lucem clients pair` gives a code (in a container: podman exec <container> lucem clients pair)"),
+        }
         tokio::select! {
             r = server.run(ServeOptions { data: PathBuf::from(&data) }) => r.map_err(|e| e.to_string()),
             _ = shutdown() => { Ok(()) }

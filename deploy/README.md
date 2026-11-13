@@ -65,6 +65,15 @@ podman exec lucem-serve lucem clients list
 podman exec lucem-serve lucem clients revoke alice      # refused from its next connection on
 ```
 
+A computer can also pair with a one-time code instead of a file: `lucem clients pair` (add
+`--control` for more than reading) prints one, and the running server accepts it at once. Run in a
+terminal, `lucem serve` prints a read-only code itself; as a service it does not, so no code is
+kept in the container's log or the journal.
+
+```bash
+podman exec lucem-serve lucem clients pair
+```
+
 Hand the file over privately: it holds the client's private key. Back up `/data/.lucem-auth`. Clients
 open only images under `/data`: hidden folders, links out of it and anything that is not an image are
 refused. Clients are read-only.
