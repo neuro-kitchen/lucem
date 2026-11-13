@@ -22,10 +22,14 @@ USAGE
   lucem sample <output.ome.zarr> [--size N] [--depth N]
                                          Write a synthetic image (a volume with --depth)
   lucem serve [--data DIR] [--bind ADDR] [--name HOST]... [--max-clients N] [--allow-anonymous]
-              [--certificate FILE --private-key FILE]
+              [--pair] [--certificate FILE --private-key FILE]
                                          Serve the images under DIR to enrolled clients
-  lucem clients pair [--control]                         (--auth DIR)
-                                         A one-time code to pair a computer (10 minutes)
+                                         (--pair: show a pairing code on the terminal at start)
+  lucem clients pair [--control] [--out FILE]            (--auth DIR)
+                                         A one-time code to pair a computer (10 minutes), shown
+                                         on the terminal (--out: a file only you can read)
+  lucem clients codes [--cancel ID|all]                  (--auth DIR)
+                                         The live pairing codes (no secrets); cancel them
   lucem clients enroll <name> [--control] --out FILE|-   (--auth DIR)
   lucem clients list | revoke <name>                     (--auth DIR)
                                          Who may connect to `serve`
@@ -268,6 +272,7 @@ fn serve(mut args: Args) -> Result<(), String> {
     names.insert(0, "localhost".into());
     let max = args.number("--max-clients")?.unwrap_or(lucem_stream::DEFAULT_MAX_CONNECTIONS);
     let anonymous = args.take_flag("--allow-anonymous");
+    let pair_now = args.take_flag("--pair");
     let certificate = args.take_value("--certificate")?;
     let key = args.take_value("--private-key")?;
     args.positional(0)?;
@@ -280,12 +285,19 @@ fn serve(mut args: Args) -> Result<(), String> {
     let addr = bind.parse().map_err(|e| format!("--bind {bind}: {e}"))?;
     let authority = Arc::new(Authority::open_or_create(&dir).map_err(|e| e.to_string())?);
     let tls = server_config_with_clients(&authority, &identity, anonymous).map_err(|e| e.to_string())?;
+    // No pairing code unless asked for: a code is a secret, and one made at every start would be
+    // a live secret nobody asked for. `--pair` shows one on the terminal (never in a log).
+    let terminal = if pair_now { Some(Terminal::open().map_err(|e| format!("--pair: {e}"))?) } else { None };
     runtime()?.block_on(async move {
-        let code = authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?;
-        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max);
+        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority.clone()).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max);
         eprintln!("serving {data} on {addr} to paired computers");
-        eprintln!("pair a computer (read only, {} minutes, once): {addr}  code {}", lucem_stream::pairing::CODE_MINUTES, code.display());
-        eprintln!("  in lucem: the server button › Pair with a lucem server…   or: lucem pair {addr} {}", code.display());
+        match terminal {
+            Some(mut t) => {
+                let code = authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?;
+                t.show(&format!("pair a computer (read only, {} minutes, once): {addr}  code {}\n  in lucem: the server button › Pair with a lucem server…   or: lucem pair {addr} {}", lucem_stream::pairing::CODE_MINUTES, code.display(), code.display()))?;
+            }
+            None => eprintln!("pair a computer: `lucem clients pair` (in a container: podman exec -it <container> lucem clients pair)"),
+        }
         tokio::select! {
             r = server.run(ServeOptions { data: PathBuf::from(&data) }) => r.map_err(|e| e.to_string()),
             _ = shutdown() => { Ok(()) }
@@ -319,10 +331,45 @@ fn clients(mut args: Args) -> Result<(), String> {
     match what.as_str() {
         "pair" => {
             let permission = if args.take_flag("--control") { Permission::Control } else { Permission::Read };
+            let out = args.take_value("--out")?;
             args.positional(0)?;
+            // Shown on the terminal itself, never on standard output: a redirect, a pipe or a log
+            // never holds it. A script takes it from a file only its owner can read (`--out`).
+            let mut terminal = if out.is_some() { None } else { Some(Terminal::open().map_err(|e| format!("{e}; or pass --out FILE for a script (written readable by you only)"))?) };
             let code = authority.new_pairing_code(permission).map_err(|e| e.to_string())?;
-            println!("{}", code.display());
-            eprintln!("works once, for {} minutes ({permission}); a running `lucem serve` accepts it at once", lucem_stream::pairing::CODE_MINUTES);
+            match (&mut terminal, &out) {
+                (Some(t), _) => t.show(&code.display())?,
+                (None, Some(path)) => {
+                    lucem_stream::pairing::save_code(Path::new(path), &code).map_err(|e| format!("{path}: {e}"))?;
+                    eprintln!("wrote the code to {path} (readable by you only; remove it once used)");
+                }
+                (None, None) => unreachable!("no terminal is only taken with --out"),
+            }
+            eprintln!("works once, for {} minutes ({permission}); a running `lucem serve` accepts it at once; `lucem clients codes --cancel {}` cancels it", lucem_stream::pairing::CODE_MINUTES, code.id);
+            Ok(())
+        }
+        "codes" => {
+            let cancel = args.take_value("--cancel")?;
+            args.positional(0)?;
+            match cancel.as_deref() {
+                Some(which) => {
+                    let n = authority.cancel_pairing_codes(if which == "all" { None } else { Some(which) }).map_err(|e| e.to_string())?;
+                    if n == 0 && which != "all" {
+                        return Err(format!("no live pairing code {which:?} (see lucem clients codes)"));
+                    }
+                    eprintln!("cancelled {n} pairing code(s)");
+                }
+                None => {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                    let codes = authority.pairing_codes().map_err(|e| e.to_string())?;
+                    if codes.is_empty() {
+                        eprintln!("no live pairing codes");
+                    }
+                    for c in codes {
+                        println!("{}  {}  {} min left  {} tries left", c.id, c.permission, c.expires_unix.saturating_sub(now).div_ceil(60), c.tries_left);
+                    }
+                }
+            }
             Ok(())
         }
         "enroll" => {
@@ -353,6 +400,22 @@ fn clients(mut args: Args) -> Result<(), String> {
             Ok(())
         }
         other => Err(format!("unknown clients command {other:?}")),
+    }
+}
+
+/// The terminal itself (`/dev/tty`; `CONOUT$` on Windows), where pairing codes are shown: what
+/// is written there is never in a redirect, a pipe or a service's log.
+struct Terminal(std::fs::File);
+
+impl Terminal {
+    fn open() -> Result<Self, String> {
+        let path = if cfg!(windows) { "CONOUT$" } else { "/dev/tty" };
+        std::fs::OpenOptions::new().write(true).open(path).map(Terminal).map_err(|_| "a pairing code is shown only on a terminal, and there is none here (in a container: podman exec -it)".to_string())
+    }
+
+    fn show(&mut self, text: &str) -> Result<(), String> {
+        use std::io::Write as _;
+        writeln!(self.0, "{text}").and_then(|_| self.0.flush()).map_err(|e| format!("the terminal: {e}"))
     }
 }
 

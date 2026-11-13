@@ -65,6 +65,18 @@ podman exec lucem-serve lucem clients list
 podman exec lucem-serve lucem clients revoke alice      # refused from its next connection on
 ```
 
+A computer can also pair with a one-time code instead of a file. Codes exist only when asked for:
+`lucem clients pair` (add `--control` for more than reading) makes one and shows it on the
+terminal itself, never on standard output or in a log, and the running server accepts it at once.
+The code itself never crosses the network (SPAKE2): it works once, for 10 minutes and 3 tries.
+`lucem clients codes` lists the live codes (without their secrets) and `--cancel ID|all` cancels
+them, for a code that may have been seen.
+
+```bash
+podman exec -it lucem-serve lucem clients pair     # -it: the code is shown on the terminal
+podman exec lucem-serve lucem clients codes --cancel all
+```
+
 Hand the file over privately: it holds the client's private key. Back up `/data/.lucem-auth`. Clients
 open only images under `/data`: hidden folders, links out of it and anything that is not an image are
 refused. Clients are read-only.
