@@ -310,6 +310,12 @@ pub async fn pair(addr: std::net::SocketAddr, code: &str, name: &str) -> StreamR
     }
 }
 
+/// Writes a pairing code to `path`, readable by its owner only (for a script that pairs: it
+/// reads the file and removes it; the code never goes through a pipe or a log).
+pub fn save_code(path: &Path, code: &PairingCode) -> StreamResult<()> {
+    crate::auth::replace_private(path, format!("{}\n", code.display()).as_bytes())
+}
+
 /// Writes `pem` readable by its owner only.
 pub fn save_identity(path: &Path, pem: &str) -> StreamResult<()> {
     crate::auth::replace_private(path, pem.as_bytes())

@@ -25,9 +25,9 @@ USAGE
               [--pair] [--certificate FILE --private-key FILE]
                                          Serve the images under DIR to enrolled clients
                                          (--pair: show a pairing code on the terminal at start)
-  lucem clients pair [--control] [--stdout]              (--auth DIR)
+  lucem clients pair [--control] [--out FILE]            (--auth DIR)
                                          A one-time code to pair a computer (10 minutes), shown
-                                         on the terminal (--stdout: printed, for a script)
+                                         on the terminal (--out: a file only you can read)
   lucem clients codes [--cancel ID|all]                  (--auth DIR)
                                          The live pairing codes (no secrets); cancel them
   lucem clients enroll <name> [--control] --out FILE|-   (--auth DIR)
@@ -331,15 +331,19 @@ fn clients(mut args: Args) -> Result<(), String> {
     match what.as_str() {
         "pair" => {
             let permission = if args.take_flag("--control") { Permission::Control } else { Permission::Read };
-            let to_stdout = args.take_flag("--stdout");
+            let out = args.take_value("--out")?;
             args.positional(0)?;
-            // Shown on the terminal itself, not standard output: a redirect, a pipe or a log
-            // never holds it. `--stdout` is for a script that means to take it.
-            let mut terminal = if to_stdout { None } else { Some(Terminal::open().map_err(|e| format!("{e}; or pass --stdout to print the code for a script"))?) };
+            // Shown on the terminal itself, never on standard output: a redirect, a pipe or a log
+            // never holds it. A script takes it from a file only its owner can read (`--out`).
+            let mut terminal = if out.is_some() { None } else { Some(Terminal::open().map_err(|e| format!("{e}; or pass --out FILE for a script (written readable by you only)"))?) };
             let code = authority.new_pairing_code(permission).map_err(|e| e.to_string())?;
-            match &mut terminal {
-                Some(t) => t.show(&code.display())?,
-                None => println!("{}", code.display()),
+            match (&mut terminal, &out) {
+                (Some(t), _) => t.show(&code.display())?,
+                (None, Some(path)) => {
+                    lucem_stream::pairing::save_code(Path::new(path), &code).map_err(|e| format!("{path}: {e}"))?;
+                    eprintln!("wrote the code to {path} (readable by you only; remove it once used)");
+                }
+                (None, None) => unreachable!("no terminal is only taken with --out"),
             }
             eprintln!("works once, for {} minutes ({permission}); a running `lucem serve` accepts it at once; `lucem clients codes --cancel {}` cancels it", lucem_stream::pairing::CODE_MINUTES, code.id);
             Ok(())
