@@ -18,6 +18,12 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
   publishing in the environment `pypi` (approved by a maintainer). The "Private :: Do Not Upload"
   classifier that blocked uploads is gone. The package holds only `__version__` for now.
 
+### Security
+
+- `lucem serve` prints a pairing code only when its output is a terminal. Run as a service (podman,
+  systemd) its output is a log, and a working code there could be read by anyone who reads the
+  log; it says to run `lucem clients pair` instead (code scanning's cleartext-logging alerts).
+
 ### Changed
 
 - Channels open as the OME-Zarr file marks them (`omero` `active`; shown when it does not say):
