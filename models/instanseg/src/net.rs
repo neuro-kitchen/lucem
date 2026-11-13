@@ -16,14 +16,15 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use burn::module::Module;
+use burn::module::{Module, ModuleMapper, Param};
 use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::interpolate::{Interpolate2d, Interpolate2dConfig, InterpolateMode};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
 use burn::nn::{BatchNorm, BatchNormConfig, Linear, LinearConfig, PaddingConfig2d};
 use burn::store::{ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore};
 use burn::tensor::activation::relu;
-use burn::tensor::{Device, Tensor};
+use burn::tensor::ops::PadMode;
+use burn::tensor::{Device, FloatDType, Tensor};
 
 /// How much the input shrinks at the deepest level: sizes must be multiples of it (InstanSeg
 /// pads to 16).
@@ -32,13 +33,18 @@ pub const DIVISOR: usize = 16;
 /// BatchNorm's epsilon in the published models.
 const BN_EPS: f64 = 1e-5;
 
-/// A convolution, its BatchNorm, and ReLU unless it is an output block.
+/// A convolution, its BatchNorm, and ReLU unless it is an output block. For inference the
+/// BatchNorm is folded into the convolution once ([`InstanSegModel::fold_batch_norm`]): one pass
+/// over the activations instead of two.
 #[derive(Module, Debug)]
 pub struct ConvNormAct {
     conv: Conv2d,
-    norm: BatchNorm,
+    norm: Option<BatchNorm>,
     #[module(skip)]
     relu: bool,
+    /// A 3 × 3 convolution run as columns times weights ([`ConvNormAct::conv_gemm`]).
+    #[module(skip)]
+    gemm: bool,
 }
 
 impl ConvNormAct {
@@ -46,14 +52,92 @@ impl ConvNormAct {
         let p = kernel / 2;
         Self {
             conv: Conv2dConfig::new([input, output], [kernel, kernel]).with_padding(PaddingConfig2d::Explicit(p, p, p, p)).init(device),
-            norm: BatchNormConfig::new(output).with_epsilon(BN_EPS).init(device),
+            norm: Some(BatchNormConfig::new(output).with_epsilon(BN_EPS).init(device)),
             relu,
+            gemm: false,
         }
     }
 
     fn forward(&self, x: Tensor<4>) -> Tensor<4> {
-        let y = self.norm.forward(self.conv.forward(x));
+        let y = if self.gemm { self.conv_gemm(x) } else { self.conv.forward(x) };
+        let y = match &self.norm {
+            Some(n) => n.forward(y),
+            None => y,
+        };
         if self.relu { relu(y) } else { y }
+    }
+
+    /// The convolution as one matrix product: the input zero-padded, its nine shifted copies
+    /// stacked on the channel axis (`[n, 9c, h·w]`, offset-major), times the weights reordered to
+    /// match (`[o, 9c]`). Burn's tensor-core convolution asks more shared memory than a Turing GPU
+    /// has (64 KB per block) for the wider layers (64 channels and up) and falls back to its direct
+    /// kernel, 15× slower; its matrix product tunes and runs on the tensor cores there.
+    fn conv_gemm(&self, x: Tensor<4>) -> Tensor<4> {
+        let [n, c, h, w] = x.dims();
+        let [o, _, kh, kw] = self.conv.weight.dims();
+        let (ph, pw) = (kh / 2, kw / 2);
+        let xp = x.pad((pw, pw, ph, ph), PadMode::Constant(0.0));
+        let shifted: Vec<Tensor<4>> = (0..kh).flat_map(|dy| (0..kw).map(move |dx| (dy, dx))).map(|(dy, dx)| xp.clone().slice([0..n, 0..c, dy..dy + h, dx..dx + w])).collect();
+        let cols = Tensor::cat(shifted, 1).reshape([n, kh * kw * c, h * w]);
+        let weights = self.conv.weight.val().permute([0, 2, 3, 1]).reshape([1, o, kh * kw * c]);
+        let mut y = weights.matmul(cols);
+        if let Some(b) = &self.conv.bias {
+            y = y + b.val().reshape([1, o, 1]);
+        }
+        y.reshape([n, o, h, w])
+    }
+
+    fn with_gemm(mut self, on: bool) -> Self {
+        let [_, _, kh, kw] = self.conv.weight.dims();
+        self.gemm = on && (kh, kw) != (1, 1);
+        self
+    }
+
+    /// The BatchNorm (its running statistics: inference) folded into the convolution:
+    /// `w · s` and `(b − μ) · s + β` with `s = γ / √(σ² + ε)`.
+    fn fold(mut self) -> Self {
+        let Some(n) = self.norm.take() else { return self };
+        let scale = n.gamma.val() / (n.running_var.value() + n.epsilon).sqrt();
+        let [o] = scale.dims();
+        let weight = self.conv.weight.val() * scale.clone().reshape([o, 1, 1, 1]);
+        let bias = match &self.conv.bias {
+            Some(b) => b.val(),
+            None => Tensor::zeros([o], &scale.device()),
+        };
+        let bias = (bias - n.running_mean.value()) * scale + n.beta.val();
+        self.conv.weight = Param::from_tensor(weight);
+        self.conv.bias = Some(Param::from_tensor(bias));
+        self
+    }
+}
+
+impl EncoderBlock {
+    fn with_gemm(self, on: bool) -> Self {
+        Self { conv0: self.conv0.with_gemm(on), conv1: self.conv1.with_gemm(on), conv2: self.conv2.map(|c| c.with_gemm(on)), conv3: self.conv3.map(|c| c.with_gemm(on)), conv4: self.conv4.with_gemm(on), ..self }
+    }
+
+    fn fold(self) -> Self {
+        Self { conv0: self.conv0.fold(), conv1: self.conv1.fold(), conv2: self.conv2.map(ConvNormAct::fold), conv3: self.conv3.map(ConvNormAct::fold), conv4: self.conv4.fold(), ..self }
+    }
+}
+
+impl DecoderBlock {
+    fn with_gemm(self, on: bool) -> Self {
+        Self { conv0: self.conv0.with_gemm(on), conv_skip: self.conv_skip.with_gemm(on), conv1: self.conv1.with_gemm(on), conv2: self.conv2.with_gemm(on), conv3: self.conv3.map(|c| c.with_gemm(on)), conv4: self.conv4.with_gemm(on), ..self }
+    }
+
+    fn fold(self) -> Self {
+        Self { conv0: self.conv0.fold(), conv_skip: self.conv_skip.fold(), conv1: self.conv1.fold(), conv2: self.conv2.fold(), conv3: self.conv3.map(ConvNormAct::fold), conv4: self.conv4.fold(), ..self }
+    }
+}
+
+/// Casts every float parameter of a module to `dtype`.
+struct Cast(FloatDType);
+
+impl ModuleMapper for Cast {
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
+        let dtype = self.0;
+        param.map(|t| t.cast(dtype))
     }
 }
 
@@ -185,6 +269,33 @@ pub struct ProbabilityNet {
 pub struct InstanSegModel {
     pub fcn: UNet,
     pub pixel_classifier: ProbabilityNet,
+}
+
+impl InstanSegModel {
+    /// Every BatchNorm folded into its convolution (inference only; the result has no BatchNorm).
+    pub fn fold_batch_norm(self) -> Self {
+        let fcn = UNet {
+            encoder: self.fcn.encoder.into_iter().map(EncoderBlock::fold).collect(),
+            decoders: self.fcn.decoders.into_iter().map(|d| Decoder { decoder: d.decoder.into_iter().map(DecoderBlock::fold).collect(), final_block: d.final_block.into_iter().map(ConvNormAct::fold).collect() }).collect(),
+        };
+        Self { fcn, ..self }
+    }
+}
+
+impl UNet {
+    /// Every 3 × 3 convolution run as a matrix product ([`ConvNormAct::conv_gemm`]) or not.
+    pub fn with_gemm(self, on: bool) -> Self {
+        UNet {
+            encoder: self.encoder.into_iter().map(|b| b.with_gemm(on)).collect(),
+            decoders: self.decoders.into_iter().map(|d| Decoder { decoder: d.decoder.into_iter().map(|b| b.with_gemm(on)).collect(), final_block: d.final_block.into_iter().map(|c| c.with_gemm(on)).collect() }).collect(),
+        }
+    }
+
+    /// The network's parameters cast to `dtype` (`F16`: half the memory traffic, and the GPU's
+    /// tensor-core convolutions, which take half precision).
+    pub fn cast(self, dtype: FloatDType) -> Self {
+        self.map(&mut Cast(dtype))
+    }
 }
 
 /// The shape of a model, read from its weights.

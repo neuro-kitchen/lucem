@@ -159,7 +159,7 @@ fn bench(args: &[String]) -> Result<(), String> {
     let runtime = format!("{device:?}");
     let model = InstanSeg::load(s, device)?;
     if !json {
-        eprintln!("{}: {runtime}, tile {} + halo {}, {runs} warm run(s) per size", s.name, tiling.tile, tiling.halo);
+        eprintln!("{}: {runtime}, {:?}, tile {} + halo {}, {runs} warm run(s) per size", s.name, model.precision, tiling.tile, tiling.halo);
         println!("{:>6} {:>7} {:>6} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}", "side", "nuclei", "tiles", "computed", "cold ms", "warm ms", "normal", "prepare", "network", "readback", "post");
     }
     let rows = sd::bench::bench(&model, &sizes, runs, tiling, |r| {

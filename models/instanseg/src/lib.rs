@@ -345,8 +345,31 @@ fn reflect(i: usize, n: usize) -> usize {
     if k < n { k } else { period - k }
 }
 
+/// The precision the network runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    F32,
+    /// Half precision: weights, activations and the data to and from the device (half the bytes
+    /// moved), and the GPU's tensor-core convolutions.
+    F16,
+}
+
+impl Precision {
+    /// `LUCEM_INSTANSEG_PRECISION` (`f32`, `f16`), else half precision on a GPU and single
+    /// precision on the CPU runtime (`LUCEM_RUNTIME=cpu`), where half precision is slower.
+    pub fn from_env() -> Self {
+        match std::env::var("LUCEM_INSTANSEG_PRECISION").unwrap_or_default().to_lowercase().as_str() {
+            "f32" => Precision::F32,
+            "f16" => Precision::F16,
+            _ if std::env::var("LUCEM_RUNTIME").is_ok_and(|r| r.eq_ignore_ascii_case("cpu")) => Precision::F32,
+            _ => Precision::F16,
+        }
+    }
+}
+
 pub struct InstanSeg {
     pub spec: &'static Spec,
+    pub precision: Precision,
     /// The network and its pixel classifier, as Burn modules ([`net`]).
     pub model: net::InstanSegModel,
     pub config: net::UNetConfig,
@@ -384,9 +407,23 @@ impl InstanSeg {
         if config.outputs() != 5 {
             return Err(format!("{}: the network gives {} channels, expected 5 (embedding, sigma, seeds)", s.name, config.outputs()));
         }
-        let model = net::load(path, &config, &device)?;
+        let precision = Precision::from_env();
+        // BatchNorm folded in f32, the classifier read in f32, then the network cast
+        let model = net::load(path, &config, &device)?.fold_batch_norm();
         let classifier = classifier(&model.pixel_classifier)?;
-        Ok(Self { spec: s, model, config, device, classifier, params })
+        let model = match precision {
+            Precision::F32 => model,
+            Precision::F16 => net::InstanSegModel { fcn: model.fcn.cast(burn::tensor::FloatDType::F16), ..model },
+        };
+        // 3 × 3 convolutions as matrix products on the GPU in half precision (see
+        // `ConvNormAct::conv_gemm`); `LUCEM_INSTANSEG_CONV=gemm|direct` chooses
+        let gemm = match std::env::var("LUCEM_INSTANSEG_CONV").unwrap_or_default().to_lowercase().as_str() {
+            "gemm" => true,
+            "direct" => false,
+            _ => precision == Precision::F16,
+        };
+        let model = net::InstanSegModel { fcn: model.fcn.with_gemm(gemm), ..model };
+        Ok(Self { spec: s, precision, model, config, device, classifier, params })
     }
 
     /// The network's output (`[5, h, w]`) for `planes` (`[channels, h, w]`, normalized).
@@ -423,11 +460,18 @@ impl InstanSeg {
                 computed += ph * pw;
                 times.prepare += ms(t0);
                 let t1 = Instant::now();
-                let y = self.model.fcn.forward(Tensor::<4>::from_data(TensorData::new(input, [1, nc, ph, pw]), &self.device));
+                // In the network's precision on the wire: half the bytes up and back in F16
+                let data = TensorData::new(input, [1, nc, ph, pw]);
+                // Created in that dtype: `from_data` would otherwise convert to the device's default
+                let x = match self.precision {
+                    Precision::F32 => Tensor::<4>::from_data(data, &self.device),
+                    Precision::F16 => Tensor::<4>::from_data(data.convert::<burn::tensor::f16>(), (&self.device, burn::tensor::DType::F16)),
+                };
+                let y = self.model.fcn.forward(x);
                 self.device.sync().map_err(|e| format!("the device: {e:?}"))?;
                 times.compute += ms(t1);
                 let t2 = Instant::now();
-                let y: Vec<f32> = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+                let y: Vec<f32> = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
                 times.readback += ms(t2);
                 if timing() {
                     eprintln!("instanseg: tile {ph}×{pw}: network {:.0} ms, read back {:.0} ms", t2.duration_since(t1).as_secs_f64() * 1e3, ms(t2));
