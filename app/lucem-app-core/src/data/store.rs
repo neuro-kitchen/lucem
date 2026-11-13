@@ -1286,6 +1286,35 @@ impl Store {
         }
         self.set_status("Threshold added to the pipeline (sizes in level-0 px)", cx);
     }
+    /// Tunes this device once, in the background (File › Tune this device), as `lucem autotune`:
+    /// lucem's operators on the app's device, then every model plugin on the app's runtime. Later
+    /// runs (of the app, the command line, Python) start at full speed from the saved choices.
+    pub fn tune_device(&mut self, cx: &mut Context<Self>) {
+        let Some(device) = self.device.clone() else {
+            self.ensure_device(cx);
+            self.set_status("The compute device is starting: tune again once it is up", cx);
+            return;
+        };
+        let runtime = self.prefs.runtime.clone().filter(|r| !r.is_empty());
+        self.set_status(format!("Tuning {} in the background (a few minutes)…", device.label), cx);
+        let task = cx.background_spawn(async move {
+            let ops = lucem_pipeline::autotune::autotune(&device.client, &lucem_pipeline::autotune::DEFAULT_SIDES, |_, _, _| {});
+            let plugins = lucem_ml::tune_plugins(runtime.as_deref(), |_| {});
+            (device.label.clone(), ops, plugins)
+        });
+        cx.spawn(async move |this, cx| {
+            let (label, ops, plugins) = task.await;
+            let tuned = plugins.iter().filter(|p| p.outcome == lucem_ml::TuneOutcome::Tuned).count();
+            let failed: Vec<String> = ops.failed.iter().map(|(t, side, _)| format!("{t} at {side}")).chain(plugins.iter().filter_map(|p| matches!(p.outcome, lucem_ml::TuneOutcome::Failed(_)).then(|| p.name.clone()))).collect();
+            let mut msg = format!("Tuned {label}: {} operator runs, {tuned} model plugin(s), in {:.0} s", ops.runs - ops.failed.len(), ops.seconds + plugins.iter().map(|p| p.seconds).sum::<f64>());
+            if !failed.is_empty() {
+                msg.push_str(&format!("; not tuned: {}", failed.join(", ")));
+            }
+            let _ = this.update(cx, |s, cx| s.set_status(msg, cx));
+        })
+        .detach();
+    }
+
     /// Starts the compute device in the background; results follow once it is up.
     pub fn ensure_device(&mut self, cx: &mut Context<Self>) {
         if self.device.is_some() || self.device_pending {
