@@ -3,7 +3,7 @@
 # crates.io and PyPI through trusted publishing (no stored tokens). The publish jobs run in the
 # GitHub environments `crates-io` and `pypi`, which only accept `v*` tags and wait for a required
 # reviewer's approval (the app and each model plugin publish from their own: `pypi-app`,
-# `pypi-ml-stardist`, `pypi-ml-sam`); the registries only accept tokens from this workflow and
+# `pypi-ml-stardist`, `pypi-ml-sam`, `pypi-ml-instanseg`); the registries only accept tokens from this workflow and
 # those environments. Then the GitHub release of the tag, with this version's CHANGELOG.md section as
 # its notes.
 name: release
@@ -100,7 +100,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, windows-latest, macos-latest]
-        wheel: [lucem-app, lucem-ml-stardist, lucem-ml-sam]
+        wheel: [lucem-app, lucem-ml-stardist, lucem-ml-sam, lucem-ml-instanseg]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: System libraries for the app
@@ -240,6 +240,7 @@ jobs:
           - { wheel: lucem-app, environment: pypi-app }
           - { wheel: lucem-ml-stardist, environment: pypi-ml-stardist }
           - { wheel: lucem-ml-sam, environment: pypi-ml-sam }
+          - { wheel: lucem-ml-instanseg, environment: pypi-ml-instanseg }
     environment: ${{ matrix.environment }}
     permissions:
       id-token: write # trusted publishing
@@ -272,7 +273,7 @@ jobs:
 
           The library crates from crates.io: `cargo add lucem` (core, io, ops, ml) and the others
           (`lucem-hist`, `lucem-pipeline`, `lucem-view`, `lucem-hub`). Python: `pip install lucem`,
-          with extras `hist`, `app`, `stardist`, `sam`, `ml` or `all` (`pip install "lucem[all]"`). The app and the `lucem`
+          with extras `hist`, `app`, `stardist`, `sam`, `instanseg`, `ml` or `all` (`pip install "lucem[all]"`). The app and the `lucem`
           command build from this tag: `cargo install --git https://github.com/neuro-kitchen/lucem --tag <this tag> lucem-cli`.
           NOTES
       - name: Create the release
