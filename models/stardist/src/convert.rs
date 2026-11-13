@@ -1,6 +1,7 @@
 //! The published Keras weights (`stardist_weights.h5`, HDF5) as safetensors: every convolution's
 //! kernel turned from Keras' `[kh, kw, in, out]` to Burn's `[out, in, kh, kw]`, named
-//! `<layer>.weight` and `<layer>.bias`; the source and its hash in the metadata. Read with a
+//! `<layer>.weight` and `<layer>.bias` — the paths of [`crate::net::StarDistModule`]'s fields, so
+//! Burn's `SafetensorsStore` loads the file as it is; the source and its hash in the metadata. Read with a
 //! pure-Rust HDF5 decoder, so neither Python nor the HDF5 C library is needed.
 
 use std::collections::HashMap;
@@ -70,29 +71,4 @@ pub fn write_safetensors(layers: &[LayerWeights], metadata: HashMap<String, Stri
     let tmp = out.with_extension("tmp");
     safetensors::tensor::serialize_to_file(views, Some(metadata), &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, out).map_err(|e| format!("{}: {e}", out.display()))
-}
-
-/// Reads the safetensors file back: each layer's `[out, in, kh, kw]` weight and its bias.
-pub fn read_safetensors(path: &Path, channels: usize) -> Result<Vec<LayerWeights>, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let st = safetensors::SafeTensors::deserialize(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
-    let floats = |name: &str| -> Result<(Vec<usize>, Vec<f32>), String> {
-        let t = st.tensor(name).map_err(|e| format!("{name}: {e}"))?;
-        if t.dtype() != Dtype::F32 {
-            return Err(format!("{name}: {:?}, expected F32", t.dtype()));
-        }
-        Ok((t.shape().to_vec(), t.data().as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()))
-    };
-    layers(channels)
-        .iter()
-        .map(|l| {
-            let (ws, w) = floats(&format!("{}.weight", l.name))?;
-            let (_, b) = floats(&format!("{}.bias", l.name))?;
-            let want = [l.output, l.input, l.kernel, l.kernel];
-            if ws != want || b.len() != l.output {
-                return Err(format!("{}: weight {ws:?} / {} biases, expected {want:?}", l.name, b.len()));
-            }
-            Ok(LayerWeights { name: l.name, shape: want, weight: w, bias: b })
-        })
-        .collect()
 }

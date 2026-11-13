@@ -7,9 +7,11 @@
 //!   brightfield H&E (RGB), and "StarDist Fluorescence Nuclei Segmentation" (Zenodo 6348085,
 //!   `2D_versatile_fluo`) for one fluorescence channel; both BSD-3-Clause, the same network but
 //!   for its input channels. Its Keras weights (`stardist_weights.h5`) are fetched and verified through
-//!   `lucem-hub` (SHA-256 pinned) and turned once into safetensors in lucem's cache
-//!   ([`install`], [`convert`]); [`StarDist::load`] reads only the safetensors.
-//! - Network: [`net`] on Burn (any of its devices: CUDA, wgpu, the CPU).
+//!   `lucem-hub` (SHA-256 pinned) and turned once into safetensors in lucem's cache, named as the
+//!   Burn module's fields ([`install`], [`convert`]); [`StarDist::load`] loads them into the
+//!   module with Burn's `SafetensorsStore`.
+//! - Network: [`net`], a `#[derive(Module)]` of `burn::nn` layers (any of Burn's devices: CUDA,
+//!   wgpu, the CPU).
 //! - Prediction: [`predict`] (normalization, tiles with a halo, thresholds and NMS as StarDist's
 //!   own `predict_instances`).
 //! - Scale: the model was trained on 40× H&E; images are resampled to [`MODEL_PIXEL_UM`] µm per
@@ -208,8 +210,7 @@ impl StarDist {
         if !path.is_file() {
             return Err(format!("{} is not installed (lucem-ml-stardist install {})", s.name, s.id));
         }
-        let layers = convert::read_safetensors(&path, s.channels)?;
-        Ok(Self { spec: s, net: net::StarDistNet::new(layers, s.channels, device)? })
+        Ok(Self { spec: s, net: net::StarDistNet::load(&path, s.channels, device)? })
     }
 
     /// The network's output on the grid for an image (the model's channels, interleaved) at the

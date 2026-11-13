@@ -1,18 +1,24 @@
-//! StarDist2D's network on Burn: the layers of the published H&E model (a U-Net of depth 3 from
-//! 32 filters, two 3 × 3 convolutions per level, ReLU, after a first 2 × 2 pooling for its grid of
-//! 2 × 2), a 128-filter 3 × 3 `features` convolution, and two 1 × 1 heads: `prob` (sigmoid, the
-//! object probability) and `dist` (32 distances from the pixel to the object's edge along 32
-//! rays). Both come out on the grid (half the input in each axis).
+//! StarDist2D's network as a Burn module: the layers of the published H&E model (a U-Net of depth
+//! 3 from 32 filters, two 3 × 3 convolutions per level, ReLU, after a first 2 × 2 pooling for its
+//! grid of 2 × 2), a 128-filter 3 × 3 `features` convolution, and two 1 × 1 heads: `prob`
+//! (sigmoid, the object probability) and `dist` (32 distances from the pixel to the object's edge
+//! along 32 rays). Both come out on the grid (half the input in each axis).
 //!
-//! Burn 0.22's tensors carry their device, which picks the backend (CUDA, wgpu, the CPU): one
-//! network serves every runtime. Fusion is on: no tensor crosses into lucem's own kernels.
+//! [`StarDistModule`] is a `#[derive(Module)]` of `burn::nn` layers whose fields are named as the
+//! published Keras layers, so the safetensors written at install ([`crate::convert`]) load into it
+//! by name through Burn's `SafetensorsStore`. Burn 0.22's tensors carry their device, which picks
+//! the backend (CUDA, wgpu, the CPU): one module serves every runtime.
 
+use std::path::Path;
+
+use burn::module::Module;
+use burn::nn::conv::{Conv2d, Conv2dConfig};
+use burn::nn::interpolate::{Interpolate2d, Interpolate2dConfig, InterpolateMode};
+use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
+use burn::nn::PaddingConfig2d;
+use burn::store::{ModuleSnapshot, SafetensorsStore};
 use burn::tensor::activation::{relu, sigmoid};
-use burn::tensor::module::{conv2d, interpolate, max_pool2d};
-use burn::tensor::ops::{ConvOptions, InterpolateMode, InterpolateOptions, MaxPoolOptions};
-use burn::tensor::{Device, Tensor, TensorData};
-
-use crate::convert::LayerWeights;
+use burn::tensor::{Device, Tensor};
 
 /// A convolution of the published model: its Keras name, kernel side, filters in and out.
 #[derive(Debug, Clone, Copy)]
@@ -63,70 +69,106 @@ pub const DIVISOR: usize = 16;
 pub const GRID: usize = 2;
 pub const N_RAYS: usize = 32;
 
-struct Conv {
-    weight: Tensor<4>,
-    bias: Tensor<1>,
-    padding: usize,
+/// The network: one field per published layer, named as in the Keras model.
+#[derive(Module, Debug)]
+pub struct StarDistModule {
+    conv2d_1: Conv2d,
+    conv2d_2: Conv2d,
+    down_level_0_no_0: Conv2d,
+    down_level_0_no_1: Conv2d,
+    down_level_1_no_0: Conv2d,
+    down_level_1_no_1: Conv2d,
+    down_level_2_no_0: Conv2d,
+    down_level_2_no_1: Conv2d,
+    middle_0: Conv2d,
+    middle_2: Conv2d,
+    up_level_2_no_0: Conv2d,
+    up_level_2_no_2: Conv2d,
+    up_level_1_no_0: Conv2d,
+    up_level_1_no_2: Conv2d,
+    up_level_0_no_0: Conv2d,
+    up_level_0_no_2: Conv2d,
+    features: Conv2d,
+    prob: Conv2d,
+    dist: Conv2d,
+    pool: MaxPool2d,
+    up: Interpolate2d,
 }
 
-impl Conv {
-    fn forward(&self, x: Tensor<4>) -> Tensor<4> {
-        conv2d(x, self.weight.clone(), Some(self.bias.clone()), ConvOptions::new([1, 1], [self.padding, self.padding], [1, 1], 1))
-    }
-}
-
-pub struct StarDistNet {
-    convs: Vec<Conv>,
-    pub device: Device,
-    /// Channels its images have.
-    pub channels: usize,
-}
-
-fn pool(x: Tensor<4>) -> Tensor<4> {
-    max_pool2d(x, MaxPoolOptions::new([2, 2]).with_stride([2, 2]))
-}
-
-fn up(x: Tensor<4>) -> Tensor<4> {
-    let [_, _, h, w] = x.dims();
-    interpolate(x, InterpolateOptions::new(InterpolateMode::Nearest).with_output_size([h * 2, w * 2]))
-}
-
-impl StarDistNet {
-    /// The network on `device` from weights in [`LAYERS`]' order, for `channels`-channel images.
-    pub fn new(weights: Vec<LayerWeights>, channels: usize, device: Device) -> Result<Self, String> {
-        let mut convs = Vec::new();
-        for (layer, w) in layers(channels).iter().zip(weights) {
-            if w.name != layer.name {
-                return Err(format!("weights for {}, expected {}", w.name, layer.name));
-            }
-            let weight = Tensor::<4>::from_data(TensorData::new(w.weight, w.shape), &device);
-            let bias = Tensor::<1>::from_data(TensorData::new(w.bias, [layer.output]), &device);
-            convs.push(Conv { weight, bias, padding: layer.kernel / 2 });
+impl StarDistModule {
+    /// The layers for `channels`-channel images, before their weights are loaded.
+    pub fn new(channels: usize, device: &Device) -> Self {
+        let c = |i: usize| {
+            let l = layers(channels)[i];
+            let p = l.kernel / 2;
+            Conv2dConfig::new([l.input, l.output], [l.kernel, l.kernel]).with_padding(PaddingConfig2d::Explicit(p, p, p, p)).init(device)
+        };
+        Self {
+            conv2d_1: c(0),
+            conv2d_2: c(1),
+            down_level_0_no_0: c(2),
+            down_level_0_no_1: c(3),
+            down_level_1_no_0: c(4),
+            down_level_1_no_1: c(5),
+            down_level_2_no_0: c(6),
+            down_level_2_no_1: c(7),
+            middle_0: c(8),
+            middle_2: c(9),
+            up_level_2_no_0: c(10),
+            up_level_2_no_2: c(11),
+            up_level_1_no_0: c(12),
+            up_level_1_no_2: c(13),
+            up_level_0_no_0: c(14),
+            up_level_0_no_2: c(15),
+            features: c(16),
+            prob: c(17),
+            dist: c(18),
+            pool: MaxPool2dConfig::new([2, 2]).with_strides([2, 2]).init(),
+            up: Interpolate2dConfig::new().with_scale_factor(Some([2.0, 2.0])).with_mode(InterpolateMode::Nearest).init(),
         }
-        if convs.len() != LAYERS.len() {
-            return Err(format!("{} layers of weights, expected {}", convs.len(), LAYERS.len()));
-        }
-        Ok(Self { convs, device, channels })
     }
 
     /// `x`: `[n, channels, h, w]` (normalized; `h`, `w` multiples of [`DIVISOR`]) → probability
     /// `[n, 1, h/2, w/2]` and distances `[n, 32, h/2, w/2]` (input pixels).
     pub fn forward(&self, x: Tensor<4>) -> (Tensor<4>, Tensor<4>) {
-        let c = |i: usize, x: Tensor<4>| relu(self.convs[i].forward(x));
+        let c = |conv: &Conv2d, x: Tensor<4>| relu(conv.forward(x));
         // To the grid
-        let x = pool(c(1, c(0, x)));
+        let x = self.pool.forward(c(&self.conv2d_2, c(&self.conv2d_1, x)));
         // Down
-        let s0 = c(3, c(2, x));
-        let s1 = c(5, c(4, pool(s0.clone())));
-        let s2 = c(7, c(6, pool(s1.clone())));
-        let m = c(9, c(8, pool(s2.clone())));
+        let s0 = c(&self.down_level_0_no_1, c(&self.down_level_0_no_0, x));
+        let s1 = c(&self.down_level_1_no_1, c(&self.down_level_1_no_0, self.pool.forward(s0.clone())));
+        let s2 = c(&self.down_level_2_no_1, c(&self.down_level_2_no_0, self.pool.forward(s1.clone())));
+        let m = c(&self.middle_2, c(&self.middle_0, self.pool.forward(s2.clone())));
         // Up: upsampled, then the level's skip
-        let u2 = c(11, c(10, Tensor::cat(vec![up(m), s2], 1)));
-        let u1 = c(13, c(12, Tensor::cat(vec![up(u2), s1], 1)));
-        let u0 = c(15, c(14, Tensor::cat(vec![up(u1), s0], 1)));
-        let f = c(16, u0);
-        let prob = sigmoid(self.convs[17].forward(f.clone()));
-        let dist = self.convs[18].forward(f);
-        (prob, dist)
+        let u2 = c(&self.up_level_2_no_2, c(&self.up_level_2_no_0, Tensor::cat(vec![self.up.forward(m), s2], 1)));
+        let u1 = c(&self.up_level_1_no_2, c(&self.up_level_1_no_0, Tensor::cat(vec![self.up.forward(u2), s1], 1)));
+        let u0 = c(&self.up_level_0_no_2, c(&self.up_level_0_no_0, Tensor::cat(vec![self.up.forward(u1), s0], 1)));
+        let f = c(&self.features, u0);
+        (sigmoid(self.prob.forward(f.clone())), self.dist.forward(f))
+    }
+}
+
+/// The network on its device, for images of `channels` channels.
+pub struct StarDistNet {
+    pub module: StarDistModule,
+    pub device: Device,
+    pub channels: usize,
+}
+
+impl StarDistNet {
+    /// Loads the safetensors written at install into the module on `device`: every layer must be
+    /// found and every tensor of the file used.
+    pub fn load(path: &Path, channels: usize, device: Device) -> Result<Self, String> {
+        let mut module = StarDistModule::new(channels, &device);
+        let mut store = SafetensorsStore::from_file(path);
+        let r = module.load_from(&mut store).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !r.errors.is_empty() || !r.missing.is_empty() || !r.unused.is_empty() {
+            return Err(format!("{}: errors {:?}, missing {:?}, unused {:?}", path.display(), r.errors, r.missing, r.unused));
+        }
+        Ok(Self { module, device, channels })
+    }
+
+    pub fn forward(&self, x: Tensor<4>) -> (Tensor<4>, Tensor<4>) {
+        self.module.forward(x)
     }
 }
