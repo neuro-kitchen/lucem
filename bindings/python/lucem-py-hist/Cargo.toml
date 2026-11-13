@@ -1,0 +1,23 @@
+[package]
+name = "lucem-py-hist"
+description = "Python bindings of lucem-hist (stains, tissue, cells, session recipes, export), registered into the `lucem` extension as `lucem._native.hist`"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+wgpu = ["lucem-hist/wgpu", "lucem-py-core/wgpu"]
+cpu = ["lucem-hist/cpu", "lucem-py-core/cpu"]
+cuda = ["lucem-hist/cuda", "lucem-py-core/cuda"]
+hip = ["lucem-py-core/hip"]
+
+[dependencies]
+lucem-hist.workspace = true
+lucem-py-core.workspace = true
+pyo3.workspace = true
+numpy.workspace = true
+serde.workspace = true
+serde_json.workspace = true

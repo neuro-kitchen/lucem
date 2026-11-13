@@ -30,8 +30,10 @@ members = [
     # linked, so ONNX Runtime and model licences stay out of lucem itself)
     "plugins/ml/lucem-ml-sam",
     "plugins/ml/lucem-ml-stardist",
-    # Bindings
+    # Bindings: lucem-py is the one extension; the binding crates register into it
     "bindings/python/lucem-py",
+    "bindings/python/lucem-py-core",
+    "bindings/python/lucem-py-hist",
 ]
 
 [workspace.package]
@@ -54,6 +56,8 @@ lucem-view = { path = "serve/lucem-view", version = "0.0.1" }
 lucem-stream = { path = "serve/lucem-stream", version = "0.0.1" }
 lucem-mcp = { path = "app/lucem-mcp" }
 lucem-app-core = { path = "app/lucem-app-core", version = "0.0.1" }
+lucem-py-core = { path = "bindings/python/lucem-py-core", default-features = false }
+lucem-py-hist = { path = "bindings/python/lucem-py-hist", default-features = false }
 
 # Latest stable versions on crates.io 2026-11-08 (cubecl 0.12 / burn 0.23 are pre-releases only);
 # add each to a crate with `<name>.workspace = true`.

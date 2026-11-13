@@ -7517,8 +7517,35 @@ dependencies = [
 name = "lucem-py"
 version = "0.0.1"
 dependencies = [
+ "lucem-py-core",
+ "lucem-py-hist",
+ "pyo3",
+]
+
+[[package]]
+name = "lucem-py-core"
+version = "0.0.1"
+dependencies = [
+ "lucem-core",
+ "lucem-io",
+ "lucem-ml",
+ "lucem-ops",
+ "lucem-pipeline",
  "numpy",
  "pyo3",
+ "serde_json",
+]
+
+[[package]]
+name = "lucem-py-hist"
+version = "0.0.1"
+dependencies = [
+ "lucem-hist",
+ "lucem-py-core",
+ "numpy",
+ "pyo3",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
