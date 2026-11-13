@@ -224,9 +224,20 @@ impl ToolState {
     pub fn set_overlays(&mut self, o: Overlays) {
         (self.show_annotations, self.fill_annotations, self.show_names, self.show_results, self.crosshair, self.rulers, self.overlay_opacity) = (o.annotations, o.fill, o.names, o.results, o.crosshair, o.rulers, o.opacity);
     }
+
+    /// The brush one step bigger (`dir` > 0) or smaller: through [`BRUSH_STEPS`] on screen, by a
+    /// quarter on the image. The toolbar's stepper, <kbd>[</kbd> / <kbd>]</kbd> and
+    /// <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>−</kbd> all go through here.
+    pub fn resize_brush(&mut self, dir: f32) {
+        if self.brush_in_image {
+            self.brush_image_px = (self.brush_image_px * if dir > 0.0 { 1.25 } else { 0.8 }).clamp(1.0, 5000.0);
+        } else {
+            self.brush_px = step_brush(self.brush_px, dir);
+        }
+    }
 }
 
-/// Brush sizes `[` / `]` step through (screen px).
+/// Brush sizes `[` / `]` and Ctrl + / Ctrl − step through (screen px).
 pub const BRUSH_STEPS: [f32; 14] = [2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0, 96.0, 128.0, 192.0, 256.0];
 
 /// The next brush size up (`dir` > 0) or down.
@@ -240,6 +251,21 @@ pub fn step_brush(px: f32, dir: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resize_brush_steps_on_screen_and_scales_on_the_image() {
+        let mut t = super::ToolState::default();
+        t.resize_brush(1.0);
+        assert_eq!(t.brush_px, 32.0);
+        t.resize_brush(-1.0);
+        t.resize_brush(-1.0);
+        assert_eq!(t.brush_px, 16.0);
+        t.brush_in_image = true;
+        t.resize_brush(1.0);
+        assert_eq!(t.brush_image_px, 50.0);
+        t.resize_brush(-1.0);
+        assert_eq!(t.brush_image_px, 40.0);
+    }
+
     use super::*;
 
     #[test]

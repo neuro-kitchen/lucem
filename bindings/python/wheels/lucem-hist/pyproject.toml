@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.16,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "lucem-hist"
+dynamic = ["version"]
+description = "The compiled part of lucem.hist (histology): install with pip install lucem[hist]"
+readme = "README.md"
+authors = [{ name = "jesusdpa1" }]
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.5"]
+
+[project.urls]
+Repository = "https://github.com/neuro-kitchen/lucem"
+
+[tool.maturin]
+manifest-path = "../../lucem-py/Cargo.toml"
+module-name = "lucem_hist._native"
+python-source = "python"
+features = ["extension-module", "hist"]

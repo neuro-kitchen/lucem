@@ -9,7 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{div, px, App, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _};
 
 use crate::data::store::Store;
-use crate::domain::tool::{step_brush, Tool};
+use crate::domain::tool::Tool;
 use crate::screens::explore::canvas::ImageCanvas;
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::{divider_v, format_area, format_length, stepper, swatch, MenuSelect};
@@ -121,18 +121,7 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
         let size = if t.brush_in_image { format_length(t.brush_image_px * 2.0, um) } else { format!("{:.0} px", t.brush_px * 2.0) };
         let st = store.clone();
         h_flex().gap(px(theme::XS)).child(label("Size")).child(stepper("brush-size", size, move |d, _, cx| {
-            st.update(cx, |s, cx| {
-                s.update_tool(
-                    |t| {
-                        if t.brush_in_image {
-                            t.brush_image_px = (t.brush_image_px * if d > 0.0 { 1.25 } else { 0.8 }).clamp(1.0, 5000.0);
-                        } else {
-                            t.brush_px = step_brush(t.brush_px, d);
-                        }
-                    },
-                    cx,
-                )
-            })
+            st.update(cx, |s, cx| s.update_tool(|t| t.resize_brush(d), cx))
         }))
     };
     match t.tool {

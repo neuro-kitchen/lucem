@@ -1,0 +1,25 @@
+[package]
+name = "lucem-py-core"
+description = "Python bindings of lucem's core (runtime, io, ops, custom walks, the ML plugin client), registered into the `lucem` extension"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+wgpu = ["lucem-core/wgpu", "lucem-ops/wgpu"]
+cpu = ["lucem-core/cpu", "lucem-ops/cpu"]
+cuda = ["lucem-core/cuda", "lucem-ops/cuda"]
+hip = ["lucem-core/hip", "lucem-ops/hip"]
+
+[dependencies]
+lucem-core = { workspace = true, features = ["compute"] }
+lucem-io.workspace = true
+lucem-ops.workspace = true
+lucem-pipeline.workspace = true
+lucem-ml.workspace = true
+pyo3.workspace = true
+numpy.workspace = true
+serde_json.workspace = true

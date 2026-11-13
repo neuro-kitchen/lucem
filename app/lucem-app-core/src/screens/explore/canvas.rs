@@ -34,7 +34,7 @@ use crate::domain::annotation::{Annotation, Shape};
 use crate::domain::command::Command;
 use crate::domain::geometry;
 use crate::domain::project::ChannelDoc;
-use crate::domain::tool::{step_brush, Overlays, Tool};
+use crate::domain::tool::{Overlays, Tool};
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::format_length;
 
@@ -1423,23 +1423,17 @@ impl ImageCanvas {
             "n" if !cmd && k.modifiers.shift => self.toggle_overlay(|o| o.names = !o.names, cx),
             "0" if cmd => self.fit(cx),
             "1" if cmd => self.actual_size(cx),
+            // Ctrl + / Ctrl −: the brush's size while a brush tool is in hand, else zoom (as = / −)
+            "=" | "+" | "-" if cmd && self.tool(cx).uses_brush() => {
+                let dir = if key == "-" { -1.0 } else { 1.0 };
+                self.store.update(cx, |s, cx| s.update_tool(|t| t.resize_brush(dir), cx));
+            }
             "=" | "+" => self.zoom_at(1.5, None, cx),
             "-" => self.zoom_at(1.0 / 1.5, None, cx),
             "f" if !cmd => self.fit(cx),
             "[" | "]" => {
                 let dir = if key == "]" { 1.0 } else { -1.0 };
-                self.store.update(cx, |s, cx| {
-                    s.update_tool(
-                        |t| {
-                            if t.brush_in_image {
-                                t.brush_image_px = (t.brush_image_px * if dir > 0.0 { 1.25 } else { 0.8 }).clamp(1.0, 5000.0);
-                            } else {
-                                t.brush_px = step_brush(t.brush_px, dir);
-                            }
-                        },
-                        cx,
-                    )
-                });
+                self.store.update(cx, |s, cx| s.update_tool(|t| t.resize_brush(dir), cx));
             }
             _ if !cmd && !k.modifiers.alt => match Tool::from_key(key) {
                 Some(t) => {

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.16,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "lucem-app"
+dynamic = ["version"]
+description = "The lucem desktop app: install with pip install lucem[app]"
+readme = "README.md"
+authors = [{ name = "jesusdpa1" }]
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+requires-python = ">=3.12"
+
+[project.urls]
+Repository = "https://github.com/neuro-kitchen/lucem"
+
+[tool.maturin]
+manifest-path = "../../../../app/lucem-app/Cargo.toml"
+bindings = "bin"
