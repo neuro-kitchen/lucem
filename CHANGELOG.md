@@ -44,6 +44,11 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
   archive's own code: seeds, the pixel classifier, fragments and holes, overlaps joined. The
   published test images give the published nuclei. `pip install "lucem[instanseg]"` (also in
   `lucem[ml]`). The channel-invariant "nuclei and cells" model is not ported yet.
+- **`lucem autotune`, one tuning for the whole machine** (as dsp-kitchen's): lucem's operators
+  over a grid of image sizes, then every model plugin found (`<plugin> tune`: each installed model
+  on every tile shape), on every usable runtime; the choices and compiled kernels are kept in the
+  user cache folder. Also **File › Tune this device** in the app and `lucem.runtime.autotune()`.
+  The model plugins have a `bench` command (timings per phase, cold and warm).
 - **Brush size from the keyboard:** <kbd>Ctrl</kbd>+<kbd>+</kbd> and <kbd>Ctrl</kbd>+<kbd>−</kbd>
   make the brush bigger or smaller while the Brush, Eraser or Wand is in hand (they zoom
   otherwise, as <kbd>+</kbd> and <kbd>−</kbd>), next to <kbd>[</kbd> and <kbd>]</kbd>. The
@@ -51,6 +56,31 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ### Changed
 
+- **The models are Burn modules**: StarDist and InstanSeg are `#[derive(Module)]` structs of
+  `burn::nn` layers (InstanSeg's mirroring its PyTorch classes), loaded by name with Burn's
+  `SafetensorsStore` (InstanSeg's through its PyTorch adapter), instead of hand-written tensor
+  functions and readers. The published outputs are still met: InstanSeg exactly, StarDist to 1e-6
+  in single precision.
+- **The models are 3–10× faster on a GPU** (RTX 2070, CUDA, warm):
+
+  | Image | InstanSeg before → now | StarDist before → now |
+  |---|---|---|
+  | 512² | 1,179 → 111 ms | 225 → 39 ms |
+  | 1024² | 4,136 → 503 ms | 541 → 200 ms |
+  | 2048² | 21,666 → 2,790 ms | 2,226 → 696 ms |
+  | 4096² | — → 11,106 ms | 10,914 → 3,336 ms |
+
+  Half precision on the GPU, for the weights, the activations and the data to and from the
+  device (half the bytes moved); BatchNorm folded into InstanSeg's convolutions at load; the 3 × 3
+  layers of 64 channels and more as tensor-core matrix products, because Burn's own tensor-core
+  convolution asks more shared memory than a Turing GPU has for them and falls back to its direct
+  kernel (about 15× slower); when a matrix product cannot launch on a device, the direct
+  convolutions take over for the rest of the run. InstanSeg's postprocessing works in logits a
+  window row at a time (no exponential per pixel), compares only windows that touch, and fills
+  holes near each nucleus only (512²: 499 → 14 ms). InstanSeg in half precision still gives the
+  published nuclei exactly; StarDist's maps move by at most 1.8e-3 (probability) and 0.1 px
+  (distances), same nuclei. `LUCEM_INSTANSEG_PRECISION` / `LUCEM_STARDIST_PRECISION=f32` and
+  `…_CONV=direct` choose the single-precision, direct path (bit-faithful, slower).
 - Channels open as the OME-Zarr file marks them (`omero` `active`; shown when it does not say):
   a 59-marker PhenoCycler image opens with its chosen few, the rest in the list.
 - The workspace's data list (`.data/`) holds only images and OME-Zarr containers: licences,
