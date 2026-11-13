@@ -21,7 +21,7 @@ sidebar:
 | <kbd>Space</kbd> (held) | Move the image with any tool |
 | <kbd>F</kbd> | Fit the image (or the graph, in Pipeline) |
 | <kbd>[</kbd>, <kbd>]</kbd> | Brush size |
-| <kbd>Ctrl</kbd>+<kbd>+</kbd>, <kbd>Ctrl</kbd>+<kbd>−</kbd> | Brush size with the Brush, Eraser or Wand in hand; zoom otherwise |
+| <kbd>Ctrl</kbd>+<kbd>=</kbd>, <kbd>Ctrl</kbd>+<kbd>−</kbd> | Brush size (Brush, Eraser, Wand) |
 | <kbd>+</kbd>, <kbd>−</kbd> | Zoom in, out |
 | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quit |
 

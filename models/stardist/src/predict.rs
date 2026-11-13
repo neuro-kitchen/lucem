@@ -139,11 +139,11 @@ pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Ti
             // A matrix product this device cannot launch: Burn's own convolutions from now on
             let (p, d) = match attempt() {
                 Ok(r) => r,
-                Err(e) if crate::net::disable_gemm() => {
+                Err(e) if crate::gemm_cannot_launch(&e) && crate::net::disable_gemm() => {
                     eprintln!("stardist: the matrix-product convolutions failed on this device, using Burn's own ({e})");
-                    attempt()?
+                    attempt().map_err(crate::explain)?
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(crate::explain(e)),
             };
             if crate::timing() {
                 eprintln!("stardist: tile {ph}×{pw}: network and read back {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);

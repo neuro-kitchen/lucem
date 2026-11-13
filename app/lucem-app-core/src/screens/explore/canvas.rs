@@ -1423,11 +1423,6 @@ impl ImageCanvas {
             "n" if !cmd && k.modifiers.shift => self.toggle_overlay(|o| o.names = !o.names, cx),
             "0" if cmd => self.fit(cx),
             "1" if cmd => self.actual_size(cx),
-            // Ctrl + / Ctrl −: the brush's size while a brush tool is in hand, else zoom (as = / −)
-            "=" | "+" | "-" if cmd && self.tool(cx).uses_brush() => {
-                let dir = if key == "-" { -1.0 } else { 1.0 };
-                self.store.update(cx, |s, cx| s.update_tool(|t| t.resize_brush(dir), cx));
-            }
             "=" | "+" => self.zoom_at(1.5, None, cx),
             "-" => self.zoom_at(1.0 / 1.5, None, cx),
             "f" if !cmd => self.fit(cx),

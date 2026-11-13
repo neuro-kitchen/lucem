@@ -59,10 +59,9 @@ publishing to crates.io and PyPI; brush size from the keyboard.
   on every tile shape), on every usable runtime; the choices and compiled kernels are kept in the
   user cache folder. Also **File › Tune this device** in the app and `lucem.runtime.autotune()`.
   The model plugins have a `bench` command (timings per phase, cold and warm).
-- **Brush size from the keyboard:** <kbd>Ctrl</kbd>+<kbd>+</kbd> and <kbd>Ctrl</kbd>+<kbd>−</kbd>
-  make the brush bigger or smaller while the Brush, Eraser or Wand is in hand (they zoom
-  otherwise, as <kbd>+</kbd> and <kbd>−</kbd>), next to <kbd>[</kbd> and <kbd>]</kbd>. The
-  toolbar's stepper and both keys share one step.
+- **Brush size from the keyboard:** <kbd>Ctrl</kbd>+<kbd>=</kbd> and <kbd>Ctrl</kbd>+<kbd>−</kbd>
+  (the commands Brush bigger and Brush smaller, wherever the focus is), next to <kbd>[</kbd> and
+  <kbd>]</kbd> on the image; the toolbar's stepper and the keys share one step.
 
 ### Security
 
@@ -107,6 +106,11 @@ publishing to crates.io and PyPI; brush size from the keyboard.
 
 ### Fixed
 
+- Model plugins run on the app's compute runtime: the app passes its own (CUDA, wgpu, CPU) to
+  every plugin it starts. A plugin left to its default could open a second runtime on the same
+  GPU (wgpu beside the app's CUDA), share its memory and run out of it.
+- Out of GPU memory in a model is reported as such, with what to do; it no longer switches the
+  models' fast convolutions off (only a matrix product the device cannot launch does).
 - CI runs green again: the app's device uses the CPU there (`LUCEM_RUNTIME=cpu`; it opened
   wgpu, whose device thread panics on a runner without a GPU, failing every app test after it),
   and cargo-deny allows kitchen's repository as a git source (kitchen-agent is not on crates.io
