@@ -198,8 +198,12 @@ fn classifier(p: &net::ProbabilityNet) -> Result<post::PixelClassifier, String> 
         let t: Vec<f32> = (0..o).flat_map(|r| (0..i).map(move |c| (r, c))).map(|(r, c)| w[c * o + r]).collect();
         layers.push((t, b, o, i));
     }
-    match (layers.first(), layers.last()) {
-        (Some(f), Some(l)) if f.3 == 4 && l.2 == 1 => Ok(post::PixelClassifier { layers }),
+    let c = post::PixelClassifier { layers };
+    if !c.fits() {
+        return Err(format!("the pixel classifier has a layer wider than {}", post::MAX_WIDTH));
+    }
+    match (c.layers.first(), c.layers.last()) {
+        (Some(f), Some(l)) if f.3 == 4 && l.2 == 1 => Ok(c),
         _ => Err("the pixel classifier must take 4 features and give 1 value".into()),
     }
 }
@@ -300,7 +304,10 @@ pub struct Tiling {
 
 impl Default for Tiling {
     fn default() -> Self {
-        Self { tile: 1024, halo: 96 }
+        // 1088 + 2 × 96 = 1280: a full tile is exactly a multiple of SHAPE_STEP (no padding
+        // wasted). A 2048-wide tile (1856 + halos) is past what the matrix products of the 3 × 3
+        // layers can launch on a Turing GPU ("cube count too big").
+        Self { tile: 1088, halo: 96 }
     }
 }
 

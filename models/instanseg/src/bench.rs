@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn tile_shapes_cover_every_side_up_to_a_full_tile() {
-        let s = tile_shapes(Tiling { tile: 1024, halo: 96 });
+        let s = tile_shapes(Tiling { tile: 1088, halo: 96 });
         assert_eq!(s.len(), 25, "256..=1280 in steps of 256, both sides");
         assert!(s.contains(&(1280, 1280)) && s.contains(&(256, 1280)));
     }

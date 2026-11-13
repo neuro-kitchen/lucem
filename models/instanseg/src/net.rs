@@ -30,6 +30,9 @@ use burn::tensor::{Device, FloatDType, Tensor};
 /// pads to 16).
 pub const DIVISOR: usize = 16;
 
+/// The width from which 3 × 3 convolutions run as matrix products ([`ConvNormAct::conv_gemm`]).
+const GEMM_FROM_CHANNELS: usize = 64;
+
 /// BatchNorm's epsilon in the published models.
 const BN_EPS: f64 = 1e-5;
 
@@ -87,9 +90,12 @@ impl ConvNormAct {
         y.reshape([n, o, h, w])
     }
 
+    /// The matrix product only where Burn's tensor-core convolution would not run: 3 × 3 layers
+    /// of 64 channels or more (in or out). The 32-channel layers at full resolution run natively,
+    /// without the nine-fold copy of their input (the largest activations).
     fn with_gemm(mut self, on: bool) -> Self {
-        let [_, _, kh, kw] = self.conv.weight.dims();
-        self.gemm = on && (kh, kw) != (1, 1);
+        let [o, i, kh, kw] = self.conv.weight.dims();
+        self.gemm = on && (kh, kw) != (1, 1) && o.max(i) >= GEMM_FROM_CHANNELS;
         self
     }
 

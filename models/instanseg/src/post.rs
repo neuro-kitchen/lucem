@@ -40,26 +40,58 @@ pub struct PixelClassifier {
 }
 
 impl PixelClassifier {
-    /// The probability (after the sigmoid) for one feature vector; `scratch` holds the layers'
-    /// values between them (reused across pixels).
-    fn prob(&self, x: &[f32; 4], scratch: &mut [Vec<f32>; 2]) -> f32 {
-        let [a, b] = scratch;
-        a.clear();
-        a.extend_from_slice(x);
+    /// The logit (the value before the sigmoid) of each pixel of a row of up to [`ROW`] pixels,
+    /// from its four features (`dx`, `dy`: the embedding less the seed's; `s0`, `s1`: sigma).
+    /// One layer at a time over the whole row, so the inner loops run across pixels and vectorize;
+    /// the values stay in arrays on the stack. The sigmoid is never taken: it is increasing, so
+    /// thresholds and comparisons are done on logits ([`logit`]).
+    fn logits_row(&self, dx: &[f32], dy: &[f32], s0: &[f32], s1: &[f32], out: &mut [f32]) {
+        let n = dx.len();
+        let mut a = [[0f32; ROW]; MAX_WIDTH];
+        let mut b = [[0f32; ROW]; MAX_WIDTH];
+        a[0][..n].copy_from_slice(dx);
+        a[1][..n].copy_from_slice(dy);
+        a[2][..n].copy_from_slice(s0);
+        a[3][..n].copy_from_slice(s1);
         let last = self.layers.len() - 1;
         for (k, (w, bias, o, i)) in self.layers.iter().enumerate() {
-            b.clear();
             for r in 0..*o {
-                let mut v = bias[r];
+                let acc = &mut b[r];
+                acc[..n].fill(bias[r]);
                 for c in 0..*i {
-                    v += w[r * i + c] * a[c];
+                    let wc = w[r * i + c];
+                    let src = &a[c];
+                    for p in 0..n {
+                        acc[p] += wc * src[p];
+                    }
                 }
-                b.push(if k < last { v.max(0.0) } else { v });
+                if k < last {
+                    for v in &mut acc[..n] {
+                        *v = v.max(0.0);
+                    }
+                }
             }
-            std::mem::swap(a, b);
+            std::mem::swap(&mut a, &mut b);
         }
-        1.0 / (1.0 + (-a[0]).exp())
+        out[..n].copy_from_slice(&a[0][..n]);
     }
+
+    /// Whether every layer fits [`Self::logits_row`]'s arrays.
+    pub fn fits(&self) -> bool {
+        self.layers.iter().all(|(_, _, o, i)| *o <= MAX_WIDTH && *i <= MAX_WIDTH)
+    }
+}
+
+/// The widest pixel-classifier layer [`PixelClassifier::logits_row`] evaluates (InstanSeg's are 5).
+pub const MAX_WIDTH: usize = 16;
+
+/// Pixels per batch of [`PixelClassifier::logits_row`]: a window's row (`2 · window_size`) or a
+/// part of it.
+const ROW: usize = 64;
+
+/// The logit of probability `p`: `prob ≥ p` exactly when `logit ≥ logit(p)`.
+fn logit(p: f32) -> f32 {
+    (p / (1.0 - p)).ln()
 }
 
 /// The network's output for one image: `[channels, h, w]` (embedding 2, sigma 2, seeds 1).
@@ -125,58 +157,89 @@ pub fn peaks(map: &[f32], h: usize, w: usize, d: usize, min: f32) -> Vec<(usize,
     rows.into_iter().flatten().collect()
 }
 
-/// `mask` (side `s × s`) grown from `seed` within itself, 8-connected. As InstanSeg's (a 3 × 3
-/// max pool, then the mask, until nothing changes), the first step takes the mask's pixels next
-/// to a seed, so a seed just under the threshold still grows.
-fn flood_fill(mask: &[bool], seed: &[bool], s: usize) -> Vec<bool> {
-    let mut out = vec![false; s * s];
-    let near_seed = |i: usize| {
-        let (y, x) = (i / s, i % s);
-        (y.saturating_sub(1)..(y + 2).min(s)).any(|yy| (x.saturating_sub(1)..(x + 2).min(s)).any(|xx| seed[yy * s + xx]))
-    };
-    let mut stack: Vec<usize> = (0..s * s).filter(|&i| mask[i] && near_seed(i)).collect();
+/// The 8-neighbours of `i` in a `w × h` grid.
+fn neighbours(i: usize, w: usize, h: usize) -> impl Iterator<Item = usize> {
+    let (y, x) = (i / w, i % w);
+    (y.saturating_sub(1)..(y + 2).min(h)).flat_map(move |yy| (x.saturating_sub(1)..(x + 2).min(w)).map(move |xx| yy * w + xx)).filter(move |&j| j != i)
+}
+
+/// `mask` (`w × h`) grown from `seeds` within itself, 8-connected. As InstanSeg's (a 3 × 3 max
+/// pool, then the mask, until nothing changes), the first step takes the mask's pixels next to a
+/// seed, so a seed just under the threshold still grows.
+fn flood_fill(mask: &[bool], seeds: &[bool], w: usize, h: usize) -> Vec<bool> {
+    let mut out = vec![false; w * h];
+    let mut stack: Vec<usize> = (0..w * h).filter(|&i| mask[i] && (seeds[i] || neighbours(i, w, h).any(|j| seeds[j]))).collect();
     for &i in &stack {
         out[i] = true;
     }
     while let Some(i) = stack.pop() {
-        let (y, x) = (i / s, i % s);
-        for dy in -1i64..=1 {
-            for dx in -1i64..=1 {
-                let (ny, nx) = (y as i64 + dy, x as i64 + dx);
-                if ny < 0 || nx < 0 || ny >= s as i64 || nx >= s as i64 {
-                    continue;
-                }
-                let j = ny as usize * s + nx as usize;
-                if mask[j] && !out[j] {
-                    out[j] = true;
-                    stack.push(j);
-                }
+        for j in neighbours(i, w, h) {
+            if mask[j] && !out[j] {
+                out[j] = true;
+                stack.push(j);
             }
         }
     }
     out
 }
 
-/// `mask` with its holes filled: background not reached from the background beyond three
-/// dilations of the mask (as InstanSeg's `fill_holes`).
-fn fill_holes(mask: &[bool], s: usize) -> Vec<bool> {
+/// [`flood_fill`] from one seed pixel: only the pixels of its component are visited.
+fn grow_from(mask: &[bool], seed: usize, w: usize, h: usize) -> Vec<bool> {
+    let mut out = vec![false; w * h];
+    let mut stack: Vec<usize> = std::iter::once(seed).chain(neighbours(seed, w, h)).filter(|&i| mask[i]).collect();
+    for &i in &stack {
+        out[i] = true;
+    }
+    while let Some(i) = stack.pop() {
+        for j in neighbours(i, w, h) {
+            if mask[j] && !out[j] {
+                out[j] = true;
+                stack.push(j);
+            }
+        }
+    }
+    out
+}
+
+/// `mask` (`w × h`) with its holes filled: background not reached from the background beyond
+/// three dilations of the mask (as InstanSeg's `fill_holes`).
+fn fill_holes(mask: &[bool], w: usize, h: usize) -> Vec<bool> {
     let mut grown = mask.to_vec();
     for _ in 0..3 {
         let prev = grown.clone();
-        for y in 0..s {
-            for x in 0..s {
-                if prev[y * s + x] {
-                    continue;
-                }
-                let near = (y.saturating_sub(1)..(y + 2).min(s)).any(|yy| (x.saturating_sub(1)..(x + 2).min(s)).any(|xx| prev[yy * s + xx]));
-                grown[y * s + x] = near;
+        for i in 0..w * h {
+            if !prev[i] && neighbours(i, w, h).any(|j| prev[j]) {
+                grown[i] = true;
             }
         }
     }
     let background: Vec<bool> = mask.iter().map(|m| !m).collect();
     let far: Vec<bool> = grown.iter().map(|g| !g).collect();
-    let outside = flood_fill(&background, &far, s);
+    let outside = flood_fill(&background, &far, w, h);
     outside.iter().map(|o| !o).collect()
+}
+
+/// [`fill_holes`] of a `side × side` window, computed on the mask's bounding box and 4 pixels
+/// around it: beyond that everything is more than three dilations away, so outside either way.
+fn fill_holes_near(mask: &[bool], side: usize) -> Vec<bool> {
+    let mut out = mask.to_vec();
+    let (mut y0, mut y1, mut x0, mut x1) = (usize::MAX, 0, usize::MAX, 0);
+    for (i, _) in mask.iter().enumerate().filter(|(_, m)| **m) {
+        let (y, x) = (i / side, i % side);
+        (y0, y1, x0, x1) = (y0.min(y), y1.max(y), x0.min(x), x1.max(x));
+    }
+    if y0 == usize::MAX {
+        return out;
+    }
+    let (y0, x0) = (y0.saturating_sub(4), x0.saturating_sub(4));
+    let (y1, x1) = ((y1 + 5).min(side), (x1 + 5).min(side));
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    let crop: Vec<bool> = (0..ch * cw).map(|i| mask[(y0 + i / cw) * side + x0 + i % cw]).collect();
+    let filled = fill_holes(&crop, cw, ch);
+    for i in 0..ch * cw {
+        out[(y0 + i / cw) * side + x0 + i % cw] = filled[i];
+    }
+    out
 }
 
 /// Labels (`h × w`, 0: background) and the instances found.
@@ -184,79 +247,124 @@ pub fn instances(out: &Output, classifier: &PixelClassifier, p: &Params) -> (Vec
     let (h, w) = (out.h, out.w);
     let n = h * w;
     let plane = |c: usize| &out.data[c * n..(c + 1) * n];
+    let clock = std::time::Instant::now();
+    let mut stages: Vec<(&str, f64)> = Vec::new();
+    let lap = |name: &'static str, stages: &mut Vec<(&str, f64)>| stages.push((name, clock.elapsed().as_secs_f64() * 1e3));
     let seeds_map: Vec<f32> = plane(4).iter().map(|v| v / 15.0 + 0.5).collect();
-    let (ex, ey) = (plane(0), plane(1));
     let (s0, s1) = (plane(2), plane(3));
+    // The embedding, once per pixel (each pixel is in about ten windows)
     let (xend, yend) = (w as f32 * 64.0 / 256.0, h as f32 * 64.0 / 256.0);
-    let field = |c: usize, y: usize, x: usize| {
-        let e = if c == 0 { ex[y * w + x] } else { ey[y * w + x] };
-        let coord = if c == 0 { linspace(xend, w, x) } else { linspace(yend, h, y) };
-        (1.0 / (1.0 + (-e).exp()) - 0.5) * 8.0 + coord
-    };
+    let embed = |e: f32| (1.0 / (1.0 + (-e).exp()) - 0.5) * 8.0;
+    let fx: Vec<f32> = plane(0).par_iter().enumerate().map(|(i, &e)| embed(e) + linspace(xend, w, i % w)).collect();
+    let fy: Vec<f32> = plane(1).par_iter().enumerate().map(|(i, &e)| embed(e) + linspace(yend, h, i / w)).collect();
+    lap("embedding", &mut stages);
     let seeds = peaks(&seeds_map, h, w, p.peak_distance, p.seed_threshold);
+    lap("peaks", &mut stages);
     if seeds.is_empty() {
         return (vec![0; n], Vec::new());
     }
     // The window: half-side `ws`, at most half the image (InstanSeg uses min(window, h, w))
     let ws = p.window_size.min(h / 2).min(w / 2).max(1);
     let side = 2 * ws;
-    // Each seed's window: its top-left and the probability of each pixel
-    let windows: Vec<(usize, usize, Vec<f32>)> = seeds
+    let threshold = logit(p.mask_threshold);
+    // Each seed's window: its top-left and its pixels at `mask_threshold` or above (image index,
+    // logit), by index
+    let windows: Vec<(usize, usize, Vec<(u32, f32)>)> = seeds
         .par_iter()
-        .map_init(
-            || [Vec::with_capacity(8), Vec::with_capacity(8)],
-            |scratch, &(cy, cx)| {
+        .map(
+            |&(cy, cx)| {
                 let (ty, tx) = (cy.clamp(ws, h - ws) - ws, cx.clamp(ws, w - ws) - ws);
-                let (c0, c1) = (field(0, cy, cx), field(1, cy, cx));
+                let (c0, c1) = (fx[cy * w + cx], fy[cy * w + cx]);
+                // Logits, not probabilities: the same order and thresholds without an exponential
                 let mut prob = vec![0f32; side * side];
+                let (mut dx, mut dy) = ([0f32; ROW], [0f32; ROW]);
                 for wy in 0..side {
-                    for wx in 0..side {
-                        let (y, x) = (ty + wy, tx + wx);
-                        let f = [field(0, y, x) - c0, field(1, y, x) - c1, s0[y * w + x], s1[y * w + x]];
-                        prob[wy * side + wx] = classifier.prob(&f, scratch);
+                    let row = (ty + wy) * w + tx;
+                    for start in (0..side).step_by(ROW) {
+                        let len = ROW.min(side - start);
+                        let at = row + start;
+                        for p in 0..len {
+                            dx[p] = fx[at + p] - c0;
+                            dy[p] = fy[at + p] - c1;
+                        }
+                        let o = wy * side + start;
+                        classifier.logits_row(&dx[..len], &dy[..len], &s0[at..at + len], &s1[at..at + len], &mut prob[o..o + len]);
                     }
                 }
                 if p.cleanup_fragments {
-                    let mask: Vec<bool> = prob.iter().map(|&v| v >= p.mask_threshold).collect();
-                    let mut seed = vec![false; side * side];
-                    seed[(cy - ty) * side + (cx - tx)] = true;
-                    let filled = flood_fill(&mask, &seed, side);
-                    let closed = fill_holes(&filled, side);
+                    let mask: Vec<bool> = prob.iter().map(|&v| v >= threshold).collect();
+                    let filled = grow_from(&mask, (cy - ty) * side + (cx - tx), side, side);
+                    let closed = fill_holes_near(&filled, side);
                     for i in 0..side * side {
                         if !filled[i] {
-                            prob[i] = 0.0;
-                        }
-                        if closed[i] && !filled[i] {
-                            prob[i] = p.mask_threshold;
+                            prob[i] = if closed[i] { threshold } else { f32::NEG_INFINITY };
                         }
                     }
                 }
-                (ty, tx, prob)
+                let fg: Vec<(u32, f32)> = (0..side * side).filter(|&i| prob[i] >= threshold).map(|i| (((ty + i / side) * w + tx + i % side) as u32, prob[i])).collect();
+                (ty, tx, fg)
             },
         )
         .collect();
+    lap("windows", &mut stages);
     // Each pixel to its most probable seed (ties: the lower label, as InstanSeg's stable sorts)
     let mut best = vec![(f32::NEG_INFINITY, 0u32); n];
-    let mut area = vec![0u32; windows.len()];
-    let mut cover: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for (k, (ty, tx, prob)) in windows.iter().enumerate() {
+    for (k, (_, _, fg)) in windows.iter().enumerate() {
         let label = k as u32 + 1;
-        for wy in 0..side {
-            for wx in 0..side {
-                let v = prob[wy * side + wx];
-                if v < p.mask_threshold {
-                    continue;
-                }
-                let i = (ty + wy) * w + tx + wx;
-                area[k] += 1;
-                cover[i].push(k as u32);
-                if v > best[i].0 {
-                    best[i] = (v, label);
-                }
+        for &(i, v) in fg {
+            if v > best[i as usize].0 {
+                best[i as usize] = (v, label);
             }
         }
     }
-    // Seeds joined where their pixels overlap: intersection over the smaller area
+    // Seeds joined where their pixels overlap by more than `overlap_threshold` of the smaller:
+    // only windows that touch are compared (buckets of a window's side), by merging their sorted
+    // pixel lists
+    let mut buckets: std::collections::HashMap<(usize, usize), Vec<u32>> = std::collections::HashMap::new();
+    for (k, (ty, tx, _)) in windows.iter().enumerate() {
+        buckets.entry((ty / side, tx / side)).or_default().push(k as u32);
+    }
+    let joined: Vec<(u32, u32)> = (0..windows.len())
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let (ty, tx, a) = &windows[i];
+            let (by, bx) = (ty / side, tx / side);
+            let mut out = Vec::new();
+            for gy in by.saturating_sub(1)..=by + 1 {
+                for gx in bx.saturating_sub(1)..=bx + 1 {
+                    let Some(list) = buckets.get(&(gy, gx)) else { continue };
+                    for &j in list {
+                        let (oy, ox, b) = &windows[j as usize];
+                        if j as usize <= i || oy.abs_diff(*ty) >= side || ox.abs_diff(*tx) >= side {
+                            continue;
+                        }
+                        let smaller = a.len().min(b.len());
+                        if smaller == 0 {
+                            continue;
+                        }
+                        // Pixels both windows hold (both lists sorted by index)
+                        let (mut p1, mut p2, mut shared) = (0, 0, 0usize);
+                        while p1 < a.len() && p2 < b.len() {
+                            match a[p1].0.cmp(&b[p2].0) {
+                                std::cmp::Ordering::Less => p1 += 1,
+                                std::cmp::Ordering::Greater => p2 += 1,
+                                std::cmp::Ordering::Equal => {
+                                    shared += 1;
+                                    p1 += 1;
+                                    p2 += 1;
+                                }
+                            }
+                        }
+                        if shared as f32 / smaller as f32 > p.overlap_threshold {
+                            out.push((i as u32, j));
+                        }
+                    }
+                }
+            }
+            out
+        })
+        .collect();
+    lap("best + overlaps", &mut stages);
     let mut parent: Vec<u32> = (0..windows.len() as u32).collect();
     fn find(parent: &mut [u32], mut i: u32) -> u32 {
         while parent[i as usize] != i {
@@ -265,24 +373,13 @@ pub fn instances(out: &Output, classifier: &PixelClassifier, p: &Params) -> (Vec
         }
         i
     }
-    let mut inter: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
-    for c in &cover {
-        for (a, &i) in c.iter().enumerate() {
-            for &j in &c[a + 1..] {
-                *inter.entry((i.min(j), i.max(j))).or_insert(0) += 1;
-            }
-        }
-    }
-    for (&(i, j), &shared) in &inter {
-        let smaller = area[i as usize].min(area[j as usize]).max(1);
-        if shared as f32 / smaller as f32 > p.overlap_threshold {
-            let (a, b) = (find(&mut parent, i), find(&mut parent, j));
-            // The smaller index names the group (its label is the smallest)
-            if a < b {
-                parent[b as usize] = a;
-            } else if b < a {
-                parent[a as usize] = b;
-            }
+    for (i, j) in joined {
+        let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+        // The smaller index names the group (its label is the smallest)
+        if a < b {
+            parent[b as usize] = a;
+        } else if b < a {
+            parent[a as usize] = b;
         }
     }
     // Each group's area, then labels 1..=n for the groups of at least `min_size` pixels, in order
@@ -316,6 +413,11 @@ pub fn instances(out: &Output, classifier: &PixelClassifier, p: &Params) -> (Vec
             f.score = f.score.max(seeds_map[y * w + x]);
         }
     }
+    lap("labels", &mut stages);
+    if std::env::var_os("LUCEM_INSTANSEG_TIMING").is_some() {
+        let mut last = 0.0;
+        eprintln!("instanseg post: {}", stages.iter().map(|(n, t)| { let d = t - last; last = *t; format!("{n} {d:.1} ms") }).collect::<Vec<_>>().join(", "));
+    }
     (labels, found)
 }
 
@@ -340,13 +442,15 @@ mod tests {
         // "outside"): in a window without any, everything counts as enclosed
         let s = 15;
         let ring: Vec<bool> = (0..s * s).map(|i| { let (y, x) = (i / s, i % s); (5..=9).contains(&y) && (5..=9).contains(&x) && !(y == 7 && x == 7) }).collect();
-        let filled = fill_holes(&ring, s);
+        let filled = fill_holes_near(&ring, s);
+        assert_eq!(filled, fill_holes(&ring, s, s), "the cropped fill is the whole window's");
         assert!(filled[7 * s + 7] && !filled[0]);
         let mut mask = ring.clone();
         mask[0] = true; // a fragment not touching the ring
         let mut seed = vec![false; s * s];
         seed[5 * s + 5] = true;
-        let kept = flood_fill(&mask, &seed, s);
+        let kept = flood_fill(&mask, &seed, s, s);
+        assert_eq!(kept, grow_from(&mask, 5 * s + 5, s, s));
         assert!(!kept[0] && kept[9 * s + 9]);
     }
 }
