@@ -18,6 +18,7 @@
 //! - Output: [`post`] (seeds, the pixel classifier, fragments and holes, overlaps joined, the
 //!   smallest dropped).
 
+pub mod bench;
 pub mod net;
 pub mod post;
 pub mod torchscript;
@@ -303,7 +304,35 @@ impl Default for Tiling {
 }
 
 /// Tile sides are rounded up to this, so CubeCL's tuned kernels come from its cache.
-const SHAPE_STEP: usize = 256;
+pub const SHAPE_STEP: usize = 256;
+
+/// Where the time of one image went (milliseconds), and how much the network computed for it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Timings {
+    /// Percentiles and scaling on the host.
+    pub normalize: f64,
+    /// Tiles cut out and padded on the host.
+    pub prepare: f64,
+    /// Upload and the network, until the device is idle.
+    pub compute: f64,
+    /// The output back to the host.
+    pub readback: f64,
+    /// Seeds, the pixel classifier, labels.
+    pub post: f64,
+    pub tiles: usize,
+    /// Pixels the network computed (padding and halos included) per pixel of the image.
+    pub overhead: f64,
+}
+
+impl Timings {
+    pub fn total(&self) -> f64 {
+        self.normalize + self.prepare + self.compute + self.readback + self.post
+    }
+}
+
+fn ms(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1e3
+}
 
 /// `i` mirrored into `0..n`, as numpy's and PyTorch's `reflect`.
 fn reflect(i: usize, n: usize) -> usize {
@@ -355,13 +384,20 @@ impl InstanSeg {
 
     /// The network's output (`[5, h, w]`) for `planes` (`[channels, h, w]`, normalized).
     pub fn network(&self, planes: &[f32], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<f32>, String> {
+        self.network_timed(planes, w, h, t, progress, &mut Timings::default())
+    }
+
+    /// [`Self::network`], adding where its time went to `times`.
+    pub fn network_timed(&self, planes: &[f32], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize), times: &mut Timings) -> Result<Vec<f32>, String> {
         let no = self.net.outputs;
         let nc = self.net.channels;
         let mut out = vec![0f32; no * w * h];
         let step = t.tile.max(net::DIVISOR);
         let (ny, nx) = (h.div_ceil(step), w.div_ceil(step));
+        let mut computed = 0usize;
         for ty in 0..ny {
             for tx in 0..nx {
+                let t0 = Instant::now();
                 let (y0, x0) = (ty * step, tx * step);
                 let (y1, x1) = ((y0 + step).min(h), (x0 + step).min(w));
                 let (ry0, rx0) = (y0.saturating_sub(t.halo), x0.saturating_sub(t.halo));
@@ -377,12 +413,19 @@ impl InstanSeg {
                         }
                     }
                 }
-                let t0 = Instant::now();
+                computed += ph * pw;
+                times.prepare += ms(t0);
+                let t1 = Instant::now();
                 let y = self.net.forward(Tensor::<4>::from_data(TensorData::new(input, [1, nc, ph, pw]), &self.net.device));
+                self.net.device.sync().map_err(|e| format!("the device: {e:?}"))?;
+                times.compute += ms(t1);
+                let t2 = Instant::now();
                 let y: Vec<f32> = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+                times.readback += ms(t2);
                 if timing() {
-                    eprintln!("instanseg: tile {ph}×{pw}: network and read back {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+                    eprintln!("instanseg: tile {ph}×{pw}: network {:.0} ms, read back {:.0} ms", t2.duration_since(t1).as_secs_f64() * 1e3, ms(t2));
                 }
+                let t3 = Instant::now();
                 for c in 0..no {
                     for yy in y0..y1 {
                         let ly = yy - ry0;
@@ -390,9 +433,12 @@ impl InstanSeg {
                         out[c * w * h + yy * w + x0..c * w * h + yy * w + x1].copy_from_slice(src);
                     }
                 }
+                times.prepare += ms(t3);
                 progress(ty * nx + tx + 1, ny * nx);
             }
         }
+        times.tiles += ny * nx;
+        times.overhead = computed as f64 / (w * h).max(1) as f64;
         if out.iter().all(|&v| v == 0.0) {
             // A device that failed quietly reads back zeros: never an answer
             return Err("the network gave nothing at all (the device failed?)".into());
@@ -402,19 +448,28 @@ impl InstanSeg {
 
     /// The nuclei of an image at the model's own scale (the model's channels, interleaved).
     pub fn segment(&self, pixels: &[u8], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize)) -> Result<(Vec<u32>, Vec<Found>), String> {
+        let (labels, found, times) = self.segment_timed(pixels, w, h, t, progress)?;
+        if timing() {
+            eprintln!("instanseg: {times:?} ({} nuclei)", found.len());
+        }
+        Ok((labels, found))
+    }
+
+    /// [`Self::segment`] and where its time went.
+    pub fn segment_timed(&self, pixels: &[u8], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize)) -> Result<(Vec<u32>, Vec<Found>, Timings), String> {
         let c = self.spec.channels;
         if pixels.len() != w * h * c {
             return Err(format!("{} bytes, not {w} × {h} × {c}", pixels.len()));
         }
-        let planes = normalize(pixels, w, h, c);
+        let mut times = Timings::default();
         let t0 = Instant::now();
-        let out = self.network(&planes, w, h, t, progress)?;
+        let planes = normalize(pixels, w, h, c);
+        times.normalize = ms(t0);
+        let out = self.network_timed(&planes, w, h, t, progress, &mut times)?;
         let t1 = Instant::now();
-        let r = post::instances(&post::Output { data: &out, h, w }, &self.classifier, &self.params);
-        if timing() {
-            eprintln!("instanseg: network {:.0} ms, postprocessing {:.0} ms ({} nuclei)", (t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3, r.1.len());
-        }
-        Ok(r)
+        let (labels, found) = post::instances(&post::Output { data: &out, h, w }, &self.classifier, &self.params);
+        times.post = ms(t1);
+        Ok((labels, found, times))
     }
 
     /// The nuclei of an image (`pixel_um`: its pixel size, when known: resampled to the model's
