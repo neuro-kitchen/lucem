@@ -9,8 +9,22 @@ description = "GPU image processing for biology, written once in CubeCL"
 readme = "README.md"
 authors = [{ name = "jesusdpa1" }]
 license = "MIT OR Apache-2.0"
+# Listed so the sdist packs them (PyPI rejects a declared License-File that is missing)
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
 requires-python = ">=3.12"
 dependencies = ["numpy>=2.5"]
+
+[project.optional-dependencies]
+# Pinned to this release; .github/workflows/release.yml checks them against the workspace version
+hist = ["lucem-hist==0.0.1"]
+app = ["lucem-app==0.0.1"]
+stardist = ["lucem-ml-stardist==0.0.1"]
+sam = ["lucem-ml-sam==0.0.1"]
+ml = ["lucem-ml-stardist==0.0.1", "lucem-ml-sam==0.0.1"]
+all = ["lucem-hist==0.0.1", "lucem-app==0.0.1", "lucem-ml-stardist==0.0.1", "lucem-ml-sam==0.0.1"]
+
+[project.scripts]
+lucem = "lucem._cli:main"
 
 [project.urls]
 Repository = "https://github.com/neuro-kitchen/lucem"
