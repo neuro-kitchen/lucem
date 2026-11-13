@@ -1,0 +1,24 @@
+[package]
+name = "lucem-ml-instanseg"
+description = "lucem's InstanSeg plugin: nuclei as pixel embeddings on Burn, a separate program the app runs (lucem-ml protocol over stdin / stdout)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "lucem-ml-instanseg"
+path = "src/main.rs"
+
+[features]
+default = ["wgpu", "cpu", "cuda"]
+wgpu = ["lucem-model-instanseg/wgpu"]
+cpu = ["lucem-model-instanseg/cpu"]
+cuda = ["lucem-model-instanseg/cuda"]
+
+[dependencies]
+lucem-ml = { path = "../../../crates/lucem-ml" }
+lucem-model-instanseg.workspace = true
+serde_json.workspace = true

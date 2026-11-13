@@ -11,6 +11,7 @@ pip install lucem                  # io, ops, custom walks, the model plugin cli
 pip install "lucem[hist]"          # + histology: stains, tissue, cells, the app's steps
 pip install "lucem[app]"           # + the desktop app (`lucem app`)
 pip install "lucem[stardist]"      # + the StarDist nucleus models (BSD-3-Clause)
+pip install "lucem[instanseg]"     # + the InstanSeg nucleus models (Apache-2.0)
 pip install "lucem[sam]"           # + Segment Anything (Apache-2.0)
 pip install "lucem[ml]"            # + every model plugin
 pip install "lucem[all]"           # everything

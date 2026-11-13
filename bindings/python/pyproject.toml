@@ -20,8 +20,9 @@ hist = ["lucem-hist==0.0.1"]
 app = ["lucem-app==0.0.1"]
 stardist = ["lucem-ml-stardist==0.0.1"]
 sam = ["lucem-ml-sam==0.0.1"]
-ml = ["lucem-ml-stardist==0.0.1", "lucem-ml-sam==0.0.1"]
-all = ["lucem-hist==0.0.1", "lucem-app==0.0.1", "lucem-ml-stardist==0.0.1", "lucem-ml-sam==0.0.1"]
+instanseg = ["lucem-ml-instanseg==0.0.1"]
+ml = ["lucem-ml-stardist==0.0.1", "lucem-ml-sam==0.0.1", "lucem-ml-instanseg==0.0.1"]
+all = ["lucem-hist==0.0.1", "lucem-app==0.0.1", "lucem-ml-stardist==0.0.1", "lucem-ml-sam==0.0.1", "lucem-ml-instanseg==0.0.1"]
 
 [project.scripts]
 lucem = "lucem._cli:main"
