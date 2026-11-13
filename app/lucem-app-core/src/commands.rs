@@ -334,6 +334,12 @@ pub fn register(registry: &Registry, c: &Ctx) {
         }
         list.push(cmd);
     }
+    // The brush's size from the keyboard: commands, so GPUI's keymap matches the keys (whatever the
+    // layout reports for `=` and `-`) wherever the focus is
+    list.extend([
+        CommandSpec::new("tool.brush_bigger", "Brush bigger", IconName::Plus, tool(|t| t.resize_brush(1.0))).group("Tools").hint("A larger brush, eraser and wand (also ] on the image)").key("secondary-="),
+        CommandSpec::new("tool.brush_smaller", "Brush smaller", IconName::Minus, tool(|t| t.resize_brush(-1.0))).group("Tools").hint("A smaller brush, eraser and wand (also [ on the image)").key("secondary--"),
+    ]);
     // Shapes: combine the selected regions; masks
     for op in ShapeOp::ALL {
         let (store, sel) = (s.clone(), s.clone());
