@@ -23,8 +23,8 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 - Pairing codes exist only when asked for and are never written where a log could keep them:
   `lucem serve` no longer makes one at every start (`--pair` asks for one, shown on the
   terminal); `lucem clients pair` shows its code on the terminal itself (`/dev/tty`, `CONOUT$`),
-  not on standard output, so a redirect, a pipe or a service's log never holds it (`--stdout`
-  prints it for a script). `lucem clients codes` lists the live codes without their secrets and
+  not on standard output, so a redirect, a pipe or a service's log never holds it (a script
+  takes it from `--out FILE`, readable by its owner only). `lucem clients codes` lists the live codes without their secrets and
   `--cancel ID|all` cancels them. Code scanning had flagged codes in cleartext logs.
 
 ### Changed
