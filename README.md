@@ -49,7 +49,7 @@ The Python package is on PyPI, with the app and the model plugins as extras:
 pip install lucem                # io, ops, your own functions over large images, the model client
 pip install "lucem[hist]"        # + histology (lucem.hist)
 pip install "lucem[app]"         # + the desktop app: `lucem app`
-pip install "lucem[ml]"          # + the model plugins (StarDist, SAM); or lucem[stardist], lucem[sam]
+pip install "lucem[ml]"          # + the model plugins (StarDist, InstanSeg, SAM); or lucem[stardist], lucem[instanseg], lucem[sam]
 pip install "lucem[all]"         # everything
 ```
 
