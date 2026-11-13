@@ -201,6 +201,9 @@ mod tests {
         std::fs::write(&path, vec![0u8; 24]).unwrap();
         assert!(labels_from_result(&r).is_err(), "an empty answer is refused");
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(FAMILIES.iter().all(|f| !f.licence_checked), "a family's licence is confirmed when its plugin is added");
+        // A family's licence is confirmed when its plugin is added: only families with a plugin
+        // (plugins/ml/lucem-ml-<id>) may say so
+        let with_plugin = ["stardist", "instanseg"];
+        assert!(FAMILIES.iter().filter(|f| f.licence_checked).all(|f| with_plugin.contains(&f.id)), "a family's licence is confirmed when its plugin is added");
     }
 }
