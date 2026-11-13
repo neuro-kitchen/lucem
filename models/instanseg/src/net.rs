@@ -33,6 +33,15 @@ pub const DIVISOR: usize = 16;
 /// The width from which 3 × 3 convolutions run as matrix products ([`ConvNormAct::conv_gemm`]).
 const GEMM_FROM_CHANNELS: usize = 64;
 
+/// Set when a matrix product could not launch on this device: every layer runs Burn's own
+/// convolution from then on ([`disable_gemm`]).
+static GEMM_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns the matrix-product convolutions off for this process; whether they were on.
+pub fn disable_gemm() -> bool {
+    !GEMM_OFF.swap(true, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// BatchNorm's epsilon in the published models.
 const BN_EPS: f64 = 1e-5;
 
@@ -62,7 +71,7 @@ impl ConvNormAct {
     }
 
     fn forward(&self, x: Tensor<4>) -> Tensor<4> {
-        let y = if self.gemm { self.conv_gemm(x) } else { self.conv.forward(x) };
+        let y = if self.gemm && !GEMM_OFF.load(std::sync::atomic::Ordering::Relaxed) { self.conv_gemm(x) } else { self.conv.forward(x) };
         let y = match &self.norm {
             Some(n) => n.forward(y),
             None => y,

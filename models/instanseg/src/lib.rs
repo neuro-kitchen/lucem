@@ -466,22 +466,36 @@ impl InstanSeg {
                 }
                 computed += ph * pw;
                 times.prepare += ms(t0);
-                let t1 = Instant::now();
-                // In the network's precision on the wire: half the bytes up and back in F16
-                let data = TensorData::new(input, [1, nc, ph, pw]);
-                // Created in that dtype: `from_data` would otherwise convert to the device's default
-                let x = match self.precision {
-                    Precision::F32 => Tensor::<4>::from_data(data, &self.device),
-                    Precision::F16 => Tensor::<4>::from_data(data.convert::<burn::tensor::f16>(), (&self.device, burn::tensor::DType::F16)),
+                // The tile through the network: its output, and the ms of compute and readback
+                let attempt = || -> Result<(Vec<f32>, f64, f64), String> {
+                    let t1 = Instant::now();
+                    // In the network's precision on the wire: half the bytes up and back in F16
+                    let data = TensorData::new(input.clone(), [1, nc, ph, pw]);
+                    // Created in that dtype: `from_data` would otherwise convert to the device's default
+                    let x = match self.precision {
+                        Precision::F32 => Tensor::<4>::from_data(data, &self.device),
+                        Precision::F16 => Tensor::<4>::from_data(data.convert::<burn::tensor::f16>(), (&self.device, burn::tensor::DType::F16)),
+                    };
+                    let y = self.model.fcn.forward(x);
+                    self.device.sync().map_err(|e| format!("the device: {e:?}"))?;
+                    let compute = ms(t1);
+                    let t2 = Instant::now();
+                    let y = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+                    Ok((y, compute, ms(t2)))
                 };
-                let y = self.model.fcn.forward(x);
-                self.device.sync().map_err(|e| format!("the device: {e:?}"))?;
-                times.compute += ms(t1);
-                let t2 = Instant::now();
-                let y: Vec<f32> = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
-                times.readback += ms(t2);
+                // A matrix product this device cannot launch: Burn's own convolutions from now on
+                let (y, compute, readback) = match attempt() {
+                    Ok(r) => r,
+                    Err(e) if net::disable_gemm() => {
+                        eprintln!("instanseg: the matrix-product convolutions failed on this device, using Burn's own ({e})");
+                        attempt()?
+                    }
+                    Err(e) => return Err(e),
+                };
+                times.compute += compute;
+                times.readback += readback;
                 if timing() {
-                    eprintln!("instanseg: tile {ph}×{pw}: network {:.0} ms, read back {:.0} ms", t2.duration_since(t1).as_secs_f64() * 1e3, ms(t2));
+                    eprintln!("instanseg: tile {ph}×{pw}: network {compute:.0} ms, read back {readback:.0} ms");
                 }
                 let t3 = Instant::now();
                 for c in 0..no {
