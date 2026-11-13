@@ -20,9 +20,12 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ### Security
 
-- `lucem serve` prints a pairing code only when its output is a terminal. Run as a service (podman,
-  systemd) its output is a log, and a working code there could be read by anyone who reads the
-  log; it says to run `lucem clients pair` instead (code scanning's cleartext-logging alerts).
+- Pairing codes exist only when asked for and are never written where a log could keep them:
+  `lucem serve` no longer makes one at every start (`--pair` asks for one, shown on the
+  terminal); `lucem clients pair` shows its code on the terminal itself (`/dev/tty`, `CONOUT$`),
+  not on standard output, so a redirect, a pipe or a service's log never holds it (`--stdout`
+  prints it for a script). `lucem clients codes` lists the live codes without their secrets and
+  `--cancel ID|all` cancels them. Code scanning had flagged codes in cleartext logs.
 
 ### Changed
 
