@@ -23,7 +23,7 @@ pub struct Thresholds {
 pub const HE_THRESHOLDS: Thresholds = Thresholds { prob: 0.692_478_25, nms: 0.3 };
 
 /// Tile sides are rounded up to this (a multiple of the network's 16).
-const SHAPE_STEP: usize = 256;
+pub const SHAPE_STEP: usize = 256;
 const _: () = assert!(SHAPE_STEP.is_multiple_of(DIVISOR));
 
 #[derive(Debug, Clone, Copy, PartialEq)]

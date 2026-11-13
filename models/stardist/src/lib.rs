@@ -260,6 +260,34 @@ impl StarDist {
     }
 }
 
+/// What [`tune`] did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TuneSummary {
+    pub shapes: usize,
+    pub seconds: f64,
+}
+
+/// Runs the network once on every tile shape inference meets with the default [`Tiling`] (sides
+/// in steps of 256 up to a tile with its halo), largest first, so Burn's autotuned convolutions and
+/// the compiled kernels are chosen and cached before a real image needs them (`lucem autotune`).
+pub fn tune(model: &StarDist, mut progress: impl FnMut(usize, usize)) -> Result<TuneSummary, String> {
+    let t0 = Instant::now();
+    let t = Tiling::default();
+    let max = (t.tile + 2 * t.halo).div_ceil(predict::SHAPE_STEP) * predict::SHAPE_STEP;
+    let sides: Vec<usize> = (1..=max / predict::SHAPE_STEP).map(|k| k * predict::SHAPE_STEP).collect();
+    let mut shapes: Vec<(usize, usize)> = sides.iter().flat_map(|&a| sides.iter().map(move |&b| (a, b))).collect();
+    shapes.sort_by_key(|&(a, b)| std::cmp::Reverse(a * b));
+    let c = model.spec.channels;
+    let total = shapes.len();
+    for (k, &(h, w)) in shapes.iter().enumerate() {
+        // A textured image (values over the whole range), one tile exactly this shape
+        let pixels: Vec<u8> = (0..w * h * c).map(|i| ((i * 2_654_435_761) >> 13) as u8).collect();
+        model.grid(&pixels, w, h, Tiling { tile: w.max(h), halo: 0 }, &mut |_, _| {})?;
+        progress(k + 1, total);
+    }
+    Ok(TuneSummary { shapes: total, seconds: t0.elapsed().as_secs_f64() })
+}
+
 /// Bilinear resize of `nc` interleaved channels.
 fn resize_pixels(rgb: &[u8], w: usize, h: usize, nw: usize, nh: usize, nc: usize) -> Vec<u8> {
     let mut out = vec![0u8; nw * nh * nc];

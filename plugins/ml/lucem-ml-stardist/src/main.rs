@@ -6,6 +6,8 @@
 //! lucem-ml-stardist info               the manifest (JSON): models, whether installed
 //! lucem-ml-stardist install <model>    fetches the published Keras weights (verified) and turns
 //!                                      them into safetensors in lucem's cache
+//! lucem-ml-stardist tune [model]...    runs every installed model (or those named) on every tile
+//!                                      shape, so tuned kernels are cached (`lucem autotune` runs it)
 //! lucem-ml-stardist serve              requests on stdin, events on stdout (lucem-ml's protocol);
 //!                                      `instances`: every nucleus of an RGB image as labels
 //! ```
@@ -111,6 +113,25 @@ fn serve() {
     }
 }
 
+/// Tunes the installed models (or `ids`) on this machine's device (`LUCEM_RUNTIME`).
+fn tune(ids: &[String]) -> Result<(), String> {
+    let specs: Vec<&'static sd::Spec> = if ids.is_empty() { sd::MODELS.iter().filter(|s| sd::installed(s)).collect() } else { ids.iter().map(|id| sd::spec(id).ok_or_else(|| format!("no model {id:?}"))).collect::<Result<_, _>>()? };
+    if specs.is_empty() {
+        eprintln!("stardist: no model installed, nothing to tune (lucem-ml-stardist install <model>)");
+        return Ok(());
+    }
+    let device = sd::device()?;
+    for s in specs {
+        if !sd::installed(s) {
+            install(s.id, false)?;
+        }
+        let model = StarDist::load(s, device.clone())?;
+        let r = sd::tune(&model, |d, t| eprint!("\rstardist: {}: shape {d} of {t}", s.id))?;
+        eprintln!("\rstardist: {}: {} tile shapes tuned in {:.0} s", s.id, r.shapes, r.seconds);
+    }
+    Ok(())
+}
+
 fn main() {
     lucem_ml::legacy::adopt();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -126,9 +147,15 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("tune") => {
+            if let Err(e) = tune(&args[1..]) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         Some("serve") => serve(),
         _ => {
-            eprintln!("lucem-ml-stardist {}: StarDist nuclei for lucem (BSD-3-Clause)\n\nusage:\n  lucem-ml-stardist info\n  lucem-ml-stardist install <model>\n  lucem-ml-stardist serve", env!("CARGO_PKG_VERSION"));
+            eprintln!("lucem-ml-stardist {}: StarDist nuclei for lucem (BSD-3-Clause)\n\nusage:\n  lucem-ml-stardist info\n  lucem-ml-stardist install <model>\n  lucem-ml-stardist tune [model]...\n  lucem-ml-stardist serve", env!("CARGO_PKG_VERSION"));
             std::process::exit(2);
         }
     }
