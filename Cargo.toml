@@ -15,6 +15,7 @@ members = [
     # sorters); the app never links them: plugins/ml programs run them
     "models/sam",
     "models/stardist",
+    "models/instanseg",
     # Pipeline engine
     "engine/lucem-pipeline",
     # Serving
@@ -30,6 +31,7 @@ members = [
     # linked, so ONNX Runtime and model licences stay out of lucem itself)
     "plugins/ml/lucem-ml-sam",
     "plugins/ml/lucem-ml-stardist",
+    "plugins/ml/lucem-ml-instanseg",
     # Bindings: lucem-py is the one extension; the binding crates register into it
     "bindings/python/lucem-py",
     "bindings/python/lucem-py-core",
@@ -116,6 +118,9 @@ tar = "0.4.46"
 lucem-hub = { path = "hub/lucem-hub", version = "0.0.1" }
 lucem-model-sam = { path = "models/sam", version = "0.0.1" }
 lucem-model-stardist = { path = "models/stardist", version = "0.0.1", default-features = false }
+lucem-model-instanseg = { path = "models/instanseg", version = "0.0.1", default-features = false }
+# InstanSeg's published models: a bioimage.io zip holding a TorchScript archive (also a zip)
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 # Keras weights (HDF5) read without the C library, written as safetensors
 hdf5-reader = "0.12.1"
 # Parallel loops over host data (objects, chunks): work stealing
