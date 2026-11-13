@@ -11,7 +11,8 @@
 //!   thresholds in the metadata ([`install`]). [`InstanSeg::load`] reads only the safetensors.
 //!   (The fluorescence "nuclei and cells" model uses another network, the channel-invariant one,
 //!   and is not ported yet.)
-//! - Network: [`net`] on Burn (CUDA, wgpu or the CPU), BatchNorm folded into the convolutions.
+//! - Network: [`net`], Burn modules mirroring InstanSeg's PyTorch classes (CUDA, wgpu or the
+//!   CPU), loaded with Burn's `SafetensorsStore` and its PyTorch adapter.
 //! - Input: each channel's 0.1st to 99.9th percentile to 0 and 1 (the packages' `scale_range`),
 //!   clamped to −2…3 as the archive does; images resampled to the models' 0.5 µm per pixel when
 //!   their pixel size is known, and the labels back.
@@ -162,18 +163,12 @@ pub fn install(s: &Spec, progress: &mut dyn FnMut(u64, u64)) -> Result<(), Strin
     convert(&archive, meta, &path_of(s.safetensors))
 }
 
-/// The weights and settings back from the safetensors.
-fn read_safetensors(path: &Path) -> Result<(BTreeMap<String, torchscript::Tensor>, Params), String> {
+/// The shapes of the weights (for the module's configuration) and the settings, from the
+/// safetensors' header; the values load into the module through Burn's store ([`net::load`]).
+fn read_header(path: &Path) -> Result<(BTreeMap<String, Vec<usize>>, Params), String> {
     let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let (_, meta) = safetensors::SafeTensors::read_metadata(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
-    let st = safetensors::SafeTensors::deserialize(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut tensors = BTreeMap::new();
-    for (name, t) in st.tensors() {
-        if t.dtype() != Dtype::F32 {
-            return Err(format!("{name}: {:?}, expected F32", t.dtype()));
-        }
-        tensors.insert(name, torchscript::Tensor { shape: t.shape().to_vec(), data: t.data().as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect() });
-    }
+    let shapes: BTreeMap<String, Vec<usize>> = meta.tensors().into_iter().map(|(name, info)| (name, info.shape.clone())).collect();
     let m = meta.metadata().clone().unwrap_or_default();
     let get = |k: &str| -> Result<f64, String> { m.get(k).ok_or_else(|| format!("{}: no {k} in the metadata", path.display()))?.parse::<f64>().map_err(|e| format!("{k}: {e}")) };
     let params = Params {
@@ -185,17 +180,23 @@ fn read_safetensors(path: &Path) -> Result<(BTreeMap<String, torchscript::Tensor
         cleanup_fragments: get("default_cleanup_fragments")? != 0.0,
         min_size: get("default_min_size")? as usize,
     };
-    Ok((tensors, params))
+    Ok((shapes, params))
 }
 
-/// The pixel classifier's layers from the weights (`pixel_classifier.fc1..`).
-fn classifier(w: &BTreeMap<String, torchscript::Tensor>) -> Result<post::PixelClassifier, String> {
+/// The pixel classifier's layers for the host postprocessing ([`post`]), read from the loaded
+/// module (Burn's `Linear` keeps `[in, out]`; the host classifier takes `[out, in]`).
+fn classifier(p: &net::ProbabilityNet) -> Result<post::PixelClassifier, String> {
     let mut layers = Vec::new();
-    for k in 1.. {
-        let Some(wt) = w.get(&format!("pixel_classifier.fc{k}.weight")) else { break };
-        let b = w.get(&format!("pixel_classifier.fc{k}.bias")).ok_or_else(|| format!("pixel_classifier.fc{k}.bias is missing"))?;
-        let [o, i] = <[usize; 2]>::try_from(wt.shape.clone()).map_err(|_| format!("pixel_classifier.fc{k}: shape {:?}", wt.shape))?;
-        layers.push((wt.data.clone(), b.data.clone(), o, i));
+    for fc in [&p.fc1, &p.fc2, &p.fc3] {
+        let w = fc.weight.val();
+        let [i, o] = w.dims();
+        let w: Vec<f32> = w.try_into_data().map_err(|e| format!("the pixel classifier: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+        let b: Vec<f32> = match &fc.bias {
+            Some(b) => b.val().try_into_data().map_err(|e| format!("the pixel classifier: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?,
+            None => vec![0.0; o],
+        };
+        let t: Vec<f32> = (0..o).flat_map(|r| (0..i).map(move |c| (r, c))).map(|(r, c)| w[c * o + r]).collect();
+        layers.push((t, b, o, i));
     }
     match (layers.first(), layers.last()) {
         (Some(f), Some(l)) if f.3 == 4 && l.2 == 1 => Ok(post::PixelClassifier { layers }),
@@ -346,7 +347,11 @@ fn reflect(i: usize, n: usize) -> usize {
 
 pub struct InstanSeg {
     pub spec: &'static Spec,
-    net: net::InstanSegNet,
+    /// The network and its pixel classifier, as Burn modules ([`net`]).
+    pub model: net::InstanSegModel,
+    pub config: net::UNetConfig,
+    device: Device,
+    /// The pixel classifier on the host, for the postprocessing.
     classifier: post::PixelClassifier,
     pub params: Params,
 }
@@ -366,20 +371,22 @@ impl InstanSeg {
         if !path.is_file() {
             return Err(format!("{} is not installed (lucem-ml-instanseg install {})", s.name, s.id));
         }
-        let (w, params) = read_safetensors(&path)?;
-        Self::from_weights(s, &w, params, device)
+        Self::load_file(s, &path, device)
     }
 
-    /// The model from weights already read (the archive's, or the safetensors').
-    pub fn from_weights(s: &'static Spec, w: &BTreeMap<String, torchscript::Tensor>, params: Params, device: Device) -> Result<Self, String> {
-        let net = net::InstanSegNet::new(w, device)?;
-        if net.channels != s.channels {
-            return Err(format!("{}: the weights take {} channel(s), the model {}", s.name, net.channels, s.channels));
+    /// The model from a safetensors file written by [`convert`].
+    pub fn load_file(s: &'static Spec, path: &Path, device: Device) -> Result<Self, String> {
+        let (shapes, params) = read_header(path)?;
+        let config = net::UNetConfig::from_shapes(&shapes)?;
+        if config.channels != s.channels {
+            return Err(format!("{}: the weights take {} channel(s), the model {}", s.name, config.channels, s.channels));
         }
-        if net.outputs != 5 {
-            return Err(format!("{}: the network gives {} channels, expected 5 (embedding, sigma, seeds)", s.name, net.outputs));
+        if config.outputs() != 5 {
+            return Err(format!("{}: the network gives {} channels, expected 5 (embedding, sigma, seeds)", s.name, config.outputs()));
         }
-        Ok(Self { spec: s, net, classifier: classifier(w)?, params })
+        let model = net::load(path, &config, &device)?;
+        let classifier = classifier(&model.pixel_classifier)?;
+        Ok(Self { spec: s, model, config, device, classifier, params })
     }
 
     /// The network's output (`[5, h, w]`) for `planes` (`[channels, h, w]`, normalized).
@@ -389,8 +396,8 @@ impl InstanSeg {
 
     /// [`Self::network`], adding where its time went to `times`.
     pub fn network_timed(&self, planes: &[f32], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize), times: &mut Timings) -> Result<Vec<f32>, String> {
-        let no = self.net.outputs;
-        let nc = self.net.channels;
+        let no = self.config.outputs();
+        let nc = self.config.channels;
         let mut out = vec![0f32; no * w * h];
         let step = t.tile.max(net::DIVISOR);
         let (ny, nx) = (h.div_ceil(step), w.div_ceil(step));
@@ -416,8 +423,8 @@ impl InstanSeg {
                 computed += ph * pw;
                 times.prepare += ms(t0);
                 let t1 = Instant::now();
-                let y = self.net.forward(Tensor::<4>::from_data(TensorData::new(input, [1, nc, ph, pw]), &self.net.device));
-                self.net.device.sync().map_err(|e| format!("the device: {e:?}"))?;
+                let y = self.model.fcn.forward(Tensor::<4>::from_data(TensorData::new(input, [1, nc, ph, pw]), &self.device));
+                self.device.sync().map_err(|e| format!("the device: {e:?}"))?;
                 times.compute += ms(t1);
                 let t2 = Instant::now();
                 let y: Vec<f32> = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
@@ -598,9 +605,8 @@ mod tests {
         let archive = torchscript::read(&std::fs::read(dir.join("instanseg.pt")).unwrap()).unwrap();
         let tmp = std::env::temp_dir().join(format!("lucem-instanseg-test-{}-{}.safetensors", folder, std::process::id()));
         convert(&archive, HashMap::new(), &tmp).unwrap();
-        let (w8, params) = read_safetensors(&tmp).unwrap();
+        let model = InstanSeg::load_file(s, &tmp, device().unwrap()).unwrap();
         std::fs::remove_file(&tmp).ok();
-        let model = InstanSeg::from_weights(s, &w8, params, device().unwrap()).unwrap();
         let (si, input) = npy(&dir.join("test-input.npy"));
         let (so, expected) = npy(&dir.join("test-output_instance_segmentation.npy"));
         let (c, h, w) = (si[1], si[2], si[3]);

@@ -18,7 +18,8 @@ cuda = ["burn/cuda"]
 [dependencies]
 lucem-ml = { path = "../../crates/lucem-ml" }
 lucem-hub.workspace = true
-burn = { workspace = true, features = ["std", "fusion", "autotune"] }
+# `safetensors`: Burn's store, which loads the converted weights into the modules
+burn = { workspace = true, features = ["std", "fusion", "autotune", "safetensors"] }
 # The same CubeCL as Burn's: its runtime configuration (compiled-kernel cache) is set here
 cubecl.workspace = true
 safetensors.workspace = true
