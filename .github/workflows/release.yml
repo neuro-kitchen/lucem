@@ -1,5 +1,9 @@
-# Release on a version tag (v0.0.2, ...), as dsp-kitchen and kitchen do: check the tag against the workspace
-# version, package the publishable crates and build the Python wheels and sdist, then publish to
+# Release on a version tag (v0.0.2, ...), as dsp-kitchen and kitchen do. The Python packages are
+# built and published only when the repository variable `PUBLISH_PYPI` is `true` (their PyPI
+# trusted publishers and environments set up); otherwise the crates and the GitHub release go out
+# alone.
+#
+# Check the tag against the workspace version, package the publishable crates and build the Python wheels and sdist, then publish to
 # crates.io and PyPI through trusted publishing (no stored tokens). The publish jobs run in the
 # GitHub environments `crates-io` and `pypi`, which only accept `v*` tags and wait for a required
 # reviewer's approval (the app and each model plugin publish from their own: `pypi-app`,
@@ -57,6 +61,7 @@ jobs:
   wheels:
     name: Wheel ${{ matrix.wheel }} (${{ matrix.os }})
     needs: check
+    if: vars.PUBLISH_PYPI == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -94,6 +99,7 @@ jobs:
   program-wheels:
     name: Program wheel ${{ matrix.wheel }} (${{ matrix.os }})
     needs: check
+    if: vars.PUBLISH_PYPI == 'true'
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
@@ -134,6 +140,7 @@ jobs:
   sdist:
     name: Source distribution
     needs: check
+    if: vars.PUBLISH_PYPI == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,8 +156,9 @@ jobs:
 
   publish-crates:
     name: Publish to crates.io
-    # Nothing is published unless every wheel and the sdist built
+    # Nothing is published unless every wheel and the sdist built (when they are built at all)
     needs: [check, wheels, sdist]
+    if: ${{ !cancelled() && needs.check.result == 'success' && needs.wheels.result != 'failure' && needs.sdist.result != 'failure' }}
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -207,6 +215,7 @@ jobs:
   publish-pypi:
     name: Publish lucem and lucem-hist to PyPI
     needs: [check, wheels, sdist]
+    if: vars.PUBLISH_PYPI == 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -231,6 +240,7 @@ jobs:
   publish-pypi-programs:
     name: Publish ${{ matrix.wheel }} to PyPI
     needs: [check, program-wheels]
+    if: vars.PUBLISH_PYPI == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     strategy:
@@ -257,6 +267,8 @@ jobs:
   github-release:
     name: GitHub release
     needs: [publish-crates, publish-pypi]
+    # PyPI's job is skipped while `PUBLISH_PYPI` is not `true`: the release follows the crates
+    if: ${{ !cancelled() && needs.publish-crates.result == 'success' && needs.publish-pypi.result != 'failure' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release
@@ -272,10 +284,12 @@ jobs:
           ## Install
 
           The library crates from crates.io: `cargo add lucem` (core, io, ops, ml) and the others
-          (`lucem-hist`, `lucem-pipeline`, `lucem-view`, `lucem-hub`). Python: `pip install lucem`,
-          with extras `hist`, `app`, `stardist`, `sam`, `instanseg`, `ml` or `all` (`pip install "lucem[all]"`). The app and the `lucem`
+          (`lucem-hist`, `lucem-pipeline`, `lucem-view`, `lucem-hub`). The app and the `lucem`
           command build from this tag: `cargo install --git https://github.com/neuro-kitchen/lucem --tag <this tag> lucem-cli`.
           NOTES
+          if [ "${{ vars.PUBLISH_PYPI }}" = "true" ]; then
+            printf '\nPython: `pip install lucem`, with extras `hist`, `app`, `stardist`, `sam`, `instanseg`, `ml` or `all` (`pip install "lucem[all]"`).\n' >> release-notes.md
+          fi
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}

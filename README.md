@@ -43,7 +43,8 @@ cargo add lucem          # the umbrella crate: core, io, ops, ml
 cargo add lucem-hist     # histology workflows
 ```
 
-The Python package is on PyPI, with the app and the model plugins as extras:
+The Python package, with the app and the model plugins as extras, goes to PyPI with a coming
+release; until then it builds from this repository (`pip install ./bindings/python`). Once there:
 
 ```bash
 pip install lucem                # io, ops, your own functions over large images, the model client

@@ -6,6 +6,9 @@ of any size, on any GPU (wgpu, CUDA) or the CPU.
 
 ## Install
 
+The packages go to PyPI with a coming release; until then, from a clone of the repository:
+`pip install ./bindings/python` (the core, with histology built in for development). Once on PyPI:
+
 ```bash
 pip install lucem                  # io, ops, custom walks, the model plugin client
 pip install "lucem[hist]"          # + histology: stains, tissue, cells, the app's steps
