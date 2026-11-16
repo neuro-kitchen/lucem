@@ -122,7 +122,7 @@ lucem-model-instanseg = { path = "models/instanseg", version = "0.0.2", default-
 # InstanSeg's published models: a bioimage.io zip holding a TorchScript archive (also a zip)
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 # Keras weights (HDF5) read without the C library, written as safetensors
-hdf5-reader = "0.12.1"
+hdf5-reader = "0.13.0"
 # Parallel loops over host data (objects, chunks): work stealing
 rayon = "1.12.0"
 # Boolean operations on shapes (add, subtract, intersect, xor)
