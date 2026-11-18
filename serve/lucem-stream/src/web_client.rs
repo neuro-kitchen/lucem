@@ -207,6 +207,24 @@ struct PageTiles {
 }
 
 impl TileSource for PageTiles {
+    fn plane(&self, level: usize, channel: usize, axis: lucem_io::PlaneAxis, index: usize) -> Option<Result<(usize, usize, Vec<f32>), String>> {
+        // A processed image's planes are not cut by the server yet: through tiles
+        if self.processing.is_some() {
+            return None;
+        }
+        let axis = match axis {
+            lucem_io::PlaneAxis::Z => 0,
+            lucem_io::PlaneAxis::Y => 1,
+            lucem_io::PlaneAxis::X => 2,
+        };
+        let ask = wire::GetPlane { path: self.path.clone(), level: level as u32, channel: channel as u32, axis, index: index as u32 };
+        Some(match self.link.request(wire::request::Kind::Plane(ask)) {
+            Ok(wire::response::Kind::Tile(t)) => wire::decode_tile(&t),
+            Ok(_) => Err("unexpected answer to a plane".into()),
+            Err(e) => Err(e.to_string()),
+        })
+    }
+
     fn tile(&self, level: usize, channel: usize, z: usize, tx: usize, ty: usize) -> Result<(usize, usize, Vec<f32>), String> {
         let ask = wire::GetTile { path: self.path.clone(), level: level as u32, channel: channel as u32, z: z as u32, tx: tx as u32, ty: ty as u32, processing: self.processing.clone().map(|spec_json| wire::Processing { spec_json }) };
         match self.link.request(wire::request::Kind::Tile(ask)).map_err(|e| e.to_string())? {
@@ -333,7 +351,11 @@ async fn over_webtransport(session: JsValue, host: String, how: Hello) -> Stream
                 copy.copy_from(&bytes);
                 let answer = match call(&session, "request", &[copy.into()]).await {
                     Ok(reply) => wire::Response::decode(js_sys::Uint8Array::new(&reply).to_vec().as_slice()).map_err(|e| format!("the server's answer could not be read: {e}")),
-                    Err(e) => Err(e.to_string()),
+                    Err(e) => {
+                        // Said in full on the console (the status line cuts it)
+                        log(&format!("lucem: a WebTransport request failed: {e}"));
+                        Err(e.to_string())
+                    }
                 };
                 link.deliver(id, answer);
             });

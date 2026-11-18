@@ -47,12 +47,24 @@ message PluginCall {
   bytes body = 3;
 }
 
+// A whole plane of one channel across `axis` (0: XY at z = index, 1: XZ at y = index, 2: YZ at
+// x = index), cut by the server: the 3D views' planes in one request instead of a tile per
+// z-plane. Answered as a Tile.
+message GetPlane {
+  string path = 1;
+  uint32 level = 2;
+  uint32 channel = 3;
+  uint32 axis = 4;
+  uint32 index = 5;
+}
+
 message Request {
   oneof kind {
     ListImages list = 1;
     GetInfo info = 2;
     GetTile tile = 3;
     PluginCall plugin = 4;
+    GetPlane plane = 5;
   }
 }
 

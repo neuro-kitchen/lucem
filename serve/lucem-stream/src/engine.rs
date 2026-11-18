@@ -169,6 +169,20 @@ pub fn answer_wire(images: &Images, plugins: &[Arc<dyn crate::plugin::ServerPlug
                     }
                 }
             }
+            Ask::Plane(q) => {
+                let p = images.open(&q.path)?;
+                if q.channel as usize >= p.channels.len() {
+                    return Err(format!("no channel {}", q.channel));
+                }
+                let axis = match q.axis {
+                    0 => lucem_io::PlaneAxis::Z,
+                    1 => lucem_io::PlaneAxis::Y,
+                    2 => lucem_io::PlaneAxis::X,
+                    a => return Err(format!("no axis {a} (0: XY, 1: XZ, 2: YZ)")),
+                };
+                let plane = p.read_plane(q.level as usize, q.channel as usize, axis, q.index as usize).map_err(|e| e.to_string())?;
+                Say::Tile(crate::wire::encode_tile(plane.width, plane.height, &plane.data, &p.dtype))
+            }
             Ask::Plugin(call) => {
                 let p = plugins.iter().find(|p| p.id() == call.plugin).ok_or_else(|| format!("this server has no plugin {:?}", call.plugin))?;
                 let body: serde_json::Value = if call.body.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&call.body).map_err(|e| format!("the call's body: {e}"))? };

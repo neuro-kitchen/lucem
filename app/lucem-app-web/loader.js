@@ -62,7 +62,10 @@ if ("WebTransport" in window) {
           const stream = await wt.createBidirectionalStream();
           const w = stream.writable.getWriter();
           await w.write(frame(bytes));
-          await w.close();
+          // Our side ends here, not awaited: a server that answered at once (a cached tile) may
+          // close the stream first, and the close then "fails" with STOP_SENDING although the
+          // answer is there
+          w.close().catch(() => {});
           return framed(stream.readable.getReader()).next();
         },
         close() {

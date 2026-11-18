@@ -194,6 +194,13 @@ enum Backend {
 /// `(width, height, values)`, row-major; edge tiles cut to the image. Called from many threads.
 pub trait TileSource: Send + Sync {
     fn tile(&self, level: usize, channel: usize, z: usize, tx: usize, ty: usize) -> Result<(usize, usize, Vec<f32>), String>;
+
+    /// A whole plane in one piece, when the source can give one (a server cuts it from its
+    /// files): an XZ or YZ plane read through tiles would take a tile per z-plane and tile row.
+    /// `None`: read it through tiles.
+    fn plane(&self, _level: usize, _channel: usize, _axis: PlaneAxis, _index: usize) -> Option<Result<(usize, usize, Vec<f32>), String>> {
+        None
+    }
 }
 
 struct SourceBox(Arc<dyn TileSource>);
@@ -748,6 +755,16 @@ impl Pyramid {
     /// plane is `width × height`, an XZ plane `width × depth`, a YZ plane `height × depth`.
     pub fn read_plane(&self, level: usize, channel: usize, axis: PlaneAxis, index: usize) -> IoResult<Plane> {
         let l = self.levels.get(level).ok_or_else(|| IoError::OmeZarr(format!("no level {level}")))?.clone();
+        // A source that cuts planes itself (a server): one request, not one per tile
+        if let Backend::Source(source) = &self.backend
+            && let Some(answer) = source.0.plane(level, channel, axis, index)
+        {
+            let (width, height, data) = answer.map_err(IoError::OmeZarr)?;
+            if data.len() != width * height {
+                return Err(IoError::OmeZarr(format!("a plane of {width} × {height} came with {} values", data.len())));
+            }
+            return Ok(Plane { width, height, data });
+        }
         let (d, h, w) = (l.depth, l.height, l.width);
         Ok(match axis {
             PlaneAxis::Z => Plane { width: w, height: h, data: self.read_block(level, channel, [index, 0, 0], [1, h, w])? },
@@ -1082,6 +1099,27 @@ mod tests {
             let (w, h) = (if tx == 2 { 4 } else { 8 }, if ty == 1 { 4 } else { 8 });
             Ok((w, h, (0..w * h).map(|i| (level * 1000 + channel * 100 + z * 10 + tx + ty) as f32 + i as f32 * 0.0).collect()))
         }
+    }
+
+    /// A source that cuts planes itself (a server).
+    struct Planes;
+
+    impl super::TileSource for Planes {
+        fn tile(&self, _: usize, _: usize, _: usize, _: usize, _: usize) -> Result<(usize, usize, Vec<f32>), String> {
+            Err("planes only".into())
+        }
+        fn plane(&self, _level: usize, _channel: usize, axis: super::PlaneAxis, index: usize) -> Option<Result<(usize, usize, Vec<f32>), String>> {
+            Some(Ok((3, 2, vec![index as f32 + if axis == super::PlaneAxis::X { 100.0 } else { 0.0 }; 6])))
+        }
+    }
+
+    #[test]
+    fn a_source_that_cuts_planes_is_asked_once_per_plane() {
+        let level = super::LevelInfo { path: "remote".into(), width: 3, height: 3, tile_w: 1, tile_h: 1, downsample: 1.0, depth: 2, tile_d: 1, z_downsample: 1.0 };
+        let channel = super::ChannelInfo { label: "c".into(), color: [255; 3], window: (0.0, 1.0), range: (0.0, 1.0), active: true };
+        let py = super::Pyramid::from_source("p", None, vec![level], vec![channel], None, None, "float32", std::sync::Arc::new(Planes)).unwrap();
+        let yz = py.read_plane(0, 0, super::PlaneAxis::X, 2).unwrap();
+        assert_eq!((yz.width, yz.height, yz.data[0]), (3, 2, 102.0), "the source's own plane, no tile read");
     }
 
     #[test]

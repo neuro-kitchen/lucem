@@ -53,9 +53,10 @@ const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// worker threads, evaluates two constant strings (`eval("self")` and its script-path finder);
 /// scripts still come from this origin only. To drop it: wasm_thread using `js_sys::global()` and
 /// an explicit shim URL (an upstream patch). `connect-src` also names this computer's loopback
-/// addresses: a page at `localhost` reaches WebTransport at 127.0.0.1 (QUIC does not fall back from
+/// address: a page at `localhost` reaches WebTransport at 127.0.0.1 (a CSP source cannot name an
+/// IPv6 literal with a wildcard port) (QUIC does not fall back from
 /// ::1); elsewhere WebTransport is the page's own host, which `'self'` covers.
-pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; worker-src 'self' blob:; connect-src 'self' https://127.0.0.1:* https://[::1]:*; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; worker-src 'self' blob:; connect-src 'self' https://127.0.0.1:*; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// Whether a connection's `Origin` is the page's own (`authority`: the `host:port` it reached):
 /// another site open in the same browser may not use the server, whatever it knows. No origin:
