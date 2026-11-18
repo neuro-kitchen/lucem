@@ -29,7 +29,7 @@ lucem-ops.workspace = true
 lucem-pipeline.workspace = true
 # `lucem mcp`, and the runners `lucem ops`, `run` and `session run` share with it
 lucem-mcp.workspace = true
-lucem-stream.workspace = true
+lucem-stream = { workspace = true, features = ["native"] }
 rustls.workspace = true
 serde_json.workspace = true
 schemars.workspace = true

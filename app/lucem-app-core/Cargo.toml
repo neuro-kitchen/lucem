@@ -48,7 +48,7 @@ sysinfo.workspace = true
 lucem-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
 lucem-hist = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
 lucem-ops = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
-lucem-stream.workspace = true
+lucem-stream = { workspace = true, features = ["native"] }
 
 # A browser page: no compute of its own (the server computes), the page's server over
 # WebTransport or a WebSocket
