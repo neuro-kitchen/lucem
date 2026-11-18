@@ -109,8 +109,10 @@ code=$(curl -s --path-as-is -o /dev/null -w "%{http_code}" "$WEB/../.lucem-auth/
 code=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" \
     -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: https://evil.example" "$WEB/ws")
 [ "$code" = 403 ] && pass "a foreign origin is refused" || fail "a foreign origin got HTTP $code"
+# An accepted socket stays open (it waits for the page's sign-in): curl ends at --max-time
+# (exit 28) with the 101 already written
 code=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" \
-    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: $WEB" "$WEB/ws")
+    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: $WEB" "$WEB/ws" || true)
 [ "$code" = 101 ] && pass "the page's own origin opens its socket" || fail "the page's origin got HTTP $code"
 
 step "run a pipeline"

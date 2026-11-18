@@ -37,6 +37,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # What every target shares: the program, a non-root user, /data
 FROM docker.io/library/debian:${DEBIAN}-slim@${DEBIAN_DIGEST} AS base
+# ca-certificates: verified downloads over HTTPS (NVIDIA's CUDA repository below; the slim image
+# has no certificates, and apt refuses that repository without them)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/lucem /usr/local/bin/
 # The page (the threaded browser build, its loader and service worker), built before the image
 # with app/lucem-app-web/build.sh (nightly Rust; the release workflow does it): served by
