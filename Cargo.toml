@@ -67,7 +67,9 @@ lucem-session = { path = "engine/lucem-session", version = "0.0.2" }
 lucem-table = { path = "crates/lucem-table", version = "0.0.2", default-features = false }
 lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.0.2" }
 lucem-view = { path = "serve/lucem-view", version = "0.0.2" }
-lucem-stream = { path = "serve/lucem-stream", version = "0.0.2" }
+# No default features here: a browser build asks for `web`, a computer for `native` (an older
+# cargo, as cargo-deny's, refuses a member turning off defaults the workspace turned on)
+lucem-stream = { path = "serve/lucem-stream", version = "0.0.2", default-features = false }
 lucem-mcp = { path = "app/lucem-mcp" }
 lucem-app-core = { path = "app/lucem-app-core", version = "0.0.2" }
 lucem-py-core = { path = "bindings/python/lucem-py-core", default-features = false }

@@ -1,11 +1,30 @@
-# Checks every push to main and pull request. GitHub runners have no GPU, so tests run on the CubeCL
-# CPU runtime only (LUCEM_TEST_RUNTIMES=cpu). The GPU runtimes are run locally.
+# Checks pull requests (as dsp-kitchen's). GitHub runners have no GPU, so tests run on the CubeCL
+# CPU runtime only (LUCEM_TEST_RUNTIMES=cpu); the GPU runtimes are run locally before a release.
+#
+# The `changes` job reads which files changed and runs only the checks they can affect:
+# documentation alone (Markdown, assets/) runs nothing here (the docs site has docs.yml).
+# When the changes cannot be listed (a new branch, a force push), everything runs.
+#
+# How much runs depends on where the pull request goes, so one change is not built over and over:
+# - into a versions/* branch (day-to-day work): the light run, `cargo check` of the workspace;
+#   no tests, no Python build;
+# - into main (the release pull request), or started by hand (Actions > ci > Run workflow): the
+#   full run;
+# - draft pull requests: nothing, until they are marked ready.
+#
+# Caches (improving on dsp-kitchen's): GitHub scopes a cache saved by a pull request to that pull
+# request, so caches saved there never help the next one. The workspace's cache is saved only by a
+# push to main or to a versions/* branch (a merge), which runs the light check to do it; every
+# later pull request into that branch, and the v* tag's release run (main's), start from it
+# instead of building GPUI, wgpu and CubeCL from nothing.
 name: ci
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main, "versions/**"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,19 +38,65 @@ env:
   LUCEM_TEST_RUNTIMES: cpu
   # The app's own device too (else it opens wgpu, whose device thread panics without a GPU)
   LUCEM_RUNTIME: cpu
+  # No debug info in CI: the workspace's test build otherwise fills the runner's disk, and debug
+  # info is most of what a cache would hold
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-  rust:
-    name: Rust (check, CPU-runtime tests)
+  changes:
+    name: What changed
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    env:
-      # No debug info in CI: the workspace's test build otherwise fills the runner's disk
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
+    outputs:
+      # The full run: the release pull request (into main) or a run started by hand
+      full: ${{ github.event_name == 'workflow_dispatch' || github.base_ref == 'main' }}
+      rust: ${{ steps.classify.outputs.rust }}
+      python: ${{ steps.classify.outputs.python }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: classify
+        env:
+          # A pull request: its base; a push: the commit before it; by hand: none (everything runs)
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            files=$(git diff --name-only "$BASE...$HEAD")
+          else
+            echo "changes cannot be listed: running everything"
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "python=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$files"
+          # Markdown anywhere is documentation; the rest by folder
+          code=$(echo "$files" | grep -vE '\.md$' || true)
+          rust=false
+          python=false
+          if echo "$code" | grep -qE '^(crates|engine|serve|histology|hub|app|models|plugins)/|^bindings/python/lucem-py|^Cargo\.(toml|lock)$|^rust-toolchain|^\.github/workflows/ci\.yml$'; then
+            rust=true
+            python=true
+          fi
+          if echo "$code" | grep -qE '^bindings/python/|^pyproject\.toml$|^uv\.lock$'; then
+            python=true
+          fi
+          echo "rust=$rust python=$python"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+
+  rust:
+    name: Rust (check; CPU-runtime tests in the full run)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
     steps:
       # The runner image ships ~30 GB of toolchains lucem never uses (.NET, Android, Haskell,
-      # CodeQL bundles, Boost); the debug build of the workspace needs that room
+      # CodeQL bundles, Boost); the full run's test build needs that room
       - name: Free disk space
+        if: needs.changes.outputs.full == 'true'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
@@ -42,12 +107,15 @@ jobs:
         with:
           toolchain: stable
       - name: Link with mold (faster than the default linker)
-        if: runner.os == 'Linux'
         uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
-      # ~/.local/share/tracel: the LLVM bundle the CPU runtime downloads at build time
+      # ~/.local/share/tracel: the LLVM bundle the CPU runtime downloads at build time.
+      # One key for the light check, the full run and release.yml's check (the check's artifacts
+      # are the test build's first half); saved only by a push (see the top of this file)
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          shared-key: workspace
           cache-directories: ~/.local/share/tracel
+          save-if: ${{ github.event_name == 'push' }}
       # lucem-app's GUI stack (GPUI) builds against these system libraries on Linux
       - name: System libraries for lucem-app
         run: |
@@ -58,10 +126,13 @@ jobs:
       - name: Check the workspace
         run: cargo check --workspace
       - name: Unit tests
+        if: needs.changes.outputs.full == 'true'
         run: cargo test --workspace --exclude lucem-app --exclude lucem-py --lib
 
   python:
     name: Python (build, tests)
+    needs: changes
+    if: needs.changes.outputs.python == 'true' && needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -69,10 +140,11 @@ jobs:
         with:
           toolchain: stable
       - name: Link with mold (faster than the default linker)
-        if: runner.os == 'Linux'
         uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      # Only the full run builds Python, so its cache is the release pull request's own (reruns)
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          key: python
           cache-directories: ~/.local/share/tracel
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Development environment and package

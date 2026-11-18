@@ -52,7 +52,9 @@ jobs:
           tar -xzf /tmp/binaryen.tgz -C /tmp && echo /tmp/binaryen-version_130/bin >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: web-app
+          # Shared with release.yml's page build; saved from main only (a pull request reads it)
+          shared-key: web-page
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build (the app, its engine worker, the samples)
         run: app/lucem-app-web/build.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
