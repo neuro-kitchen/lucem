@@ -5,6 +5,8 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+## [0.0.3] - 2026-11-18
+
 lucem in the browser, two ways: **the docs viewer** (neuro-kitchen.github.io/lucem/viewer/,
 nothing to install, files read in the page) and **the container's page** (`lucem serve --web`:
 the server's images, processing and histology on its GPU). The same app as the desktop's.
@@ -38,11 +40,21 @@ the server's images, processing and histology on its GPU). The same app as the d
   served images per target).
 - The latest dependencies; kitchen from crates.io; the Agents prototype removed.
 - The docs' accent is lucem's teal (was rose).
+- **CI, as dsp-kitchen's and faster**: only what a change can affect runs; a pull request into
+  `versions/*` gets `cargo check`, the release pull request the full run; the workspace cache is
+  saved by merges (a pull request's own cache helps no other), mold links.
+- **The container image takes the release's binary** (`--build-arg BINARIES=prebuilt`): its job
+  compiles nothing and holds exactly what the release publishes; `.containerignore` keeps
+  environments, secrets and local folders out.
 
 ### Fixed
 
 - A device that failed is not looked for again every frame (the 3D view spun CPU and GPU).
 - A click on a pop-up no longer reaches the button under it.
+- **The docs viewer's engine no longer re-runs its static constructors at every call** (CubeCL's
+  registries: seconds per request on a large image) and adds picked files in linear time.
+- The `nvidia` image target builds: the slim base had no CA certificates for NVIDIA's
+  repository (it could not install NVRTC).
 
 ## [0.0.2] - 2026-11-13
 

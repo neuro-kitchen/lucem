@@ -31,7 +31,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A pull request's newer push replaces its older run; a merge's run (which saves the cache) is
+  # never cancelled by the next merge, or quick merges would leave no cache at all
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
