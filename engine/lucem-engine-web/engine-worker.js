@@ -4,7 +4,9 @@
 // dsp-kitchen's engine worker.)
 import init, { Engine } from "./lucem_engine_web.js";
 
-await init();
+// The module's static constructors, once (`_initialize` in lib.rs says why)
+const wasm = await init();
+wasm._initialize();
 const engine = new Engine();
 let queue = Promise.resolve();
 self.onmessage = (e) => {

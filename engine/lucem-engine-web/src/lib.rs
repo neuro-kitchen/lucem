@@ -15,7 +15,7 @@
 //!   lucem-core does not do yet. The answer says so, and the page shows where it runs.
 #![cfg(target_family = "wasm")]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use lucem_io::{Pyramid, ZarrStore};
@@ -85,11 +85,27 @@ fn image_kind(name: &str) -> Option<bool> {
     [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"].iter().any(|e| lower.ends_with(e)).then_some(false)
 }
 
+/// Runs the module's static constructors (CubeCL's IR registries, through pliron and inventory):
+/// once, called by the worker right after loading. A module that exports `_initialize` is a
+/// "reactor" to the linker; without it the linker wraps every export to run them again on each
+/// call, which cost seconds per request (found in dsp-kitchen's engine, 29 s of 31 while opening a
+/// 19,754-file recording, 2026-11-18; lucem's links the same CubeCL).
+#[unsafe(no_mangle)]
+pub extern "C" fn _initialize() {
+    unsafe extern "C" {
+        fn __wasm_call_ctors();
+    }
+    // SAFETY: called once, before anything else in the module runs
+    unsafe { __wasm_call_ctors() }
+}
+
 /// The engine of one page: the files it was given and the images it opened.
 #[derive(Default)]
 struct Inner {
-    /// The files picked, by their path ("<folder picked>/<path inside>", or a file's name).
-    files: Vec<(String, web_sys::File)>,
+    /// The files picked, by their path ("<folder picked>/<path inside>", or a file's name): a map,
+    /// so adding an OME-Zarr's thousands of chunk files is not quadratic, and a folder's files are
+    /// one range of it.
+    files: BTreeMap<String, web_sys::File>,
     /// Opened images, by path.
     open: HashMap<String, Arc<Pyramid>>,
 }
@@ -99,7 +115,7 @@ impl Inner {
     /// plain image file.
     fn list(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for (path, _) in &self.files {
+        for path in self.files.keys() {
             let parts: Vec<&str> = path.split('/').collect();
             // The first component naming an image is the image
             for i in 0..parts.len() {
@@ -142,14 +158,14 @@ impl Inner {
         let pyramid = match image_kind(&name) {
             Some(true) => {
                 let prefix = format!("{}/", path.trim_end_matches('/'));
-                let files: HashMap<String, FileBytes> = self.files.iter().filter_map(|(p, f)| p.strip_prefix(&prefix).map(|key| (key.to_string(), FileBytes(f.clone())))).collect();
+                let files: HashMap<String, FileBytes> = self.files.range(prefix.clone()..).map_while(|(p, f)| p.strip_prefix(&prefix).map(|key| (key.to_string(), FileBytes(f.clone())))).collect();
                 if files.is_empty() {
                     return Err(format!("{path} was not among the folders picked"));
                 }
                 Pyramid::open_store(&name, Arc::new(PickedStore(files))).map_err(|e| format!("{path}: {e}"))?
             }
             Some(false) => {
-                let file = self.files.iter().find(|(p, _)| p == path).map(|(_, f)| FileBytes(f.clone())).ok_or_else(|| format!("{path} was not among the files picked"))?;
+                let file = self.files.get(path).map(|f| FileBytes(f.clone())).ok_or_else(|| format!("{path} was not among the files picked"))?;
                 let bytes = file.read().map_err(|e| e.to_string())?;
                 Pyramid::from_image_bytes(&name, &bytes).map_err(|e| format!("{path}: {e}"))?
             }
@@ -225,8 +241,7 @@ impl Engine {
             let path = js_sys::Reflect::get(&entry, &"path".into()).ok().and_then(|p| p.as_string());
             let file = js_sys::Reflect::get(&entry, &"file".into()).ok().and_then(|f| f.dyn_into::<web_sys::File>().ok());
             if let (Some(path), Some(file)) = (path, file) {
-                inner.files.retain(|(p, _)| *p != path);
-                inner.files.push((path, file));
+                inner.files.insert(path, file);
             }
         }
         inner.open.clear();
