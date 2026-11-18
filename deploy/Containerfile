@@ -9,6 +9,11 @@
 #           through the NVIDIA Container Toolkit:  podman run --device nvidia.com/gpu=all …
 #   mesa    the Vulkan loader + Mesa's Vulkan drivers (AMD, Intel):  podman run --device /dev/dri …
 #
+# The program is compiled here (`build`, the default), or taken as already built from
+# deploy/prebuilt/ with --build-arg BINARIES=prebuilt: the release workflow does that with the
+# binary of the same run (job `binaries`), so the image holds exactly what the release publishes
+# and its job compiles nothing (as dsp-kitchen's).
+#
 # Build from the repository root (the build context is the whole workspace):
 #   podman build -f deploy/Containerfile --ignorefile deploy/.containerignore --target nvidia -t lucem-serve:nvidia .
 # The page must be built first (it goes into every target): app/lucem-app-web/build.sh
@@ -20,6 +25,8 @@
 ARG RUST_VERSION=1.99
 # Debian release of every stage: glibc >= 2.34 for the CPU runtime's prebuilt LLVM (bookworm: 2.36)
 ARG DEBIAN=bookworm
+# Where the program comes from: `build` (compiled in this file) or `prebuilt` (deploy/prebuilt/)
+ARG BINARIES=build
 # Base images pinned by digest (multi-architecture index), so a re-tagged or tampered image cannot
 # enter a build. To update: the new tag's digest from the registry, then build and test again.
 ARG RUST_DIGEST=sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
@@ -35,6 +42,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p lucem-cli --no-default-features --features "${FEATURES}" \
     && install -D -m 0755 target/release/lucem /out/lucem
 
+# A program built outside this file (glibc <= the base image's: Ubuntu 22.04 builds run on bookworm)
+FROM scratch AS prebuilt
+COPY deploy/prebuilt/lucem /out/
+
+FROM ${BINARIES} AS binaries
+
 # What every target shares: the program, a non-root user, /data
 FROM docker.io/library/debian:${DEBIAN}-slim@${DEBIAN_DIGEST} AS base
 # ca-certificates: verified downloads over HTTPS (NVIDIA's CUDA repository below; the slim image
@@ -42,7 +55,7 @@ FROM docker.io/library/debian:${DEBIAN}-slim@${DEBIAN_DIGEST} AS base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /out/lucem /usr/local/bin/
+COPY --from=binaries /out/lucem /usr/local/bin/
 # The page (the threaded browser build, its loader and service worker), built before the image
 # with app/lucem-app-web/build.sh (nightly Rust; the release workflow does it): served by
 # `lucem serve --web`, it views the images under /data and the server computes for it

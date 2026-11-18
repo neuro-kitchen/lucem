@@ -1,7 +1,20 @@
-# Build context of deploy/Containerfile (the repository root): sources only
+# Build context of deploy/Containerfile (the repository root): sources only.
+# Local-only folders and files must never reach an image: data, environments, secrets, notes.
+.env
+.env.*
+.envrc
+.claude/
+.worktrees/
+.cargo/config.toml
+.lucem-auth/
+.lumen-auth/
+.pytest_cache/
+docs/node_modules/
+docs/dist/
 target/
 # The page is built before the image; only its dist/ goes in (the rest of the folder is source)
 .data/
+.datasets/
 .git/
 .tasks/
 .knowledge/
@@ -9,8 +22,11 @@ target/
 **/.venv/
 **/__pycache__/
 **/*.so
+bindings/python/dist/
 playground/
 node_modules/
 *.zarr/
 *.ome.tif
 *.ome.tiff
+*.svs
+*.ndpi

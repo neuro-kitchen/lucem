@@ -174,3 +174,5 @@ tempCodeRunnerFile.py
 
 # A server authority (its CA key, enrolled clients, pairing codes): never in git
 .lucem-auth/
+# The release's binaries for the container image (--build-arg BINARIES=prebuilt)
+deploy/prebuilt/
