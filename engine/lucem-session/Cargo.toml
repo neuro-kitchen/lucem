@@ -1,0 +1,20 @@
+[package]
+name = "lucem-session"
+description = "The project document of lucem: images, the processing graph, annotations and classes, and the commands that change them; what the app, the command line and an agent read and change"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+geo.workspace = true
+lucem-hist = { workspace = true }
+lucem-pipeline.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+thiserror.workspace = true

@@ -7,8 +7,11 @@ members = [
     "crates/lucem-io",
     "crates/lucem-ops",
     "crates/lucem-ml",
-    # Histology workflows (stains, tissue, cells, classifiers, densities, export)
-    "crates/lucem-hist",
+    # Tables (Polars data frames) for every crate: the one place that depends on Polars
+    "crates/lucem-table",
+    # Histology, the domain (stains, tissue, cells, classifiers, densities, export), with its
+    # services: what the app computes, called alike in the app and by a server for its pages
+    "histology/lucem-hist",
     # Verified downloads of published artifacts (model weights); all network access of the models
     "hub/lucem-hub",
     # Models, one crate per upstream family, each under its upstream's licence (as dsp-kitchen's
@@ -18,6 +21,9 @@ members = [
     "models/instanseg",
     # Pipeline engine
     "engine/lucem-pipeline",
+    # The project document (images, graph, annotations, commands): what the app, the command
+    # line and an agent read and change
+    "engine/lucem-session",
     # Serving
     "serve/lucem-view",
     "serve/lucem-stream",
@@ -52,7 +58,9 @@ lucem-core = { path = "crates/lucem-core", version = "0.0.2", default-features =
 lucem-io = { path = "crates/lucem-io", version = "0.0.2" }
 lucem-ops = { path = "crates/lucem-ops", version = "0.0.2", default-features = false }
 lucem-ml = { path = "crates/lucem-ml", version = "0.0.2" }
-lucem-hist = { path = "crates/lucem-hist", version = "0.0.2", default-features = false }
+lucem-hist = { path = "histology/lucem-hist", version = "0.0.2", default-features = false }
+lucem-session = { path = "engine/lucem-session", version = "0.0.2" }
+lucem-table = { path = "crates/lucem-table", version = "0.0.2" }
 lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.0.2" }
 lucem-view = { path = "serve/lucem-view", version = "0.0.2" }
 lucem-stream = { path = "serve/lucem-stream", version = "0.0.2" }

@@ -113,7 +113,7 @@ impl Hierarchy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::annotation::Shape;
+    use crate::annotation::Shape;
 
     fn rect(id: &str, x: f64, y: f64, w: f64, h: f64) -> Annotation {
         Annotation { id: id.into(), image: "img".into(), shape: Shape::Rect { x, y, w, h }, class: "Region".into(), note: String::new(), z: None }

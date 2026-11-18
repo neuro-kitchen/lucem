@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 
-use polars::prelude::{Column, DataFrame, NamedFrom as _, PolarsResult, Series};
+use lucem_table::polars::prelude::{Column, DataFrame, NamedFrom as _, PolarsResult, Series};
 
 /// A table of `f64` columns (missing values are NaN).
 #[derive(Debug, Clone, Default, PartialEq)]

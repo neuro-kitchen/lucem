@@ -64,7 +64,7 @@ pub enum NodeKind {
     },
     /// A script file (Python `.py` or Rust `.rs`) run on its inputs (Blender's Script node): its
     /// input ports, output and numbers come from the file's `lucem:` header
-    /// (`crate::data::script`), read again when the file changes.
+    /// (the app's `data::script`), read again when the file changes.
     Script {
         path: String,
         #[serde(default)]
@@ -106,7 +106,7 @@ pub enum Roi {
 }
 
 impl Roi {
-    pub fn matches(&self, a: &crate::domain::annotation::Annotation) -> bool {
+    pub fn matches(&self, a: &crate::annotation::Annotation) -> bool {
         a.shape.is_region()
             && match self {
                 Roi::Class { class } => &a.class == class,

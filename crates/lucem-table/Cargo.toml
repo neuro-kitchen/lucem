@@ -1,0 +1,13 @@
+[package]
+name = "lucem-table"
+description = "Tables for lucem as Polars data frames: the one place that depends on Polars"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+polars.workspace = true

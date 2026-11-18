@@ -70,9 +70,11 @@ cargo install --path app/lucem-cli   # the `lucem` command
 | `crates/lucem-core` | `lucem-core` | Run-time choice of the CubeCL runtime (wgpu, CUDA, HIP, CPU), launch geometry, device arrays and memory reuse |
 | `crates/lucem-io` | `lucem-io` | Readers and writers: OME-Zarr pyramids, common image files (TIFF, PNG, JPEG, …) |
 | `crates/lucem-ops` | `lucem-ops` | GPU image operations: filters, morphology, thresholds, statistics |
-| `crates/lucem-hist` | `lucem-hist` | Histology workflows: stains, tissue, cells, classifiers, density, phenotypes, exports |
 | `crates/lucem-ml` | `lucem-ml` | The contract of the model plugins: manifests, protocol, discovery, client |
+| `crates/lucem-table` | `lucem-table` | Tables (Polars data frames): the one place that depends on Polars |
+| `histology/lucem-hist` | `lucem-hist` | Histology, the domain: stains, tissue, cells, classifiers, density, phenotypes, exports |
 | `engine/lucem-pipeline` | `lucem-pipeline` | Chains operations on the device over tiles of large images |
+| `engine/lucem-session` | `lucem-session` | The project document: images, the processing graph, annotations, the commands that change them |
 | `serve/lucem-view` | `lucem-view` | Multiscale pyramids and display tiles |
 | `serve/lucem-stream` | | Serving images over QUIC and TLS to enrolled clients |
 | `hub/lucem-hub` | `lucem-hub` | Verified downloads and the local cache of model weights |

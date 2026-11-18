@@ -7353,8 +7353,9 @@ dependencies = [
  "lucem-ml",
  "lucem-ops",
  "lucem-pipeline",
+ "lucem-session",
+ "lucem-table",
  "lucem-view",
- "polars",
  "rayon",
  "schemars 1.2.3",
  "serde",
@@ -7402,7 +7403,7 @@ dependencies = [
  "lucem-io",
  "lucem-ml",
  "lucem-ops",
- "polars",
+ "lucem-table",
  "rayon",
  "serde",
  "serde_json",
@@ -7523,8 +7524,8 @@ dependencies = [
  "arrow",
  "cubecl",
  "lucem-core",
+ "lucem-table",
  "num-traits",
- "polars",
  "serde",
  "thiserror 2.0.21",
 ]
@@ -7537,7 +7538,7 @@ dependencies = [
  "lucem-core",
  "lucem-io",
  "lucem-ops",
- "polars",
+ "lucem-table",
  "schemars 1.2.3",
  "serde",
  "serde_json",
@@ -7580,6 +7581,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lucem-session"
+version = "0.0.2"
+dependencies = [
+ "geo",
+ "lucem-hist",
+ "lucem-pipeline",
+ "rayon",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "lucem-stream"
 version = "0.0.2"
 dependencies = [
@@ -7598,6 +7613,13 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "lucem-table"
+version = "0.0.2"
+dependencies = [
+ "polars",
 ]
 
 [[package]]

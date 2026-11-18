@@ -17,7 +17,7 @@ cuda = ["lucem-core/cuda", "lucem-ops/cuda"]
 
 [dependencies]
 rayon.workspace = true
-polars.workspace = true
+lucem-table.workspace = true
 lucem-io.workspace = true
 cubecl.workspace = true
 lucem-core = { workspace = true, features = ["compute"] }

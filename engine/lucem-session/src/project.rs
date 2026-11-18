@@ -3,7 +3,7 @@
 //!
 //! A project holds its images (where they are and how each channel is shown), the processing
 //! graph, the annotations and their classes, and notes. It changes only through
-//! [`crate::domain::command::Command`]s; the app saves it after each change.
+//! [`crate::command::Command`]s; the app saves it after each change.
 //!
 //! A project folder (format 2):
 //! ```text
@@ -154,12 +154,12 @@ impl ProjectDoc {
 
     /// Reads a project file and, next to it, its `pipeline.json` (format 2).
     pub fn load(path: &Path) -> Result<Self, ProjectError> {
-        let text = std::fs::read_to_string(path).map_err(|e| ProjectError::Io(format!("{}: {e}", crate::domain::paths::short_path(&path))))?;
+        let text = std::fs::read_to_string(path).map_err(|e| ProjectError::Io(format!("{}: {e}", crate::paths::short_path(&path))))?;
         let mut doc = Self::from_json(&text)?;
         let pipeline = path.with_file_name(PIPELINE_FILE);
         if pipeline.is_file() {
-            let text = std::fs::read_to_string(&pipeline).map_err(|e| ProjectError::Io(format!("{}: {e}", crate::domain::paths::short_path(&pipeline))))?;
-            let p: PipelineFile = serde_json::from_str(&text).map_err(|e| ProjectError::Parse(format!("{}: {e}", crate::domain::paths::short_path(&pipeline))))?;
+            let text = std::fs::read_to_string(&pipeline).map_err(|e| ProjectError::Io(format!("{}: {e}", crate::paths::short_path(&pipeline))))?;
+            let p: PipelineFile = serde_json::from_str(&text).map_err(|e| ProjectError::Parse(format!("{}: {e}", crate::paths::short_path(&pipeline))))?;
             doc.graph = p.graph;
         }
         Ok(doc)
@@ -258,7 +258,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lucem-project-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut d = ProjectDoc::default();
-        d.graph.nodes.push(crate::domain::graph::GraphNode { id: "n1".into(), kind: crate::domain::graph::NodeKind::Annotations { image: "img1".into(), class: None }, x: 0.0, y: 0.0 });
+        d.graph.nodes.push(crate::graph::GraphNode { id: "n1".into(), kind: crate::graph::NodeKind::Annotations { image: "img1".into(), class: None }, x: 0.0, y: 0.0 });
         let v1 = d.to_json().replacen(&format!("\"lucem_project\": {PROJECT_VERSION}"), "\"lucem_project\": 1", 1);
         let file = dir.join(PROJECT_FILE);
         std::fs::write(&file, v1).unwrap();
