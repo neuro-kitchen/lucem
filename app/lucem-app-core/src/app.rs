@@ -229,14 +229,77 @@ impl LucemApp {
         spec.help_menu = vec![kitchen_shell::MenuItem::command("help.keys")];
         spec.settings = sections;
         spec.layout_toggles = vec!["view.left".into(), "view.right".into()];
-        spec.remote = Some(RemoteSpec { label: "This computer".into(), icon: IconName::Server, menu: vec![kitchen_shell::MenuItem::command("remote.this"), kitchen_shell::MenuItem::Separator, kitchen_shell::MenuItem::command("remote.connect"), kitchen_shell::MenuItem::provided("remote.images")] });
+        spec.remote = Some(RemoteSpec { label: crate::platform::host_label().into(), icon: IconName::Server, menu: vec![kitchen_shell::MenuItem::command("remote.this"), kitchen_shell::MenuItem::Separator, kitchen_shell::MenuItem::command("remote.connect"), kitchen_shell::MenuItem::provided("remote.images")] });
         spec.status_items = Some(Rc::new(move |_, _| readings.clone().into_any_element()));
         let shell = cx.new(|cx| Shell::new(spec, window, cx));
         let _ = shell_cell.set(shell.downgrade());
 
-        // Keys: every command's (the canvas binds its own)
-        for bad in registry.bind_keys(None, cx) {
+        // Keys: every command's, as `keybindings.toml` says in `[commands]` (the canvas binds its
+        // own, `[canvas]`); the file is written with every default when it is missing
+        for bad in kitchen_shell::keys::bind_commands(&registry, cx) {
             eprintln!("key binding: {bad}");
+        }
+        if let Some(path) = crate::data::prefs::Prefs::keybindings_path()
+            && let Err(e) = kitchen_shell::keys::write_default_keybindings(&path, "lucem-app")
+        {
+            tracing::warn!("could not write {}: {e}", path.display());
+        }
+        // A page on its own: what is dropped on the window opens (no dialog, no browser prompt)
+        #[cfg(target_family = "wasm")]
+        {
+            let (drops, store) = (crate::data::remote::drops(), store.clone());
+            cx.spawn(async move |_, cx| {
+                while let Ok(files) = drops.recv().await {
+                    if crate::data::remote::runs_alone() {
+                        let taken = crate::data::remote::take_files(files).await;
+                        let _ = store.update(cx, |s, cx| s.open_picked(taken, cx));
+                    } else {
+                        let _ = store.update(cx, |s, cx| s.set_status("This page opens its server's images: File › Open file…", cx));
+                    }
+                }
+            })
+            .detach();
+        }
+        // settings.toml edited outside the app: applied while it runs (the look now)
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(path) = crate::data::prefs::Prefs::path().map(|p| crate::data::prefs::Prefs::settings_path(&p)) {
+            let mut seen = std::fs::read_to_string(&path).unwrap_or_default();
+            cx.spawn_in(window, async move |this, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                if text.is_empty() || text == seen {
+                    continue;
+                }
+                let applied = this.update_in(cx, |this, window, cx| {
+                    match crate::data::settings::Settings::parse(&text) {
+                        Ok((settings, notices)) => {
+                            let prefs = this.store.update(cx, |s, cx| {
+                                s.update_prefs(|p| settings.apply_to(p), cx);
+                                s.set_status(notices.into_iter().next().unwrap_or_else(|| "Settings applied from settings.toml".into()), cx);
+                                s.prefs.clone()
+                            });
+                            theme::configure(&prefs, window);
+                            theme::apply(window, cx);
+                        }
+                        Err(e) => this.store.update(cx, |s, cx| s.set_status(format!("Settings not applied: {e}"), cx)),
+                    }
+                    // What the app wrote back (the same values): not an edit
+                    std::fs::read_to_string(&path).unwrap_or_default()
+                });
+                match applied {
+                    Ok(written) => seen = written,
+                    Err(_) => break,
+                }
+            })
+            .detach();
+        }
+        let mut notices = crate::data::settings::take_notices();
+        notices.extend(kitchen_shell::keys::take_notices());
+        for notice in &notices {
+            eprintln!("{notice}");
+        }
+        if let Some(first) = notices.into_iter().next() {
+            store.update(cx, |s, cx| s.set_status(first, cx));
         }
 
         // The frame and the store follow each other: workspace, status line, project, look

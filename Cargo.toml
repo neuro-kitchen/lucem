@@ -92,8 +92,8 @@ gpui-kit = "0.10.0"
 # [patch.crates-io]
 # kitchen-ui = { path = "../kitchen/crates/kitchen-ui" }
 # kitchen-shell = { path = "../kitchen/crates/kitchen-shell" }
-kitchen-ui = "0.0.7"
-kitchen-shell = "0.0.7"
+kitchen-ui = "0.0.8"
+kitchen-shell = "0.0.8"
 # The status bar's CPU and memory meters
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 # Analytics & columnar data (Arrow + Polars)
@@ -106,6 +106,8 @@ tiff = "0.11.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
+# settings.toml, read and written with its comments kept
+toml_edit = "0.25.19"
 num-traits = "0.2.19"
 smallvec = "1.16.5"
 # Serving: QUIC and TLS, as in dsp-kitchen

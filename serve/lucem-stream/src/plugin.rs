@@ -16,17 +16,23 @@ pub struct PluginContext {
     pub peer: String,
     /// The client may change files (paired with control): a plugin refuses writes otherwise.
     pub may_write: bool,
+    /// The app's samples, offered as `samples/…` (`lucem serve --samples`), when they are.
+    pub samples: Option<PathBuf>,
 }
 
 impl PluginContext {
-    /// `relative` under the data folder, checked: no `..`, nothing hidden, not empty.
+    /// `relative` under the data folder (or `samples/…` in the samples folder), checked: no `..`,
+    /// nothing hidden, not empty.
     pub fn resolve(&self, relative: &str) -> Result<PathBuf, String> {
         let path = std::path::Path::new(relative);
         let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(n) if !n.to_string_lossy().starts_with('.')));
         if relative.is_empty() || !plain {
             return Err(format!("{relative:?}: that path is not allowed"));
         }
-        Ok(self.root.join(path))
+        match (self.samples.as_ref(), path.strip_prefix("samples")) {
+            (Some(dir), Ok(rest)) if !rest.as_os_str().is_empty() => Ok(dir.join(rest)),
+            _ => Ok(self.root.join(path)),
+        }
     }
 }
 

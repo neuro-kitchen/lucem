@@ -219,6 +219,21 @@ pub(crate) fn lz4_decompress_block(src: &[u8], uncompressed_len: usize) -> IoRes
     Ok(out)
 }
 
+/// Decompresses a zstd frame (a Zarr `zstd` chunk).
+pub(crate) fn zstd_decompress(bytes: &[u8]) -> IoResult<Vec<u8>> {
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    ruzstd::decoding::StreamingDecoder::new(&mut &bytes[..])
+        .map_err(|e| IoError::OmeZarr(format!("zstd: {e}")))?
+        .take(MAX_DECOMPRESSED_BYTES as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| IoError::OmeZarr(format!("zstd: {e}")))?;
+    if out.len() > MAX_DECOMPRESSED_BYTES {
+        return Err(IoError::OmeZarr("a zstd chunk expands past the limit".into()));
+    }
+    Ok(out)
+}
+
 /// Decompresses a Blosc v1 frame (`bytes`) using LZ4 and byte-unshuffle when flagged.
 pub(crate) fn blosc_decompress(bytes: &[u8]) -> IoResult<Vec<u8>> {
     if bytes.len() < 16 {
@@ -596,6 +611,7 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
                             let raw_file = fs::read(chunk_file)?;
                             let decompressed = match comp_id {
                                 "blosc" => blosc_decompress(&raw_file)?,
+                                "zstd" => zstd_decompress(&raw_file)?,
                                 "" => raw_file,
                                 other => {
                                     return Err(IoError::OmeZarr(format!(

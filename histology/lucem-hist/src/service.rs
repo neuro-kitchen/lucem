@@ -41,6 +41,10 @@ struct ApplyCall {
     #[serde(default)]
     z: usize,
     action: Action,
+    /// The caller's tissue regions (level-0 outlines), when it keeps them (the app's `Tissue`
+    /// annotations, edited by people): they replace what the server kept.
+    #[serde(default)]
+    tissue: Option<Vec<crate::objects::Polygon>>,
 }
 
 #[derive(Deserialize)]
@@ -96,11 +100,16 @@ impl Service {
                 let client = lucem_core::ComputeTarget::from_env().and_then(|t| t.client()).map_err(|e| e.to_string())?;
                 // The analysis is taken out while the step runs: other images go on meanwhile
                 let mut analysis = self.analyses.lock().unwrap_or_else(|e| e.into_inner()).remove(&path).unwrap_or_default();
+                if let Some(tissue) = call.tissue {
+                    analysis.tissue = tissue;
+                }
                 let (mut models, cancel) = (NoModels, AtomicBool::new(false));
                 let mut progress = |_: &str, _: Option<f32>| {};
                 let mut ctx = Ctx { client: &client, pyramid: &pyramid, z: call.z, models: &mut models, progress: &mut progress, cancel: &cancel };
                 let outcome = apply(&mut ctx, &mut analysis, &call.action);
                 let mut answer = counts(&analysis);
+                // The regions themselves (few, small): the caller shows them as annotations
+                answer["regions"] = json!(analysis.tissue);
                 self.analyses.lock().unwrap_or_else(|e| e.into_inner()).insert(path, analysis);
                 answer["outcome"] = serde_json::to_value(outcome.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
                 Ok(answer)

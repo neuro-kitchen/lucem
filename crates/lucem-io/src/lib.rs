@@ -5,6 +5,7 @@ pub mod image_io;
 pub mod loader;
 pub mod ome_zarr;
 pub mod phantoms;
+pub mod samples;
 pub mod project_io;
 pub mod pyramid;
 pub mod zarr_writer;

@@ -381,7 +381,7 @@ async fn answer(state: Arc<State>, peer: Arc<Peer>, request: wire::Request) -> A
 }
 
 fn context_of(state: &State, peer: &Peer) -> PluginContext {
-    PluginContext { root: state.images.root().to_path_buf(), peer: peer.name.clone(), may_write: peer.permission == crate::auth::Permission::Control }
+    PluginContext { root: state.images.root().to_path_buf(), peer: peer.name.clone(), may_write: peer.permission == crate::auth::Permission::Control, samples: state.images.samples().map(Path::to_path_buf) }
 }
 
 /// Reads the coarsest levels of `path` (every channel, the first plane) into the tile cache, in
@@ -532,8 +532,10 @@ async fn handle(mut request: hyper::Request<Incoming>, state: Arc<State>) -> Res
         let info = serde_json::to_string(&state.serve_info).unwrap_or_else(|_| "{}".into());
         return Ok(reply(StatusCode::OK, "application/json", info));
     }
-    if request.method() != hyper::Method::GET {
-        return Ok(reply(StatusCode::METHOD_NOT_ALLOWED, "text/plain", "GET only"));
+    // HEAD: the same answer as GET without its body (link checkers, curl -I)
+    let head = request.method() == hyper::Method::HEAD;
+    if request.method() != hyper::Method::GET && !head {
+        return Ok(reply(StatusCode::METHOD_NOT_ALLOWED, "text/plain", "GET and HEAD only"));
     }
     let Some(root) = state.web_root.clone() else {
         return Ok(reply(StatusCode::NOT_FOUND, "text/plain", "this server has no web app (lucem serve --web <folder>)"));
@@ -541,7 +543,11 @@ async fn handle(mut request: hyper::Request<Incoming>, state: Arc<State>) -> Res
     let path = request.uri().path().to_string();
     let header = |name: &str| request.headers().get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
     let (accepts_brotli, cached) = (header("accept-encoding").split(',').any(|e| e.trim().starts_with("br")), header("if-none-match"));
-    Ok(tokio::task::spawn_blocking(move || file(&root, &path, accepts_brotli, &cached)).await.unwrap_or_else(|_| reply(StatusCode::INTERNAL_SERVER_ERROR, "text/plain", "failed")))
+    let mut r = tokio::task::spawn_blocking(move || file(&root, &path, accepts_brotli, &cached)).await.unwrap_or_else(|_| reply(StatusCode::INTERNAL_SERVER_ERROR, "text/plain", "failed"));
+    if head {
+        *r.body_mut() = Full::new(Bytes::new());
+    }
+    Ok(r)
 }
 
 /// The file at `path` under `root`: plain components only, never out of the folder; its Brotli

@@ -87,6 +87,7 @@ const pickWithInput = (folder) =>
     input.type = "file";
     input.multiple = true;
     if (folder) input.webkitdirectory = true;
+    else input.accept = ".tif,.tiff,.png,.jpg,.jpeg,.bmp,.webp";
     input.onchange = () => resolve([...input.files].map((f) => ({ path: f.webkitRelativePath || f.name, file: f })));
     input.oncancel = () => resolve(null);
     input.click();
@@ -116,6 +117,57 @@ window.lucemPickFolder = async () => {
   }
   return out;
 };
+
+// ---- dropping files ----------------------------------------------------------------------
+// Something dropped on the page (an OME-Zarr, a TIFF, a picture, or a project's place): its
+// files with their paths, handed to the app (`window.lucemDrop`, set by the app when it starts).
+// A drop needs no permission prompt, even for a folder: the user handed the page these files.
+// Folders are walked with the entries API (every browser), hidden folders skipped.
+{
+  const MAX = 200000, DEPTH = 10;
+  const hint = document.createElement("div");
+  hint.textContent = "Drop to open it in this browser (nothing is uploaded)";
+  hint.style.cssText =
+    "position:fixed;inset:12px;display:none;place-items:center;border:2px dashed var(--accent);border-radius:12px;" +
+    "background:color-mix(in srgb, var(--bg) 85%, transparent);color:var(--fg);font:16px system-ui,sans-serif;z-index:10;pointer-events:none";
+  document.body.append(hint);
+  const files = (dragged) => [...(dragged?.types ?? [])].includes("Files");
+  let depth = 0;
+  window.addEventListener("dragenter", (e) => { if (files(e.dataTransfer)) { depth++; hint.style.display = "grid"; } }, true);
+  window.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; hint.style.display = "none"; } }, true);
+  window.addEventListener("dragover", (e) => { if (files(e.dataTransfer)) e.preventDefault(); }, true);
+  window.addEventListener("drop", (e) => {
+    if (!files(e.dataTransfer)) return;
+    e.preventDefault();
+    depth = 0;
+    hint.style.display = "none";
+    // The entries must be taken now: the drop's list is gone once this handler returns
+    const roots = [...e.dataTransfer.items].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+    const out = [];
+    const fileOf = (entry) => new Promise((ok, fail) => entry.file(ok, fail));
+    const children = (dir) => new Promise((ok, fail) => {
+      const reader = dir.createReader(), all = [];
+      const next = () => reader.readEntries((batch) => (batch.length ? (all.push(...batch), next()) : ok(all)), fail);
+      next();
+    });
+    const walk = async (entry, prefix, level) => {
+      if (out.length >= MAX) return;
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isFile) out.push({ path, entry });
+      else if (entry.isDirectory && !entry.name.startsWith(".") && level < DEPTH) {
+        for (const child of await children(entry)) await walk(child, path, level + 1);
+      }
+    };
+    (async () => {
+      for (const root of roots) await walk(root, "", 0);
+      const picked = [];
+      for (let i = 0; i < out.length; i += 512) {
+        picked.push(...(await Promise.all(out.slice(i, i + 512).map(async ({ path, entry }) => ({ path, file: await fileOf(entry) })))));
+      }
+      window.lucemDrop?.(picked);
+    })().catch((err) => console.error("drop:", err));
+  }, true);
+}
 
 // ---- the browser -------------------------------------------------------------------------
 const note = document.getElementById("note");

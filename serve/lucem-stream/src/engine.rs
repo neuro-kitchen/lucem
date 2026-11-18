@@ -48,6 +48,11 @@ impl Images {
         &self.root
     }
 
+    /// The samples folder, when samples are offered.
+    pub fn samples(&self) -> Option<&Path> {
+        self.samples.as_deref()
+    }
+
     /// `relative`, checked: inside the data folder, nothing hidden, an image.
     pub fn resolve(&self, relative: &str) -> Result<PathBuf, String> {
         let path = Path::new(relative);

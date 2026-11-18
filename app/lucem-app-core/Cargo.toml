@@ -28,6 +28,7 @@ lucem-core = { workspace = true, default-features = false, features = ["compute"
 web-time.workspace = true
 # Spans for profiling (Tracy with lucem-app's `tracy` feature)
 tracing.workspace = true
+toml_edit.workspace = true
 # Machine-learning plugins: the contract only (the models run in separate programs)
 lucem-ml.workspace = true
 lucem-pipeline.workspace = true

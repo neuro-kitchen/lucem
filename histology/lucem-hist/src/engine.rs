@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use lucem_core::cubecl::prelude::Client;
 use lucem_io::Pyramid;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::area::ClassArea;
 use crate::classify::ObjectClassifier;
@@ -61,7 +61,7 @@ pub struct Density {
 }
 
 /// What a step did, as data.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case")]
 pub enum Outcome {
     Tissue { regions: usize, area_mm2: f64, threshold: f64 },

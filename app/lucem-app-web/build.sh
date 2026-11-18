@@ -55,13 +55,10 @@ rm -rf "$dist/mt"
 "$wasm_opt" -O2 --enable-threads --enable-bulk-memory --enable-mutable-globals --enable-simd --enable-nontrapping-float-to-int --enable-sign-ext \
     "$dist/mt/lucem_app_web_bg.wasm" -o "$dist/mt/lucem_app_web_bg.wasm"
 du -h "$dist/mt/lucem_app_web_bg.wasm" | sed 's/^/   /'
-# The samples, as files the page opens (generated once by the native `lucem samples`; never in
-# the browser). LUCEM_BIN: a lucem built for this computer (default: the workspace's)
-lucem_bin="${LUCEM_BIN:-$target/validate/lucem}"
-if [ -x "$lucem_bin" ]; then
-    [ -f "$dist/samples/index.json" ] || "$lucem_bin" samples "$dist/samples"
-else
-    echo "   no native lucem at $lucem_bin: samples not written (LUCEM_BIN=…, or cargo build -p lucem-cli)"
+# The samples, as files the page opens (written once on this computer by lucem-io's example;
+# again when they are not zstd-compressed yet; never generated in the browser)
+if ! grep -qs zstd "$dist/samples/sample-volume.ome.zarr/0/.zarray"; then
+    (cd "$root" && CARGO_TARGET_DIR="$target" cargo run -q --release -p lucem-io --example samples -- "$dist/samples")
 fi
 
 # The engine: one thread (no shared memory), its own target folder

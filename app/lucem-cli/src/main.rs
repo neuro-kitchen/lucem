@@ -62,7 +62,9 @@ mod web;
 
 fn main() -> ExitCode {
     lucem_ml::legacy::adopt();
-    let _ = tracing_subscriber::fmt().with_env_filter("warn").with_writer(std::io::stderr).try_init();
+    // RUST_LOG when set; else warnings, and who connects to a server (lucem_stream's info)
+    let filter = std::env::var("RUST_LOG").ok().filter(|f| !f.trim().is_empty()).unwrap_or_else(|| "warn,lucem_stream=info".into());
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(args) {
@@ -253,36 +255,8 @@ fn bench_codecs(mut args: Args) -> Result<(), String> {
 /// viewer's site, a container's `--samples`).
 fn samples(args: Args) -> Result<(), String> {
     let a = args.positional(1)?;
-    let dir = PathBuf::from(&a[0]);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut written = Vec::new();
-    let mut write = |id: &str, py: &Pyramid| -> Result<(), String> {
-        let out = dir.join(format!("{id}.ome.zarr"));
-        if out.exists() {
-            std::fs::remove_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-        }
-        let (d, h, w) = (py.depth(), py.height(), py.width());
-        let options = lucem_io::WriterOptions { name: py.name.clone(), channels: py.channels.iter().map(|c| c.label.clone()).collect(), shape: [d, h, w], chunks: [d.min(32), 256.min(h), 256.min(w)], pixel_size_um: py.pixel_size_um, z_spacing_um: py.z_spacing_um };
-        let chunks = options.chunks;
-        let writer = lucem_io::ZarrWriter::create::<f32>(&out, options).map_err(|e| e.to_string())?;
-        for b in lucem_core::tiling::schedule([d, h, w], chunks, [0; 3]) {
-            for c in 0..py.channels.len() {
-                let values = py.read_block(0, c, b.origin, b.size).map_err(|e| e.to_string())?;
-                writer.write(c, b.origin, b.size, &values).map_err(|e| e.to_string())?;
-            }
-        }
-        writer.finish::<f32>().map_err(|e| e.to_string())?;
-        written.push(format!("{id}.ome.zarr"));
-        eprintln!("wrote {}", out.display());
-        Ok(())
-    };
-    write("sample-volume", &lucem_io::sample_volume(256, 128).map_err(|e| e.to_string())?)?;
-    for kind in lucem_io::phantoms::PhantomKind::ALL {
-        let mut img = lucem_io::phantoms::generate_phantom(*kind, 2048, 2048);
-        img.name = kind.title().to_string();
-        write(&kind.id(), &Pyramid::from_loaded(img))?;
-    }
-    std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&written).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let written = lucem_io::samples::write_all(Path::new(&a[0])).map_err(|e| e.to_string())?;
+    eprintln!("wrote {} sample(s) into {}", written.len(), a[0]);
     Ok(())
 }
 
@@ -561,7 +535,13 @@ fn pair(mut args: Args) -> Result<(), String> {
 
 /// This computer's name (for the server's list of paired computers).
 fn computer_name() -> String {
-    let raw = std::fs::read_to_string("/etc/hostname").ok().or_else(|| std::env::var("COMPUTERNAME").ok()).or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_else(|| "computer".into());
+    // /etc/hostname is not on every system (Fedora Silverblue, containers): the kernel's name too
+    let raw = ["/etc/hostname", "/proc/sys/kernel/hostname"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "computer".into());
     let clean: String = raw.trim().chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
     if clean.is_empty() { "computer".into() } else { clean }
 }

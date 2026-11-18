@@ -182,7 +182,7 @@ async fn answer(
         }
         (request, _) => request,
     };
-    let context = crate::plugin::PluginContext { root: images.root.clone(), peer: peer.name.clone(), may_write: peer.permission == crate::auth::Permission::Control };
+    let context = crate::plugin::PluginContext { root: images.root.clone(), peer: peer.name.clone(), may_write: peer.permission == crate::auth::Permission::Control, samples: images.samples().map(std::path::Path::to_path_buf) };
     let result = tokio::task::spawn_blocking(move || crate::engine::work(&images, request, &plugins, &context)).await.map_err(StreamError::protocol)?;
     match result {
         Ok((response, payload)) => {

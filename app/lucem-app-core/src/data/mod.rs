@@ -15,5 +15,6 @@ pub mod remote;
 pub mod results;
 pub mod script;
 pub mod selection;
+pub mod settings;
 pub mod store;
 pub mod tools;

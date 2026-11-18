@@ -79,16 +79,12 @@ fn prompt(store: Entity<Store>, directories: bool, files: bool, prompt: &'static
         }
         #[cfg(target_family = "wasm")]
         if crate::data::remote::runs_alone() {
+            // Open file…: the file chooser (no question from the browser); Open project…: the
+            // folder chooser (a project's place, or an OME-Zarr: the browser asks once)
+            let project = prompt.starts_with("Open project");
             cx.spawn(async move |cx| {
-                let picked = crate::data::remote::pick_files(directories).await;
-                let _ = store.update(cx, |s, cx| match picked {
-                    Ok(0) => {}
-                    Ok(n) => {
-                        s.set_status(format!("{n} file(s) given to this page (read here, never uploaded)"), cx);
-                        cx.emit(AppEvent::ServerImages);
-                    }
-                    Err(e) => s.set_status(format!("Could not pick files: {e}"), cx),
-                });
+                let picked = crate::data::remote::pick_files(project).await;
+                let _ = store.update(cx, |s, cx| s.open_picked(picked, cx));
             })
             .detach();
             return;
@@ -111,12 +107,12 @@ fn prompt(store: Entity<Store>, directories: bool, files: bool, prompt: &'static
 
 /// Asks for an image or OME-Zarr container (a folder) and opens it.
 pub fn open_image(store: &Entity<Store>, cx: &mut App) {
-    prompt(store.clone(), true, true, "Open image or OME-Zarr", false, cx);
+    prompt(store.clone(), true, true, "Open file (an image or OME-Zarr)", false, cx);
 }
 
 /// Asks for a project (its folder or `project.lucem.json`) and opens it.
 pub fn open_project(store: &Entity<Store>, cx: &mut App) {
-    prompt(store.clone(), true, true, "Open project (folder or project.lucem.json)", false, cx);
+    prompt(store.clone(), true, true, "Open project (or an OME-Zarr)", false, cx);
 }
 
 fn save_project(store: &Entity<Store>, cx: &mut App) {
@@ -226,8 +222,8 @@ pub fn register(registry: &Registry, c: &Ctx) {
     let mut list = vec![
         // File
         CommandSpec::new("file.new", "New project", IconName::FilePlus, st(|s, cx| s.new_project(cx))).group("File").hint("Close the project and start an empty one").key("secondary-n"),
-        CommandSpec::new("file.open_image", "Open image or OME-Zarr…", IconName::ImagePlus, move |_, cx| open_image(&s1, cx)).group("File").hint("Add an image to the project").key("secondary-o"),
-        CommandSpec::new("file.open_project", "Open project…", IconName::FolderOpen, move |_, cx| open_project(&s2, cx)).group("File").hint("A project folder or project.lucem.json").key("secondary-shift-o"),
+        CommandSpec::new("file.open_image", "Open file…", IconName::ImagePlus, move |_, cx| open_image(&s1, cx)).group("File").hint("An image: OME-Zarr, TIFF, PNG, JPEG").key("secondary-o"),
+        CommandSpec::new("file.open_project", "Open project…", IconName::FolderOpen, move |_, cx| open_project(&s2, cx)).group("File").hint("A project (project.lucem.json and what it names), or an OME-Zarr").key("secondary-shift-o"),
         CommandSpec::new("file.save_in", "Save project in folder…", IconName::Save, move |_, cx| save_project(&s3, cx)).group("File").hint("Writes project.lucem.json, pipeline.json and layout.json in a folder").key("secondary-shift-s"),
         CommandSpec::with_args::<PathArgs>("file.open", "Open a file", IconName::FolderOpen, move |a, _, cx| {
             s4.update(cx, |s, cx| s.open(a.path.into(), cx));

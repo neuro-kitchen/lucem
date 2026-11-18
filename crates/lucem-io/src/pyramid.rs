@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use crate::error::{IoError, IoResult};
 use crate::image_io::{load_image_file, LoadedImage};
-use crate::ome_zarr::{blosc_decompress, find_ome_zarr_root, is_safe_relative_path};
+use crate::ome_zarr::{blosc_decompress, find_ome_zarr_root, is_safe_relative_path, zstd_decompress};
 
 /// A cached chunk and when it was last used.
 type CachedChunk = (Arc<Vec<f32>>, u64);
@@ -278,6 +278,7 @@ struct ZarrArray {
 enum Compressor {
     None,
     Blosc,
+    Zstd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -868,7 +869,8 @@ impl ZarrArray {
                 }
                 Compressor::Blosc
             }
-            Some(other) => return Err(IoError::OmeZarr(format!("Zarr compressor {other:?} is not supported yet (blosc-lz4 and none are)"))),
+            Some("zstd") => Compressor::Zstd,
+            Some(other) => return Err(IoError::OmeZarr(format!("Zarr compressor {other:?} is not supported yet (blosc-lz4, zstd and none are)"))),
         };
         let nd = meta.shape.len();
         if !(2..=6).contains(&nd) || meta.chunks.len() != nd {
@@ -961,6 +963,13 @@ impl ZarrArray {
                     return Err(IoError::OmeZarr(format!("chunk declares {declared:?} bytes, its array needs {expected}")));
                 }
                 blosc_decompress(&raw)?
+            }
+            Compressor::Zstd => {
+                let bytes = zstd_decompress(&raw)?;
+                if bytes.len() != expected {
+                    return Err(IoError::OmeZarr(format!("a zstd chunk holds {} bytes, its array needs {expected}", bytes.len())));
+                }
+                bytes
             }
         };
         let mut values = Vec::new();

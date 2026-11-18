@@ -487,7 +487,17 @@ impl Store {
                             s.compute_histograms(&id, py, cx);
                             cx.emit(AppEvent::ImageReady(id));
                         }
-                        Err(e) => s.set_status(format!("Could not open {}: {e}", crate::domain::paths::short_path(&path)), cx),
+                        Err(e) => {
+                            // The docs viewer: a browser forgets picked files after a reload;
+                            // picking them again reopens the session's images (see `prompt`)
+                            #[cfg(target_family = "wasm")]
+                            if super::remote::runs_alone() && !path.to_string_lossy().contains("/samples/") {
+                                s.set_status(format!("Pick the folder (File › Open…) again to reopen {}: a browser forgets picked files after a reload", crate::domain::paths::short_path(&path)), cx);
+                                cx.notify();
+                                return;
+                            }
+                            s.set_status(format!("Could not open {}: {e}", crate::domain::paths::short_path(&path)), cx)
+                        }
                     }
                     cx.notify();
                 });
@@ -1108,6 +1118,11 @@ impl Store {
             }
             return;
         }
+        // A page served by `lucem serve`: its server computes (a page has no compute of its own)
+        #[cfg(target_family = "wasm")]
+        if self.device.is_none() && super::remote::page_link().is_some() && !super::remote::runs_alone() {
+            return self.recompute_on_server(req, cx);
+        }
         let Some(device) = self.device.clone() else {
             self.ensure_device(cx);
             return;
@@ -1189,6 +1204,75 @@ impl Store {
                             s.device.as_ref().map_or("—", |d| d.label.as_str())
                         ),
                     };
+                    cx.emit(AppEvent::Status);
+                }
+                cx.emit(AppEvent::Results);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// [`Self::recompute`] in a page `lucem serve` served: each view's chain runs on the server,
+    /// over the tiles of the visible region; what is asked meanwhile runs next.
+    #[cfg(target_family = "wasm")]
+    /// Opens what was picked or dropped in a page that runs alone: up to [`OPEN_AT_ONCE`] images
+    /// at once (no list after the browser's chooser); more, by asking which. The session's images
+    /// that could not open after a reload (picked before it) open again too.
+    #[cfg(target_family = "wasm")]
+    pub fn open_picked(&mut self, picked: Result<Vec<String>, String>, cx: &mut Context<Self>) {
+        const OPEN_AT_ONCE: usize = 8;
+        match picked {
+            Ok(images) if images.is_empty() => {}
+            Ok(images) if images.len() <= OPEN_AT_ONCE => {
+                let n = images.len();
+                // An image already in the session is shown, not opened twice (`open_image`)
+                for name in images {
+                    self.open(PathBuf::from(name), cx);
+                }
+                self.ensure_pyramids(cx);
+                self.set_status(format!("Opened {n} image(s): read in this browser, never uploaded"), cx);
+            }
+            Ok(images) => {
+                self.ensure_pyramids(cx);
+                self.set_status(format!("{} images: pick the ones to open", images.len()), cx);
+                cx.emit(AppEvent::ServerImages);
+            }
+            Err(e) => self.set_status(e, cx),
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn recompute_on_server(&mut self, req: ResultRequest, cx: &mut Context<Self>) {
+        let Some(pyramid) = self.pyramids.get(&req.image).cloned() else { return };
+        let generation = self.results_gen.fetch_add(1, Ordering::AcqRel) + 1;
+        let latest = self.results_gen.clone();
+        let (doc, image, asked, show) = (self.doc.clone(), req.image.clone(), req.clone(), self.tool.show_results);
+        self.computing = true;
+        cx.emit(AppEvent::Results);
+        let task = cx.background_spawn(async move { (latest.load(Ordering::Acquire) == generation && show).then(|| super::results::compute_remote(&doc, &pyramid, &req)) });
+        cx.spawn(async move |this, cx| {
+            let list = task.await;
+            let _ = this.update(cx, |s, cx| {
+                s.computing = false;
+                let current = s.results_gen.load(Ordering::Acquire) == generation;
+                s.results_for = Some(asked);
+                if s.results_pending || !current {
+                    s.results_pending = false;
+                    s.results_for = None;
+                    cx.spawn(async move |this, cx| {
+                        let _ = this.update(cx, |s, cx| s.recompute(cx));
+                    })
+                    .detach();
+                }
+                if let Some(list) = list {
+                    s.results.retain(|v, r| r.image != image && s.doc.graph.contains(v));
+                    let error = list.iter().find_map(|r| r.error.clone().map(|e| format!("{}: {e}", r.view)));
+                    let ms: f64 = list.iter().map(|r| r.ms).sum();
+                    for r in list {
+                        s.results.insert(r.view.clone(), r);
+                    }
+                    s.status = error.unwrap_or_else(|| format!("Results from the server in {ms:.0} ms"));
                     cx.emit(AppEvent::Status);
                 }
                 cx.emit(AppEvent::Results);
