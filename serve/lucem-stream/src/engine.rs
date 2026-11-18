@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use lucem_io::Pyramid;
 
-use crate::protocol::{ImageInfo, Request, Response};
+use crate::protocol::{Request, Response};
 
 /// Images kept open.
 const OPEN_IMAGES: usize = 64;
@@ -19,6 +19,8 @@ type OpenImages = (HashMap<PathBuf, Arc<Pyramid>>, VecDeque<PathBuf>);
 
 pub struct Images {
     pub(crate) root: PathBuf,
+    /// The app's samples (`lucem samples`), offered as `samples/<id>.ome.zarr` next to the data.
+    samples: Option<PathBuf>,
     open: Mutex<OpenImages>,
 }
 
@@ -31,7 +33,14 @@ fn is_image_name(path: &Path) -> bool {
 impl Images {
     /// The images under `root` (already canonical).
     pub fn new(root: PathBuf) -> Self {
-        Self { root, open: Mutex::new((HashMap::new(), VecDeque::new())) }
+        Self { root, samples: None, open: Mutex::new((HashMap::new(), VecDeque::new())) }
+    }
+
+    /// Offers the samples in `dir` (`lucem samples`) as `samples/…`, so a page opens them as
+    /// files instead of generating them.
+    pub fn with_samples(mut self, dir: Option<PathBuf>) -> Self {
+        self.samples = dir.and_then(|d| d.canonicalize().ok());
+        self
     }
 
     /// The data folder.
@@ -49,8 +58,13 @@ impl Images {
         if !is_image_name(path) {
             return Err("that is not an image".into());
         }
-        let full = self.root.join(path).canonicalize().map_err(|_| "no such image".to_string())?;
-        if !full.starts_with(&self.root) {
+        // The samples, when offered (the same checks: plain names, inside their folder)
+        let (base, rest) = match (self.samples.as_ref(), path.strip_prefix("samples")) {
+            (Some(dir), Ok(rest)) if !rest.as_os_str().is_empty() => (dir, rest),
+            _ => (&self.root, path),
+        };
+        let full = base.join(rest).canonicalize().map_err(|_| "no such image".to_string())?;
+        if !full.starts_with(base) {
             return Err("that path is not allowed".into());
         }
         Ok(full)
@@ -78,6 +92,12 @@ impl Images {
         let mut out = Vec::new();
         walk(&self.root, &self.root, 0, &mut out);
         out.sort();
+        if let Some(dir) = &self.samples {
+            let mut samples = Vec::new();
+            walk(dir, dir, 0, &mut samples);
+            samples.sort();
+            out.extend(samples.into_iter().map(|s| format!("samples/{s}")));
+        }
         out
     }
 }
@@ -99,17 +119,7 @@ fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
     }
 }
 
-pub fn describe(p: &Pyramid) -> ImageInfo {
-    ImageInfo {
-        name: p.name.clone(),
-        dtype: p.dtype.clone(),
-        channels: p.channels.iter().map(|c| c.label.clone()).collect(),
-        pixel_size_um: p.pixel_size_um,
-        z_spacing_um: p.z_spacing_um,
-        levels: p.levels.iter().map(|l| [l.depth, l.height, l.width, l.tile_d, l.tile_h, l.tile_w]).collect(),
-        display: p.channels.iter().map(|c| crate::protocol::ChannelDisplay { color: c.color, window: c.window, range: c.range, active: c.active }).collect(),
-    }
-}
+pub use crate::protocol::describe;
 
 /// The answer to `request` (blocking: reads files, runs plugins): the response, and a tile's
 /// values to follow it.

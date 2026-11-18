@@ -105,6 +105,8 @@ pub struct WebOptions {
     pub server_name: String,
     /// The compute runtime it processes on ("" when none).
     pub runtime: String,
+    /// The app's samples (`lucem samples`), offered to pages as `samples/…`.
+    pub samples: Option<PathBuf>,
     /// Tile answers kept for the pages (MiB): a tile asked twice (a pan back, a second page, the
     /// first screen of an image just opened) is sent from memory.
     pub tile_cache_mib: usize,
@@ -189,7 +191,7 @@ impl WebServer {
     /// Binds `options.bind` (TCP and UDP), serving the images under `data` to pages the
     /// `authority` lets in, with these plugins and tile processor.
     pub async fn bind(options: WebOptions, authority: Arc<Authority>, data: &Path, plugins: Vec<Arc<dyn ServerPlugin>>, processor: Option<Arc<dyn TileProcessor>>) -> StreamResult<Self> {
-        let WebOptions { bind, web_root, tls, names, server_name, runtime, tile_cache_mib } = options;
+        let WebOptions { bind, web_root, tls, names, server_name, runtime, samples, tile_cache_mib } = options;
         let chain = match &tls {
             WebTls::Plain if !bind.ip().is_loopback() => return Err(StreamError::Tls(format!("plain HTTP is only served on a loopback address, not on {bind} (--web-plain-http to serve it anyway)"))),
             WebTls::Plain | WebTls::PlainOffLoopback => None,
@@ -223,7 +225,7 @@ impl WebServer {
         let root = data.canonicalize()?;
         let serve_info = ServeInfo { server: Some(server_name.clone()), webtransport_port: Some(port), certificate_sha256 };
         let tiles = std::sync::Mutex::new(TileCache::new(tile_cache_mib << 20));
-        let state = State { authority, images: Arc::new(Images::new(root)), plugins: Arc::new(plugins), processor, web_root, names, server_name, runtime, serve_info, tiles, warmed: Default::default() };
+        let state = State { authority, images: Arc::new(Images::new(root).with_samples(samples)), plugins: Arc::new(plugins), processor, web_root, names, server_name, runtime, serve_info, tiles, warmed: Default::default() };
         Ok(Self { listener, tls, transport, state: Arc::new(state) })
     }
 

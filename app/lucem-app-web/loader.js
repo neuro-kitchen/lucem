@@ -76,6 +76,47 @@ if ("WebTransport" in window) {
   };
 }
 
+// ---- picking files (a page that runs alone: the docs viewer) ---------------------------------
+// Resolve to [{path: "<folder>/<path inside>", file}] or null (closed). Nothing is read: a File is
+// a handle until a tile needs its bytes. dsp-kitchen's picker awaited getFile() for each of
+// ~20,000 files in turn before anything showed; here the names are listed first and the Files
+// made in parallel batches.
+const pickWithInput = (folder) =>
+  new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    if (folder) input.webkitdirectory = true;
+    input.onchange = () => resolve([...input.files].map((f) => ({ path: f.webkitRelativePath || f.name, file: f })));
+    input.oncancel = () => resolve(null);
+    input.click();
+  });
+window.lucemPickFiles = () => pickWithInput(false);
+window.lucemPickFolder = async () => {
+  if (!window.showDirectoryPicker) return pickWithInput(true);
+  let root;
+  try {
+    root = await window.showDirectoryPicker({ mode: "read" });
+  } catch {
+    return null;
+  }
+  const handles = [];
+  const MAX = 200000, DEPTH = 10;
+  const walk = async (dir, prefix, depth) => {
+    for await (const [name, handle] of dir.entries()) {
+      if (handles.length >= MAX) return;
+      if (handle.kind === "file") handles.push([`${prefix}/${name}`, handle]);
+      else if (!name.startsWith(".") && depth < DEPTH) await walk(handle, `${prefix}/${name}`, depth + 1);
+    }
+  };
+  await walk(root, root.name, 0);
+  const out = [];
+  for (let i = 0; i < handles.length; i += 512) {
+    out.push(...(await Promise.all(handles.slice(i, i + 512).map(async ([path, h]) => ({ path, file: await h.getFile() })))));
+  }
+  return out;
+};
+
 // ---- the browser -------------------------------------------------------------------------
 const note = document.getElementById("note");
 const say = (html) => (note.firstElementChild.innerHTML = html);

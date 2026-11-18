@@ -44,7 +44,19 @@ pub enum Hello {
 pub enum Transport {
     WebTransport,
     WebSocket,
+    /// The page's own engine worker (no server: the docs viewer).
+    Worker,
 }
+
+/// The name a page that runs alone gives its images (`lucem://local/<picked path>`).
+pub const LOCAL_HOST: &str = "local";
+
+/// Files to hand the engine worker (`[{path, file}]`): browser objects, sent from the page's main
+/// thread only (the channel just carries them there).
+struct SendFiles(js_sys::Array);
+
+// SAFETY: made and posted on the page's main thread; the channel's other end is on it too.
+unsafe impl Send for SendFiles {}
 
 /// Locks without waiting on the page's main thread (which may not wait): held for an instant.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -92,6 +104,8 @@ pub struct PageLink {
     transport: Transport,
     /// The server's address as the page reaches it (`host:port`), for `lucem://` names.
     host: String,
+    /// The engine worker's file hand-over (a page that runs alone).
+    files: Option<futures_channel::mpsc::UnboundedSender<SendFiles>>,
 }
 
 fn kind_of(answer: Answer) -> StreamResult<wire::response::Kind> {
@@ -161,6 +175,13 @@ impl PageLink {
             w.deliver(Err(CLOSED.into()));
         }
         self.out.close_channel();
+    }
+
+    /// Hands the engine worker the files the user picked (`[{path, file}]`), from the page's main
+    /// thread; a server link has no use for them.
+    pub fn set_files(&self, files: js_sys::Array) -> StreamResult<()> {
+        let tx = self.files.as_ref().ok_or_else(|| StreamError::protocol("files go to the page's engine, not to a server"))?;
+        tx.unbounded_send(SendFiles(files)).map_err(|_| StreamError::protocol("the engine worker stopped"))
     }
 
     /// The images the server offers (awaited).
@@ -339,7 +360,7 @@ async fn over_webtransport(session: JsValue, host: String, how: Hello) -> Stream
     let mut control = Control::WebTransport(session.clone());
     let (welcome, token) = hello(&mut control, how).await?;
     let (out, mut requests) = futures_channel::mpsc::unbounded::<(u32, Vec<u8>)>();
-    let link = Arc::new(PageLink { out, pending: Mutex::default(), next: AtomicU32::new(1), welcome, transport: Transport::WebTransport, host });
+    let link = Arc::new(PageLink { out, pending: Mutex::default(), next: AtomicU32::new(1), welcome, transport: Transport::WebTransport, host, files: None });
     // Each request on a stream of its own, answered as soon as it is (any order)
     let sender = link.clone();
     wasm_bindgen_futures::spawn_local(async move {
@@ -409,7 +430,7 @@ async fn over_websocket(url: &str, host: String, how: Hello) -> StreamResult<(Ar
     let mut control = Control::WebSocket { socket: socket.clone(), texts };
     let (welcome, token) = hello(&mut control, how).await?;
     let (out, mut requests) = futures_channel::mpsc::unbounded::<(u32, Vec<u8>)>();
-    let link = Arc::new(PageLink { out, pending: Mutex::default(), next: AtomicU32::new(1), welcome, transport: Transport::WebSocket, host });
+    let link = Arc::new(PageLink { out, pending: Mutex::default(), next: AtomicU32::new(1), welcome, transport: Transport::WebSocket, host, files: None });
     let _ = ready.set(link.clone());
     // The one sender: frames from any thread leave from here, copied out of shared memory
     wasm_bindgen_futures::spawn_local(async move {
@@ -437,4 +458,60 @@ pub async fn serve_info() -> StreamResult<Option<ServeInfo>> {
     let text = call(&response, "text", &[]).await?.as_string().unwrap_or_default();
     let info: ServeInfo = serde_json::from_str(&text).map_err(|e| StreamError::protocol(e.to_string()))?;
     Ok(info.server.is_some().then_some(info))
+}
+
+/// Starts the page's own engine worker (`script`: `engine/engine-worker.js`, next to the page):
+/// a page no server served (the docs viewer) reads the files the user picks there, with the same
+/// requests a server answers. Returns the link, and why processing does not run in it ("" when
+/// it does).
+pub async fn start_worker(script: &str) -> StreamResult<(Arc<PageLink>, String)> {
+    let options = web_sys::WorkerOptions::new();
+    options.set_type(web_sys::WorkerType::Module);
+    let worker = web_sys::Worker::new_with_options(script, &options).map_err(js)?;
+    let (ready_tx, mut ready) = futures_channel::mpsc::unbounded::<String>();
+    let link_cell: Arc<OnceLock<Arc<PageLink>>> = Arc::default();
+    let to = link_cell.clone();
+    let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |e: web_sys::MessageEvent| {
+        let data = e.data();
+        let get = |k: &str| js_sys::Reflect::get(&data, &k.into()).unwrap_or(JsValue::UNDEFINED);
+        if let Some(why) = get("ready").as_string() {
+            let _ = ready_tx.unbounded_send(why);
+            return;
+        }
+        let (Some(id), Ok(buffer)) = (get("id").as_f64(), get("bytes").dyn_into::<js_sys::ArrayBuffer>()) else { return };
+        if let Some(link) = to.get() {
+            link.deliver(id as u32, wire::Response::decode(js_sys::Uint8Array::new(&buffer).to_vec().as_slice()).map_err(|e| format!("the engine's answer could not be read: {e}")));
+        }
+    });
+    worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    on_message.forget();
+    let why = ready.next().await.ok_or_else(|| StreamError::protocol("the engine worker did not start"))?;
+    let (out, mut requests) = futures_channel::mpsc::unbounded::<(u32, Vec<u8>)>();
+    let (files_tx, mut files) = futures_channel::mpsc::unbounded::<SendFiles>();
+    let welcome = WebWelcome { server_name: "this browser".into(), server_version: String::new(), peer_name: "you".into(), permission: crate::pair::Permission::Control, runtime: String::new(), plugins: Vec::new() };
+    let link = Arc::new(PageLink { out, pending: Mutex::default(), next: AtomicU32::new(1), welcome, transport: Transport::Worker, host: LOCAL_HOST.into(), files: Some(files_tx) });
+    let _ = link_cell.set(link.clone());
+    // The one sender, on the main thread: requests copied out of shared memory and transferred
+    wasm_bindgen_futures::spawn_local(async move {
+        loop {
+            futures_util::select! {
+                r = requests.next() => {
+                    let Some((id, bytes)) = r else { break };
+                    let copy = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
+                    copy.copy_from(&bytes);
+                    let message = js_sys::Object::new();
+                    let _ = js_sys::Reflect::set(&message, &"id".into(), &JsValue::from(id));
+                    let _ = js_sys::Reflect::set(&message, &"bytes".into(), &copy.buffer());
+                    let _ = worker.post_message_with_transfer(&message, &js_sys::Array::of1(&copy.buffer()));
+                }
+                f = files.next() => {
+                    let Some(SendFiles(list)) = f else { break };
+                    let message = js_sys::Object::new();
+                    let _ = js_sys::Reflect::set(&message, &"files".into(), &list);
+                    let _ = worker.post_message(&message);
+                }
+            }
+        }
+    });
+    Ok((link, why))
 }

@@ -124,9 +124,34 @@ mod imp {
         LINK.get().cloned()
     }
 
-    /// Whether there is a server to ask (the page's, once signed in).
+    /// Whether there is a server to ask (the page's, once signed in, or its own engine).
     pub fn has_servers() -> bool {
         LINK.get().is_some()
+    }
+
+    /// Whether the page runs alone (the docs viewer): its images are the files the user picks.
+    pub fn runs_alone() -> bool {
+        LINK.get().is_some_and(|l| l.transport() == lucem_stream::web_client::Transport::Worker)
+    }
+
+    /// Asks the user for a folder (`folder`) or files, and hands them to the page's engine: the
+    /// loader's pickers (`window.lucemPickFolder` / `lucemPickFiles`) list names first and give
+    /// lazy `File`s (nothing is read until a tile needs it). How many files; 0 when the dialog
+    /// was closed.
+    pub async fn pick_files(folder: bool) -> Result<usize, String> {
+        let link = LINK.get().ok_or("the page has no engine")?.clone();
+        let window = web_sys::window().ok_or("no window")?;
+        let name = if folder { "lucemPickFolder" } else { "lucemPickFiles" };
+        let pick: js_sys::Function = js_sys::Reflect::get(&window, &name.into()).ok().and_then(|f| wasm_bindgen::JsCast::dyn_into(f).ok()).ok_or_else(|| format!("this page's loader has no {name}"))?;
+        let promise: js_sys::Promise = wasm_bindgen::JsCast::dyn_into(pick.call0(&wasm_bindgen::JsValue::NULL).map_err(|e| format!("{e:?}"))?).map_err(|_| "the picker gave no promise".to_string())?;
+        let picked = wasm_bindgen_futures::JsFuture::from(promise).await.map_err(|e| format!("{e:?}"))?;
+        if picked.is_null() || picked.is_undefined() {
+            return Ok(0);
+        }
+        let files = js_sys::Array::from(&picked);
+        let n = files.length() as usize;
+        link.set_files(files).map_err(|e| e.to_string())?;
+        Ok(n)
     }
 
     /// Opens `lucem://<host>/<path>` on the page's server (from a worker: it waits).

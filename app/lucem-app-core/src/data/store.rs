@@ -1602,6 +1602,16 @@ impl ChannelHistogram {
 /// Opens a pyramid from a path or a `sample:<name>`.
 pub fn open_pyramid(path: &Path) -> Result<Pyramid, String> {
     let s = path.to_string_lossy();
+    // A page does not generate samples (seconds of CPU there): it opens them as files, from its
+    // server (`lucem serve --samples`) or from the site (the docs viewer)
+    #[cfg(target_family = "wasm")]
+    if let Some(id) = s.strip_prefix("sample:") {
+        let id = if id == "volume" { SAMPLE_VOLUME_ID } else { id };
+        let link = super::remote::page_link().ok_or("the page is not connected yet")?;
+        let mut py = super::remote::open(&lucem_stream::remote_name(link.host(), &format!("samples/{id}.ome.zarr")))?;
+        py.path = Some(path.to_path_buf());
+        return Ok(py);
+    }
     if s == "sample:volume" {
         let mut py = lucem_io::sample_volume(256, 128).map_err(|e| e.to_string())?;
         py.path = Some(path.to_path_buf());
@@ -1622,8 +1632,11 @@ pub fn open_pyramid(path: &Path) -> Result<Pyramid, String> {
 
 /// The id of a sample in `sample:<name>` paths.
 pub fn sample_name(kind: PhantomKind) -> String {
-    kind.title().to_lowercase().replace([' ', '&', '/'], "-").replace("--", "-")
+    kind.id()
 }
+
+/// The sample volume's file id (`samples/sample-volume.ome.zarr`, written by `lucem samples`).
+pub const SAMPLE_VOLUME_ID: &str = "sample-volume";
 
 /// How each channel starts: the file's colour, and its window, or the 0.1–99.8 % percentiles of
 /// the coarsest level when the file gives the full range of the type.

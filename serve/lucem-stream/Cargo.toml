@@ -49,7 +49,7 @@ futures-util = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
-web-sys = { workspace = true, optional = true, features = ["Window", "WebSocket", "BinaryType", "MessageEvent", "Location"] }
+web-sys = { workspace = true, optional = true, features = ["Window", "WebSocket", "BinaryType", "MessageEvent", "Location", "Worker", "WorkerOptions", "WorkerType"] }
 futures-channel = { workspace = true, optional = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]

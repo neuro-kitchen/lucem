@@ -43,6 +43,9 @@ COPY --from=build /out/lucem /usr/local/bin/
 # `lucem serve --web`, it views the images under /data and the server computes for it
 COPY app/lucem-app-web/dist/index.html app/lucem-app-web/dist/loader.js app/lucem-app-web/dist/isolate-sw.js /usr/share/lucem/web/
 COPY app/lucem-app-web/dist/mt /usr/share/lucem/web/mt
+# The app's samples as files, offered to pages as samples/… (`--samples`): a page opens them,
+# never generates them
+RUN lucem samples /usr/share/lucem/samples
 # Not root (uid 10001); /data holds the images and the authority of enrolled clients
 RUN useradd --create-home --uid 10001 lucem && install -d -o lucem -g lucem /data
 WORKDIR /data
@@ -63,7 +66,7 @@ ENV LUCEM_SERVE_AUTH_DIR=/data/.lucem-auth
 ENV LUCEM_SERVE_DATA=/data
 # Listen on every interface of the container; only enrolled clients and paired pages get in.
 # --pair prints a one-time pairing code at start (`podman logs`), for a browser or a computer
-CMD ["serve", "--bind", "0.0.0.0:50051", "--pair", "--web", "/usr/share/lucem/web", "--web-bind", "0.0.0.0:8443", "--web-plain-http"]
+CMD ["serve", "--bind", "0.0.0.0:50051", "--pair", "--web", "/usr/share/lucem/web", "--web-bind", "0.0.0.0:8443", "--web-plain-http", "--samples", "/usr/share/lucem/samples"]
 
 # NVIDIA: CUDA and Vulkan. The host's driver is passed in by the NVIDIA Container Toolkit (CDI); the
 # image brings what the driver does not: NVRTC, the Vulkan loader, and libX11 / libXext.

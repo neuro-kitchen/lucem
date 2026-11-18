@@ -35,6 +35,8 @@ members = [
     "app/lucem-app",
     # The app in a browser tab (a client of `lucem serve --web`)
     "app/lucem-app-web",
+    # The engine in a browser worker, for a page that runs alone (the docs viewer)
+    "engine/lucem-engine-web",
     # Plugins: ml/ programs the app and the command line run (one per model family, never
     # linked, so ONNX Runtime and model licences stay out of lucem itself)
     "plugins/ml/lucem-ml-sam",
@@ -127,7 +129,7 @@ hyper-util = { version = "0.1.21", features = ["tokio"] }
 http-body-util = "0.1.5"
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
-futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std", "async-await", "async-await-macro"] }
 futures-channel = { version = "0.3.31", features = ["sink"] }
 # The page (WebAssembly)
 wasm-bindgen = "0.2"

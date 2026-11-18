@@ -205,6 +205,52 @@ pub trait TileSource: Send + Sync {
 
 struct SourceBox(Arc<dyn TileSource>);
 
+/// Where a Zarr container's keys are read from: a folder on disk ([`DirStore`]), or what a browser
+/// page has (the files the user picked, the site's own files). A key is a path inside the
+/// container (`.zattrs`, `0/.zarray`, `0/1.2`); `None`: no such key (a missing chunk holds the
+/// fill value). Called from many threads.
+pub trait ZarrStore: Send + Sync {
+    fn get(&self, key: &str) -> std::io::Result<Option<Vec<u8>>>;
+}
+
+/// A Zarr container in a folder on disk.
+#[derive(Debug, Clone)]
+pub struct DirStore(pub PathBuf);
+
+impl ZarrStore for DirStore {
+    fn get(&self, key: &str) -> std::io::Result<Option<Vec<u8>>> {
+        match fs::read(self.0.join(key)) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// A store and the folder of one array inside it.
+#[derive(Clone)]
+struct ArrayStore {
+    store: Arc<dyn ZarrStore>,
+    prefix: String,
+}
+
+impl std::fmt::Debug for ArrayStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.prefix)
+    }
+}
+
+impl ArrayStore {
+    fn get(&self, name: &str) -> std::io::Result<Option<Vec<u8>>> {
+        let key = if self.prefix.is_empty() { name.to_string() } else { format!("{}/{name}", self.prefix) };
+        self.store.get(&key)
+    }
+}
+
+fn store_text(store: &dyn ZarrStore, key: &str) -> Option<String> {
+    store.get(key).ok().flatten().and_then(|b| String::from_utf8(b).ok())
+}
+
 impl std::fmt::Debug for SourceBox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("TileSource")
@@ -214,7 +260,7 @@ impl std::fmt::Debug for SourceBox {
 /// One Zarr v2 array (a level).
 #[derive(Debug, Clone)]
 struct ZarrArray {
-    dir: PathBuf,
+    dir: ArrayStore,
     shape: Vec<usize>,
     chunks: Vec<usize>,
     dtype: Dtype,
@@ -410,9 +456,19 @@ impl Pyramid {
 
     /// Reads the container's metadata (no pixel data).
     pub fn open_zarr(root: &Path) -> IoResult<Self> {
-        let attrs: RootAttrs = match fs::read_to_string(root.join(".zattrs")) {
-            Ok(text) => serde_json::from_str(&text)?,
-            Err(_) => RootAttrs::default(),
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into());
+        let mut py = Self::open_store(&name, Arc::new(DirStore(root.to_path_buf())))?;
+        py.path = Some(root.to_path_buf());
+        Ok(py)
+    }
+
+    /// An OME-Zarr container read through `store` (a browser page's files, a site's), its
+    /// metadata now and its chunks when tiles are asked for. `name`: what to call it when its
+    /// metadata names nothing.
+    pub fn open_store(name: &str, store: Arc<dyn ZarrStore>) -> IoResult<Self> {
+        let attrs: RootAttrs = match store_text(store.as_ref(), ".zattrs") {
+            Some(text) => serde_json::from_str(&text)?,
+            None => RootAttrs::default(),
         };
         let ms = attrs.multiscales.into_iter().next().unwrap_or_default();
         let axis_names: Vec<String> = ms
@@ -434,13 +490,13 @@ impl Pyramid {
         }
         if datasets.is_empty() {
             for cand in ["0", "1", "2", "3", "4", "5", "s0", "s1", "s2", "s3", "s4", "s5"] {
-                if root.join(cand).join(".zarray").is_file() {
+                if store.get(&format!("{cand}/.zarray")).ok().flatten().is_some() {
                     datasets.push(Dataset { path: cand.into(), transforms: Vec::new() });
                 }
             }
         }
         if datasets.is_empty() {
-            return Err(IoError::OmeZarr(format!("no multiscale levels in {}", root.display())));
+            return Err(IoError::OmeZarr(format!("no multiscale levels in {name}")));
         }
 
         let mut arrays = Vec::new();
@@ -448,8 +504,8 @@ impl Pyramid {
         let mut pixel_size_um = None;
         let mut z_spacing_um = None;
         for (i, ds) in datasets.iter().enumerate() {
-            let dir = root.join(&ds.path);
-            let arr = ZarrArray::open(&dir, &axis_names)?;
+            let dir = ArrayStore { store: store.clone(), prefix: ds.path.trim_matches('/').to_string() };
+            let arr = ZarrArray::open(dir, &axis_names)?;
             let (h, w) = (arr.shape[arr.y_axis], arr.shape[arr.x_axis]);
             let (th, tw) = (arr.chunks[arr.y_axis], arr.chunks[arr.x_axis]);
             if i == 0 {
@@ -498,12 +554,12 @@ impl Pyramid {
             .collect();
 
         let mut label_groups = Vec::new();
-        if let Ok(text) = fs::read_to_string(root.join("labels").join(".zattrs"))
+        if let Some(text) = store_text(store.as_ref(), "labels/.zattrs")
             && let Ok(l) = serde_json::from_str::<LabelsAttrs>(&text) {
-                label_groups = l.labels.into_iter().filter(|g| is_safe_relative_path(g) && root.join("labels").join(g).is_dir()).collect();
+                label_groups = l.labels.into_iter().filter(|g| is_safe_relative_path(g) && store.get(&format!("labels/{g}/.zattrs")).ok().flatten().is_some()).collect();
             }
-        let name = ms.name.filter(|n| !n.is_empty()).unwrap_or_else(|| root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into()));
-        Ok(Self { name, path: Some(root.to_path_buf()), levels, channels, pixel_size_um, z_spacing_um, dtype: a0.dtype.label(), label_groups, backend: Backend::Zarr(arrays), chunks: ChunkCache::default() })
+        let name = ms.name.filter(|n| !n.is_empty()).unwrap_or_else(|| name.to_string());
+        Ok(Self { name, path: None, levels, channels, pixel_size_um, z_spacing_um, dtype: a0.dtype.label(), label_groups, backend: Backend::Zarr(arrays), chunks: ChunkCache::default() })
     }
 
     /// An in-memory pyramid of a decoded image: one channel for grey images, three (R, G, B)
@@ -600,6 +656,12 @@ impl Pyramid {
             }
         }
         Ok(Self { name: name.into(), path, levels, channels, pixel_size_um, z_spacing_um, dtype: dtype.into(), label_groups: Vec::new(), backend: Backend::Source(SourceBox(source)), chunks: ChunkCache::default() })
+    }
+
+    /// A plain image (PNG, TIFF, JPEG) from its bytes, as an in-memory pyramid: a file a browser
+    /// page was given.
+    pub fn from_image_bytes(name: &str, bytes: &[u8]) -> IoResult<Self> {
+        Ok(Self::from_loaded(crate::image_io::load_image_bytes(name, bytes)?))
     }
 
     /// Whether the tiles come from a [`TileSource`] (a server), not a file here.
@@ -790,8 +852,8 @@ impl Pyramid {
 }
 
 impl ZarrArray {
-    fn open(dir: &Path, axis_names: &[String]) -> IoResult<Self> {
-        let text = fs::read_to_string(dir.join(".zarray")).map_err(|e| IoError::OmeZarr(format!("{}: {e}", dir.join(".zarray").display())))?;
+    fn open(dir: ArrayStore, axis_names: &[String]) -> IoResult<Self> {
+        let text = dir.get(".zarray").ok().flatten().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| IoError::OmeZarr(format!("{}/.zarray: not found", dir.prefix)))?;
         let meta: ZArray = serde_json::from_str(&text)?;
         if meta.order.as_deref() == Some("F") {
             return Err(IoError::OmeZarr("Fortran-ordered Zarr arrays are not supported".into()));
@@ -832,7 +894,7 @@ impl ZarrArray {
         }
         let fill = meta.fill_value.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
         let sep = meta.dimension_separator.unwrap_or_else(|| ".".into());
-        Ok(Self { dir: dir.to_path_buf(), shape: meta.shape, chunks: meta.chunks, dtype, compressor, sep, fill, c_axis, z_axis, y_axis, x_axis })
+        Ok(Self { dir, shape: meta.shape, chunks: meta.chunks, dtype, compressor, sep, fill, c_axis, z_axis, y_axis, x_axis })
     }
 
     /// Chunk `(ty, tx)` of `channel` at plane `z` (other axes at 0), cut to `w × h`.
@@ -886,10 +948,9 @@ impl ZarrArray {
     /// The values of a chunk; `None` when its file does not exist (it holds the fill value).
     fn decode_chunk(&self, idx: &[usize]) -> IoResult<Option<Vec<f32>>> {
         let name = idx.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(&self.sep);
-        let raw = match fs::read(self.dir.join(name)) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let raw = match self.dir.get(&name)? {
+            Some(b) => b,
+            None => return Ok(None),
         };
         let expected = self.chunks.iter().product::<usize>() * self.dtype.size;
         let bytes = match self.compressor {

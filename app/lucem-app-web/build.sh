@@ -5,6 +5,8 @@
 #                  anything large is downloaded, holds the WebTransport shim, starts the app
 #   mt/            the app, threaded (tile reads wait for the server on web workers); needs the
 #                  page cross-origin isolated (`lucem serve --web` sends the headers)
+#   engine/        the engine (lucem-engine-web) for a page that runs alone (the docs viewer): a
+#                  single-thread module in a worker of its own, reading the files the user picked
 #   isolate-sw.js  the service worker that isolates the page where the host cannot
 #
 # Each .wasm and .js is also written Brotli-compressed (.br), which `lucem serve` sends to
@@ -53,5 +55,22 @@ rm -rf "$dist/mt"
 "$wasm_opt" -O2 --enable-threads --enable-bulk-memory --enable-mutable-globals --enable-simd --enable-nontrapping-float-to-int --enable-sign-ext \
     "$dist/mt/lucem_app_web_bg.wasm" -o "$dist/mt/lucem_app_web_bg.wasm"
 du -h "$dist/mt/lucem_app_web_bg.wasm" | sed 's/^/   /'
+# The samples, as files the page opens (generated once by the native `lucem samples`; never in
+# the browser). LUCEM_BIN: a lucem built for this computer (default: the workspace's)
+lucem_bin="${LUCEM_BIN:-$target/validate/lucem}"
+if [ -x "$lucem_bin" ]; then
+    [ -f "$dist/samples/index.json" ] || "$lucem_bin" samples "$dist/samples"
+else
+    echo "   no native lucem at $lucem_bin: samples not written (LUCEM_BIN=…, or cargo build -p lucem-cli)"
+fi
+
+# The engine: one thread (no shared memory), its own target folder
+export CARGO_TARGET_DIR="$target/web-engine"
+(cd "$root" && RUSTFLAGS='-C target-feature=+simd128' rustup run "$TOOLCHAIN" cargo build -p lucem-engine-web --lib --target wasm32-unknown-unknown --release)
+rm -rf "$dist/engine"
+"$bindgen" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/lucem_engine_web.wasm" --out-dir "$dist/engine" --target web
+"$wasm_opt" -O2 --enable-bulk-memory --enable-simd --enable-nontrapping-float-to-int --enable-sign-ext "$dist/engine/lucem_engine_web_bg.wasm" -o "$dist/engine/lucem_engine_web_bg.wasm"
+cp "$root/engine/lucem-engine-web/engine-worker.js" "$dist/engine/"
+du -h "$dist/engine/lucem_engine_web_bg.wasm" | sed 's/^/   /'
 find "$dist" \( -name '*.wasm' -o -name '*.js' \) | while read -r f; do brotli -f -q 11 "$f" -o "$f.br"; done
 echo "Built into $dist (serve it: lucem serve --data <images> --web $dist)"

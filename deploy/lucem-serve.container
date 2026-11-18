@@ -36,7 +36,7 @@ ReadOnly=true
 DropCapability=all
 NoNewPrivileges=true
 PodmanArgs=--pids-limit=1024
-Exec=serve --bind 0.0.0.0:50051 --name %H --max-clients 8 --web /usr/share/lucem/web --web-bind 0.0.0.0:8443 --web-plain-http
+Exec=serve --bind 0.0.0.0:50051 --name %H --max-clients 8 --web /usr/share/lucem/web --web-bind 0.0.0.0:8443 --web-plain-http --samples /usr/share/lucem/samples
 
 [Service]
 Restart=on-failure

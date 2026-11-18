@@ -7316,6 +7316,7 @@ dependencies = [
  "geo",
  "gpui-kit",
  "image",
+ "js-sys",
  "kitchen-shell",
  "kitchen-ui",
  "lucem-core",
@@ -7335,6 +7336,8 @@ dependencies = [
  "sysinfo 0.40.4",
  "thiserror 2.0.21",
  "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "web-time",
 ]
@@ -7388,6 +7391,20 @@ dependencies = [
  "num-traits",
  "serde",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "lucem-engine-web"
+version = "0.0.2"
+dependencies = [
+ "js-sys",
+ "lucem-io",
+ "lucem-stream",
+ "prost",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

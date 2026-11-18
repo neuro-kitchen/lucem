@@ -1,0 +1,24 @@
+[package]
+name = "lucem-engine-web"
+description = "lucem's engine in a browser worker: the images a page picked, read in pieces and answered with lucem serve's requests (a page with no server: GitHub Pages)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Everything is for the browser (a single-thread module run in a dedicated worker); on other
+# targets the crate is empty, so the workspace builds
+[target.'cfg(target_family = "wasm")'.dependencies]
+lucem-io.workspace = true
+lucem-stream = { workspace = true, default-features = false, features = ["web"] }
+prost.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = ["File", "Blob", "FileReaderSync", "XmlHttpRequest", "XmlHttpRequestResponseType"] }
+serde_json.workspace = true

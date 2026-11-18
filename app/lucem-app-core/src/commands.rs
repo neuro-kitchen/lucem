@@ -69,16 +69,31 @@ fn needs_image(store: &Entity<Store>) -> impl Fn(&App) -> Result<(), String> + '
 // ----------------------------------------------------------------------------
 
 fn prompt(store: Entity<Store>, directories: bool, files: bool, prompt: &'static str, save_folder: bool, cx: &mut App) {
-    // A browser page has no file dialog: it opens what its server offers
+    // A browser page has no file dialog: it opens what its server offers, or (the docs viewer,
+    // running alone) the files the user picks, read by its engine
     if !crate::platform::LOCAL_FILES {
-        let _ = (directories, files, prompt);
-        store.update(cx, |s, cx| {
-            if save_folder {
-                s.set_status("Saving a project is done by the desktop app for now (the page keeps it while it is open)", cx);
-            } else {
-                cx.emit(AppEvent::ServerImages);
-            }
-        });
+        let _ = (files, prompt);
+        if save_folder {
+            store.update(cx, |s, cx| s.set_status("Saving a project is done by the desktop app for now (the page keeps the session itself)", cx));
+            return;
+        }
+        #[cfg(target_family = "wasm")]
+        if crate::data::remote::runs_alone() {
+            cx.spawn(async move |cx| {
+                let picked = crate::data::remote::pick_files(directories).await;
+                let _ = store.update(cx, |s, cx| match picked {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        s.set_status(format!("{n} file(s) given to this page (read here, never uploaded)"), cx);
+                        cx.emit(AppEvent::ServerImages);
+                    }
+                    Err(e) => s.set_status(format!("Could not pick files: {e}"), cx),
+                });
+            })
+            .detach();
+            return;
+        }
+        store.update(cx, |_, cx| cx.emit(AppEvent::ServerImages));
         return;
     }
     let rx = cx.prompt_for_paths(PathPromptOptions { files, directories, multiple: false, prompt: Some(prompt.into()) });

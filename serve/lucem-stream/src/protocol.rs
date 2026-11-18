@@ -156,3 +156,16 @@ pub fn split_remote(name: &str) -> Option<(&str, &str)> {
 pub fn remote_name(addr: &str, path: &str) -> String {
     format!("{REMOTE_SCHEME}{addr}/{path}")
 }
+
+/// What a server (or a page's engine worker) says about an image it has.
+pub fn describe(p: &lucem_io::Pyramid) -> ImageInfo {
+    ImageInfo {
+        name: p.name.clone(),
+        dtype: p.dtype.clone(),
+        channels: p.channels.iter().map(|c| c.label.clone()).collect(),
+        pixel_size_um: p.pixel_size_um,
+        z_spacing_um: p.z_spacing_um,
+        levels: p.levels.iter().map(|l| [l.depth, l.height, l.width, l.tile_d, l.tile_h, l.tile_w]).collect(),
+        display: p.channels.iter().map(|c| ChannelDisplay { color: c.color, window: c.window, range: c.range, active: c.active }).collect(),
+    }
+}

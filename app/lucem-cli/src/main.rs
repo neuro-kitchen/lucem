@@ -22,12 +22,13 @@ USAGE
                                          model plugin, on every usable runtime
   lucem run <spec.json> <image> <output> [--block N] [--runtime NAME]
                                          Run a pipeline over a whole image
+  lucem samples <dir>                    Every sample as OME-Zarr files (pages open these: the site, --samples)
   lucem bench-codecs <image> [--level N (0)] [--tiles N (64)]
                                          Ratio and speed of zstd, LZ4 and Pcodec on its tiles
   lucem sample <output.ome.zarr> [--size N] [--depth N]
                                          Write a synthetic image (a volume with --depth)
   lucem serve [--data DIR] [--bind ADDR] [--name HOST]... [--max-clients N] [--allow-anonymous]
-              [--web DIST [--web-bind ADDR] [--web-plain-http] [--web-cache-mib N (512)] [--runtime wgpu|cuda|cpu]]
+              [--web DIST [--web-bind ADDR] [--web-plain-http] [--web-cache-mib N (512)] [--samples DIR] [--runtime wgpu|cuda|cpu]]
               [--pair] [--certificate FILE --private-key FILE]
                                          Serve the images under DIR to enrolled clients
                                          (--pair: show a pairing code on the terminal at start)
@@ -139,6 +140,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "autotune" => autotune::autotune(args),
         "run" => run_pipeline(args),
         "sample" => sample(args),
+        "samples" => samples(args),
         "bench-codecs" => bench_codecs(args),
         "serve" => serve(args),
         "clients" => clients(args),
@@ -246,6 +248,44 @@ fn bench_codecs(mut args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Writes every sample the app offers (the volume and the phantoms) as OME-Zarr under `dir`,
+/// with `index.json` naming them: what a page opens instead of generating them (the docs
+/// viewer's site, a container's `--samples`).
+fn samples(args: Args) -> Result<(), String> {
+    let a = args.positional(1)?;
+    let dir = PathBuf::from(&a[0]);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut written = Vec::new();
+    let mut write = |id: &str, py: &Pyramid| -> Result<(), String> {
+        let out = dir.join(format!("{id}.ome.zarr"));
+        if out.exists() {
+            std::fs::remove_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+        }
+        let (d, h, w) = (py.depth(), py.height(), py.width());
+        let options = lucem_io::WriterOptions { name: py.name.clone(), channels: py.channels.iter().map(|c| c.label.clone()).collect(), shape: [d, h, w], chunks: [d.min(32), 256.min(h), 256.min(w)], pixel_size_um: py.pixel_size_um, z_spacing_um: py.z_spacing_um };
+        let chunks = options.chunks;
+        let writer = lucem_io::ZarrWriter::create::<f32>(&out, options).map_err(|e| e.to_string())?;
+        for b in lucem_core::tiling::schedule([d, h, w], chunks, [0; 3]) {
+            for c in 0..py.channels.len() {
+                let values = py.read_block(0, c, b.origin, b.size).map_err(|e| e.to_string())?;
+                writer.write(c, b.origin, b.size, &values).map_err(|e| e.to_string())?;
+            }
+        }
+        writer.finish::<f32>().map_err(|e| e.to_string())?;
+        written.push(format!("{id}.ome.zarr"));
+        eprintln!("wrote {}", out.display());
+        Ok(())
+    };
+    write("sample-volume", &lucem_io::sample_volume(256, 128).map_err(|e| e.to_string())?)?;
+    for kind in lucem_io::phantoms::PhantomKind::ALL {
+        let mut img = lucem_io::phantoms::generate_phantom(*kind, 2048, 2048);
+        img.name = kind.title().to_string();
+        write(&kind.id(), &Pyramid::from_loaded(img))?;
+    }
+    std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&written).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn sample(mut args: Args) -> Result<(), String> {
     let size = args.number("--size")?.unwrap_or(256);
     let depth = args.number("--depth")?;
@@ -299,6 +339,8 @@ fn serve(mut args: Args) -> Result<(), String> {
     let web_bind = args.take_value("--web-bind")?.unwrap_or_else(|| "127.0.0.1:8443".into());
     let web_plain = args.take_flag("--web-plain-http");
     let tile_cache_mib = args.number("--web-cache-mib")?.unwrap_or(lucem_stream::web::DEFAULT_TILE_CACHE_MIB);
+    // The app's samples for pages (`lucem samples <dir>`): opened as files, never generated there
+    let samples_dir = args.take_value("--samples")?.map(PathBuf::from);
     let runtime_name = args.take_value("--runtime")?;
     args.positional(0)?;
     let web_files = match (&certificate, &key) {
@@ -340,7 +382,7 @@ fn serve(mut args: Args) -> Result<(), String> {
                     (None, false) if web_addr.ip().is_loopback() => lucem_stream::WebTls::Plain,
                     (None, false) => lucem_stream::WebTls::Authority,
                 };
-                let options = lucem_stream::WebOptions { bind: web_addr, web_root: Some(root), tls, names: pair_names.clone(), server_name: computer_name(), runtime, tile_cache_mib };
+                let options = lucem_stream::WebOptions { bind: web_addr, web_root: Some(root), tls, names: pair_names.clone(), server_name: computer_name(), runtime, samples: samples_dir, tile_cache_mib };
                 let server = lucem_stream::WebServer::bind(options, authority.clone(), Path::new(&data), plugins.clone(), processor).await.map_err(|e| format!("--web: {e}"))?;
                 let scheme = if server.is_tls() { "https" } else { "http" };
                 let at = server.local_addr().map_err(|e| e.to_string())?;

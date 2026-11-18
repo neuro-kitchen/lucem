@@ -55,6 +55,9 @@ lucem-stream.workspace = true
 lucem-stream = { workspace = true, default-features = false, features = ["web"] }
 # The session kept in the browser's storage between reloads
 web-sys = { workspace = true, features = ["Window", "Storage"] }
+js-sys.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
 
 [dev-dependencies]
 # Headless UI tests (`#[gpui_kit::test]`)

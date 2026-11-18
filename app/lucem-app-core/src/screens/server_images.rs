@@ -99,8 +99,8 @@ impl Render for ServerImages {
                     .border_1()
                     .border_color(color::border())
                     .bg(color::raised())
-                    .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Open an image of the server"))
-                    .child(div().text_sm().text_color(muted).child("The images under its data folder (OME-Zarr containers, TIFF): they stay on the server; the page reads their tiles."))
+                    .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Open an image"))
+                    .child(div().text_sm().text_color(muted).child("On a server: the images under its data folder; in this browser alone: the ones among the files you picked. Nothing is uploaded: tiles are read where the image is."))
                     .child(div().id("server-images-list").flex_1().overflow_y_scroll().child(list))
                     .child(h_flex().justify_end().child(Button::new("server-images-close").outline().small().label("Close").on_click(move |_, w, cx| close(w, cx)))),
             )

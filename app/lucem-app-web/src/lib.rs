@@ -23,6 +23,8 @@ use wasm_bindgen::prelude::*;
 
 /// The font the page brings (a browser gives it none).
 const FONT: &str = "Adwaita Sans";
+/// The engine worker's script, next to the page (built by build.sh into dist/engine/).
+const ENGINE_SCRIPT: &str = "./engine/engine-worker.js";
 /// Where the page keeps its token (from pairing with the server).
 const TOKEN_KEY: &str = "lucem-token";
 
@@ -198,7 +200,15 @@ pub fn start() {
                     }
                     Err(e) => format!("Not connected to the server: {e}"),
                 },
-                Ok(None) => "This page shows images from lucem serve --web: open it from there".to_string(),
+                // No server (the docs viewer): the page's own engine reads the files the user picks
+                Ok(None) => match web_client::start_worker(ENGINE_SCRIPT).await {
+                    Ok((link, why)) => {
+                        lucem_app_core::data::remote::set_page_link(link);
+                        let processing = if why.is_empty() { "processing in this browser".to_string() } else { why };
+                        format!("Runs in this browser: Open image… picks a folder or files (read here, never uploaded); {processing}")
+                    }
+                    Err(e) => format!("The page's engine did not start: {e}"),
+                },
                 Err(e) => format!("The page could not ask its server: {e}"),
             };
             let _ = s.update(cx, |s, cx| s.set_status(said, cx));
