@@ -31,10 +31,13 @@ USAGE
               [--web DIST [--web-bind ADDR] [--web-plain-http] [--web-cache-mib N (512)] [--samples DIR] [--runtime wgpu|cuda|cpu]]
               [--pair] [--certificate FILE --private-key FILE]
                                          Serve the images under DIR to enrolled clients
-                                         (--pair: show a pairing code on the terminal at start)
-  lucem clients pair [--control] [--out FILE]            (--auth DIR)
-                                         A one-time code to pair a computer (10 minutes), shown
-                                         on the terminal (--out: a file only you can read)
+                                         (--pair: show a pairing code on the terminal at start;
+                                         never in a log: with no terminal, how to get one)
+  lucem clients pair [--control] [--out FILE] [--page URL]  (--auth DIR)
+                                         A one-time code to pair a computer or a browser (10
+                                         minutes), shown on the terminal (--out: a file only you
+                                         can read); --page (or LUCEM_PAGE_URL): the page's
+                                         sign-in link too
   lucem clients codes [--cancel ID|all]                  (--auth DIR)
                                          The live pairing codes (no secrets); cancel them
   lucem clients enroll <name> [--control] --out FILE|-   (--auth DIR)
@@ -331,9 +334,9 @@ fn serve(mut args: Args) -> Result<(), String> {
     let authority = Arc::new(Authority::open_or_create(&dir).map_err(|e| e.to_string())?);
     let tls = server_config_with_clients(&authority, &identity, anonymous).map_err(|e| e.to_string())?;
     // No pairing code unless asked for: a code is a secret, and one made at every start would be
-    // a live secret nobody asked for. `--pair` shows one on the terminal (never in a log).
-    // A pairing code is a secret: shown on the terminal when there is one; in the log only when
-    // asked for (--pair: a container's log, as dsp-kitchen's image does)
+    // a live secret nobody asked for. `--pair` shows one on the terminal, and only there: with no
+    // terminal (a container) the server says how to get one (`lucem clients pair` on a terminal),
+    // so no code, nor the page link carrying one, ever reaches a log
     let terminal = Terminal::open().ok();
     runtime()?.block_on(async move {
         let plugins: Vec<Arc<dyn lucem_stream::plugin::ServerPlugin>> = vec![Arc::new(HistPlugin::default()), Arc::new(web::PipelinePlugin::default())];
@@ -370,7 +373,9 @@ fn serve(mut args: Args) -> Result<(), String> {
         // a log of it): opening it signs the browser in, nothing to type. Made when there is a
         // terminal to show it on, or when asked for (--pair)
         let page_link = web.as_ref().and_then(|w| w.local_addr().ok().map(|a| (w.is_tls(), a)));
-        if pair_now || (terminal.is_some() && page_link.is_some()) {
+        if (pair_now || page_link.is_some()) && terminal.is_none() {
+            eprintln!("pair a computer or a browser: `lucem clients pair` on a terminal (in a container: podman exec -it <container> lucem clients pair): the code and the page's sign-in link are shown there, never in a log");
+        } else if pair_now || page_link.is_some() {
             let code = authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?;
             let minutes = lucem_stream::pairing::CODE_MINUTES;
             let mut text = format!("pair a computer (read only, {minutes} minutes, once): {addr}  code {}\n  or: lucem pair {addr} {}", code.display(), code.display());
@@ -378,9 +383,8 @@ fn serve(mut args: Args) -> Result<(), String> {
                 let host = if at.ip().is_loopback() || at.ip().is_unspecified() { format!("localhost:{}", at.port()) } else { at.to_string() };
                 text.push_str(&format!("\nopen the page (signs this browser in, once, {minutes} minutes): {}://{host}/#pair={}", if tls { "https" } else { "http" }, code.display()));
             }
-            match terminal {
-                Some(mut t) => t.show(&text)?,
-                None => eprintln!("{text}"),
+            if let Some(mut t) = terminal {
+                t.show(&text)?;
             }
         } else {
             eprintln!("pair a computer or a browser: `lucem clients pair` (in a container: podman exec -it <container> lucem clients pair)");
@@ -426,13 +430,22 @@ fn clients(mut args: Args) -> Result<(), String> {
         "pair" => {
             let permission = if args.take_flag("--control") { Permission::Control } else { Permission::Read };
             let out = args.take_value("--out")?;
+            // The page's address, for its sign-in link (`<page>/#pair=<code>`): a container sets
+            // LUCEM_PAGE_URL to where its page is published
+            let page = args.take_value("--page")?.or_else(|| std::env::var("LUCEM_PAGE_URL").ok()).filter(|p| !p.trim().is_empty());
             args.positional(0)?;
             // Shown on the terminal itself, never on standard output: a redirect, a pipe or a log
             // never holds it. A script takes it from a file only its owner can read (`--out`).
             let mut terminal = if out.is_some() { None } else { Some(Terminal::open().map_err(|e| format!("{e}; or pass --out FILE for a script (written readable by you only)"))?) };
             let code = authority.new_pairing_code(permission).map_err(|e| e.to_string())?;
             match (&mut terminal, &out) {
-                (Some(t), _) => t.show(&code.display())?,
+                (Some(t), _) => {
+                    let mut text = code.display();
+                    if let Some(page) = &page {
+                        text.push_str(&format!("\n  or open the page (signs this browser in, once): {}/#pair={}", page.trim_end_matches('/'), code.display()));
+                    }
+                    t.show(&text)?
+                }
                 (None, Some(path)) => {
                     lucem_stream::pairing::save_code(Path::new(path), &code).map_err(|e| format!("{path}: {e}"))?;
                     eprintln!("wrote the code to {path} (readable by you only; remove it once used)");

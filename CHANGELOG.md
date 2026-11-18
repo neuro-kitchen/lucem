@@ -5,6 +5,14 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+### Changed
+
+- **A pairing code never reaches a log.** `lucem serve` shows one only on a terminal; with none (a
+  container) it says how to get one: `podman exec -it <container> lucem clients pair`, which now
+  also shows the page's sign-in link (`--page URL`, or `LUCEM_PAGE_URL`, set to
+  `http://localhost:8443` in the image). Signing a browser in to a container is now that one
+  command instead of reading the container's log.
+
 ## [0.0.3] - 2026-11-18
 
 lucem in the browser, two ways: **the docs viewer** (neuro-kitchen.github.io/lucem/viewer/,

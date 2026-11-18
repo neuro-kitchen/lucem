@@ -17,7 +17,8 @@
 # Build from the repository root (the build context is the whole workspace):
 #   podman build -f deploy/Containerfile --ignorefile deploy/.containerignore --target nvidia -t lucem-serve:nvidia .
 # The page must be built first (it goes into every target): app/lucem-app-web/build.sh
-# Run (images under ./data; the page at http://localhost:8443, the pairing code in the log):
+# Run (images under ./data; the page at http://localhost:8443; to sign a browser in, a code and
+# its link on your terminal: podman exec -it <container> lucem clients pair):
 #   podman run --rm -p 50051:50051/udp -p 127.0.0.1:8443:8443/tcp -p 127.0.0.1:8443:8443/udp \
 #     -v ./data:/data:Z --device nvidia.com/gpu=all lucem-serve:nvidia
 
@@ -83,7 +84,10 @@ ENTRYPOINT ["lucem"]
 ENV LUCEM_SERVE_AUTH_DIR=/data/.lucem-auth
 ENV LUCEM_SERVE_DATA=/data
 # Listen on every interface of the container; only enrolled clients and paired pages get in.
-# --pair prints a one-time pairing code at start (`podman logs`), for a browser or a computer
+# A pairing code never reaches the log: --pair says how to get one (`lucem clients pair` on a
+# terminal: podman exec -it <container> lucem clients pair), which also shows the page's sign-in
+# link, made from LUCEM_PAGE_URL (where the page is published; change it with -e)
+ENV LUCEM_PAGE_URL=http://localhost:8443
 CMD ["serve", "--bind", "0.0.0.0:50051", "--pair", "--web", "/usr/share/lucem/web", "--web-bind", "0.0.0.0:8443", "--web-plain-http", "--samples", "/usr/share/lucem/samples"]
 
 # NVIDIA: CUDA and Vulkan. The host's driver is passed in by the NVIDIA Container Toolkit (CDI); the

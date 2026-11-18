@@ -69,8 +69,14 @@ podman run --rm -p 8443:8443/tcp -p 8443:8443/udp -p 50051:50051/udp --device nv
   --security-opt=label=disable -v ~/lucem-data:/data:Z ghcr.io/neuro-kitchen/lucem:latest
 ```
 
-The server prints a sign-in link (`http://127.0.0.1:8443/#pair=…`); open it and the page pairs
-itself. It lists the server's images (and the samples), reads their tiles over WebTransport
+To sign a browser in, ask for a code on your terminal (never in the log):
+
+```bash
+podman exec -it <container> lucem clients pair
+```
+
+It shows the code and a sign-in link (`http://localhost:8443/#pair=…`); open the link and the
+page pairs itself. It lists the server's images (and the samples), reads their tiles over WebTransport
 (WebSocket where a browser has none), and runs processing steps and histology on the server's
 GPU: the page only draws. On another computer, put the server behind HTTPS (a reverse proxy) and
 open its address; the page asks for the pairing code instead.
