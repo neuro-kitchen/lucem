@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod engine;
 pub mod error;
 pub mod pairing;
 pub mod plugin;
