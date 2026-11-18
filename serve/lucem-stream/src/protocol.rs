@@ -24,6 +24,8 @@ pub enum Request {
     Tile { path: String, level: usize, channel: usize, z: usize, tx: usize, ty: usize },
     /// Pairing a computer ([`crate::pairing`]): the rest of the exchange follows on the stream.
     Pair { hello: crate::pairing::PairHello },
+    /// A call to one of the server's plugins ([`crate::plugin`]): its id, the method, a JSON body.
+    Plugin { plugin: String, method: String, body: serde_json::Value },
 }
 
 /// One image's description.
@@ -46,6 +48,8 @@ pub enum Response {
     /// The tile's values follow.
     Tile { width: usize, height: usize },
     Error { reason: String },
+    /// A plugin's answer.
+    Plugin { body: serde_json::Value },
 }
 
 /// A tile as received.

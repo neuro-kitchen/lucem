@@ -9,6 +9,7 @@ pub mod auth;
 pub mod client;
 pub mod error;
 pub mod pairing;
+pub mod plugin;
 pub mod protocol;
 pub mod server;
 pub mod tls;

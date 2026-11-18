@@ -41,12 +41,14 @@ pub struct Server {
     anonymous: bool,
     /// The names in the server's certificate, given to a computer that pairs.
     names: Vec<String>,
+    /// Its plugins ([`crate::plugin`]).
+    plugins: Vec<Arc<dyn crate::plugin::ServerPlugin>>,
 }
 
 impl Server {
     /// Listens on `addr` (UDP).
     pub fn bind(addr: SocketAddr, config: quinn::ServerConfig) -> StreamResult<Self> {
-        Ok(Self { endpoint: quinn::Endpoint::server(config, addr)?, max_connections: DEFAULT_MAX_CONNECTIONS, authority: None, anonymous: false, names: Vec::new() })
+        Ok(Self { endpoint: quinn::Endpoint::server(config, addr)?, max_connections: DEFAULT_MAX_CONNECTIONS, authority: None, anonymous: false, names: Vec::new(), plugins: Vec::new() })
     }
 
     /// Checks every client's certificate against `authority`'s registry after the handshake.
@@ -69,6 +71,12 @@ impl Server {
     }
 
     /// At most `n` clients at once (at least one).
+    /// Answers calls to `plugins` (domain services: histology, models), by their ids.
+    pub fn with_plugins(mut self, plugins: Vec<Arc<dyn crate::plugin::ServerPlugin>>) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
     pub fn with_max_connections(mut self, n: usize) -> Self {
         self.max_connections = n.max(1);
         self
@@ -131,16 +139,17 @@ impl Server {
         let root = options.data.canonicalize()?;
         let images = Arc::new(Images { root, open: Mutex::new((HashMap::new(), VecDeque::new())) });
         let names = Arc::new(self.names.clone());
+        let plugins = Arc::new(self.plugins.clone());
         while let Some((connection, peer)) = self.accept().await {
             tracing::info!("client {:?} connected from {}", peer.name, connection.remote_address());
             let images = images.clone();
-            let (authority, names, peer) = (self.authority.clone(), names.clone(), Arc::new(peer));
+            let (authority, names, peer, plugins) = (self.authority.clone(), names.clone(), Arc::new(peer), plugins.clone());
             tokio::spawn(async move {
                 loop {
                     let Ok((send, recv)) = connection.accept_bi().await else { break };
-                    let (images, authority, names, peer) = (images.clone(), authority.clone(), names.clone(), peer.clone());
+                    let (images, authority, names, peer, plugins) = (images.clone(), authority.clone(), names.clone(), peer.clone(), plugins.clone());
                     tokio::spawn(async move {
-                        if let Err(e) = answer(send, recv, images, authority.as_deref(), &names, &peer).await {
+                        if let Err(e) = answer(send, recv, images, authority.as_deref(), &names, &peer, plugins).await {
                             tracing::debug!("request failed: {e}");
                         }
                     });
@@ -236,7 +245,15 @@ fn describe(p: &Pyramid) -> ImageInfo {
     }
 }
 
-async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images: Arc<Images>, authority: Option<&Authority>, names: &[String], peer: &Peer) -> StreamResult<()> {
+async fn answer(
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    images: Arc<Images>,
+    authority: Option<&Authority>,
+    names: &[String],
+    peer: &Peer,
+    plugins: Arc<Vec<Arc<dyn crate::plugin::ServerPlugin>>>,
+) -> StreamResult<()> {
     let request: Request = read_message(&mut recv).await?;
     let request = match (request, authority) {
         (Request::Pair { hello }, Some(authority)) => {
@@ -256,7 +273,8 @@ async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images
         }
         (request, _) => request,
     };
-    let result = tokio::task::spawn_blocking(move || work(&images, request)).await.map_err(StreamError::protocol)?;
+    let context = crate::plugin::PluginContext { root: images.root.clone(), peer: peer.name.clone(), may_write: peer.permission == crate::auth::Permission::Control };
+    let result = tokio::task::spawn_blocking(move || work(&images, request, &plugins, &context)).await.map_err(StreamError::protocol)?;
     match result {
         Ok((response, payload)) => {
             write_message(&mut send, &response).await?;
@@ -272,8 +290,12 @@ async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images
     Ok(())
 }
 
-fn work(images: &Images, request: Request) -> Result<(Response, Option<Vec<f32>>), String> {
+fn work(images: &Images, request: Request, plugins: &[Arc<dyn crate::plugin::ServerPlugin>], context: &crate::plugin::PluginContext) -> Result<(Response, Option<Vec<f32>>), String> {
     Ok(match request {
+        Request::Plugin { plugin, method, body } => {
+            let p = plugins.iter().find(|p| p.id() == plugin).ok_or_else(|| format!("this server has no plugin {plugin:?}"))?;
+            (Response::Plugin { body: p.call(&method, body, context)? }, None)
+        }
         Request::Pair { .. } => return Err("pairing is answered before this".into()),
         Request::List => (Response::Images { paths: images.list() }, None),
         Request::Info { path } => (Response::Info { info: describe(images.open(&path)?.as_ref()) }, None),
@@ -372,6 +394,46 @@ mod tests {
             s.list().await
         };
         assert!(denied.await.is_err(), "a revoked client is refused");
+        fs::remove_dir_all(&data).unwrap();
+        fs::remove_dir_all(&auth_dir).unwrap();
+    }
+
+    /// A plugin answers its calls with what it may use of the server (who calls, whether it may
+    /// write, paths under the data folder only); an unknown plugin is refused.
+    #[tokio::test]
+    async fn plugins_answer_their_calls() {
+        struct Echo;
+        impl crate::plugin::ServerPlugin for Echo {
+            fn id(&self) -> &'static str {
+                "echo"
+            }
+            fn call(&self, method: &str, body: serde_json::Value, context: &crate::plugin::PluginContext) -> Result<serde_json::Value, String> {
+                if method == "path" {
+                    let rel = body.as_str().unwrap_or_default();
+                    return context.resolve(rel).map(|p| serde_json::json!(p.starts_with(&context.root)));
+                }
+                Ok(serde_json::json!({"method": method, "body": body, "peer": context.peer, "may_write": context.may_write}))
+            }
+        }
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let data = temp("plugin-data");
+        let auth_dir = temp("plugin-auth");
+        let authority = Arc::new(Authority::open_or_create(&auth_dir.join("a")).unwrap());
+        let tls = server_config_with_clients(&authority, &ServerIdentity::SelfSigned { names: vec!["localhost".into()] }, false).unwrap();
+        let server = Server::bind("127.0.0.1:0".parse().unwrap(), tls.config).unwrap().with_authority(authority.clone()).with_plugins(vec![Arc::new(Echo)]);
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(server.run(ServeOptions { data: data.clone() }));
+        let file = auth_dir.join("bob.pem");
+        authority.enroll("bob", Permission::Read).unwrap().write(&file).unwrap();
+        let identity = crate::auth::ClientIdentity::from_file(&file).unwrap();
+        let config = client_config_with(&ServerTrust::from_identity(&identity), Some(&identity)).unwrap();
+        let session = Session::connect(addr, "localhost", config).await.unwrap();
+        let answer = session.plugin_call("echo", "hello", serde_json::json!({"x": 1})).await.unwrap();
+        assert_eq!(answer, serde_json::json!({"method": "hello", "body": {"x": 1}, "peer": "bob", "may_write": false}));
+        assert_eq!(session.plugin_call("echo", "path", serde_json::json!("a/b.tif")).await.unwrap(), serde_json::json!(true));
+        assert!(session.plugin_call("echo", "path", serde_json::json!("../x")).await.is_err(), "outside the data folder");
+        assert!(session.plugin_call("nothing", "x", serde_json::Value::Null).await.is_err(), "no such plugin");
+        session.close();
         fs::remove_dir_all(&data).unwrap();
         fs::remove_dir_all(&auth_dir).unwrap();
     }
