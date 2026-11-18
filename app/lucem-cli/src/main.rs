@@ -294,7 +294,7 @@ fn serve(mut args: Args) -> Result<(), String> {
     // a live secret nobody asked for. `--pair` shows one on the terminal (never in a log).
     let terminal = if pair_now { Some(Terminal::open().map_err(|e| format!("--pair: {e}"))?) } else { None };
     runtime()?.block_on(async move {
-        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority.clone()).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max);
+        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority.clone()).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max).with_plugins(vec![std::sync::Arc::new(HistPlugin::default())]);
         eprintln!("serving {data} on {addr} to paired computers");
         match terminal {
             Some(mut t) => {
@@ -481,4 +481,20 @@ fn fetch(mut args: Args) -> Result<(), String> {
         session.close();
         Ok(())
     })
+}
+
+/// Histology computed by the server for its clients (pages): `lucem_hist::service` as the
+/// server's `hist` plugin.
+#[derive(Default)]
+struct HistPlugin(lucem_hist::service::Service);
+
+impl lucem_stream::plugin::ServerPlugin for HistPlugin {
+    fn id(&self) -> &'static str {
+        lucem_hist::service::PLUGIN
+    }
+
+    fn call(&self, method: &str, body: serde_json::Value, context: &lucem_stream::plugin::PluginContext) -> Result<serde_json::Value, String> {
+        let caller = lucem_hist::service::Caller { name: &context.peer, may_write: context.may_write };
+        self.0.call(method, body, &|p| context.resolve(p), caller)
+    }
 }

@@ -16,6 +16,7 @@
 //! | [`slide`] | whole regions tile by tile (overlap; each cell once, by the tile whose core holds it), inside a drawn region; brightfield or fluorescence input |
 //! | [`superpixel`] | SLIC superpixels as tile objects with their measurements |
 //! | [`export`] | measurement tables (TSV / CSV), region summaries, GeoJSON |
+//! | [`service`] | the steps and their results by method, as JSON: what a server answers its pages with (its `hist` plugin) |
 //! | [`models`] | histology models as plugins (`plugins/ml/lucem-ml-<family>`): the families, their tasks and licences |
 //!
 //! Coordinates of objects are level-0 pixels of the slide; lengths and areas in measurements are
@@ -38,6 +39,7 @@ pub mod output;
 pub mod pixel;
 pub mod polygon;
 pub mod raster;
+pub mod service;
 pub mod session;
 pub mod slide;
 pub mod stains;
