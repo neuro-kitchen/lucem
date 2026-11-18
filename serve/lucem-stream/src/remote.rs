@@ -13,17 +13,16 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lucem_io::{ChannelInfo, LevelInfo, Pyramid, TileSource};
+use lucem_io::{Pyramid, TileSource};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::ClientIdentity;
 use crate::client::Session;
 use crate::error::{StreamError, StreamResult};
+pub use crate::protocol::{remote_name, split_remote, REMOTE_SCHEME};
 use crate::protocol::ImageInfo;
 use crate::tls::{client_config_with, ServerTrust};
 
-/// How a served image's name starts.
-pub const REMOTE_SCHEME: &str = "lucem://";
 
 /// Where paired servers' identities live: `$XDG_CONFIG_HOME/lucem/servers` (else
 /// `~/.config/lucem/servers`).
@@ -91,17 +90,7 @@ impl PairedServer {
     }
 }
 
-/// Splits `lucem://<addr>/<path>` into the address and the path.
-pub fn split_remote(name: &str) -> Option<(&str, &str)> {
-    let rest = name.strip_prefix(REMOTE_SCHEME)?;
-    let (addr, path) = rest.split_once('/')?;
-    (!addr.is_empty() && !path.is_empty()).then_some((addr, path))
-}
 
-/// A served image's name.
-pub fn remote_name(addr: &str, path: &str) -> String {
-    format!("{REMOTE_SCHEME}{addr}/{path}")
-}
 
 /// A connection to a paired server, usable from any thread that is not running async tasks of
 /// its own (the app's background threads, the reader's thread pool).
@@ -176,33 +165,10 @@ fn resolve(addr: &str) -> StreamResult<SocketAddr> {
 
 /// The pyramid a server describes, its tiles read through `remote`.
 fn pyramid_of(remote: Arc<Remote>, path: &str, info: &ImageInfo) -> StreamResult<Pyramid> {
-    let Some(first) = info.levels.first() else { return Err(StreamError::protocol("the image has no levels")) };
-    let (d0, w0) = (first[0].max(1) as f64, first[2].max(1) as f64);
-    let levels = info
-        .levels
-        .iter()
-        .enumerate()
-        .map(|(i, &[depth, height, width, tile_d, tile_h, tile_w])| LevelInfo {
-            path: format!("{i}"),
-            width,
-            height,
-            tile_w,
-            tile_h,
-            downsample: w0 / width.max(1) as f64,
-            depth,
-            tile_d: tile_d.max(1),
-            z_downsample: d0 / depth.max(1) as f64,
-        })
-        .collect();
-    let channels = info
-        .channels
-        .iter()
-        .enumerate()
-        .map(|(i, label)| match info.display.get(i) {
-            Some(d) => ChannelInfo { label: label.clone(), color: d.color, window: d.window, range: d.range, active: d.active },
-            None => ChannelInfo { label: label.clone(), color: [255, 255, 255], window: (0.0, 65535.0), range: (0.0, 65535.0), active: true },
-        })
-        .collect();
+    if info.levels.is_empty() {
+        return Err(StreamError::protocol("the image has no levels"));
+    }
+    let (levels, channels) = crate::protocol::pyramid_parts(info);
     let name = remote_name(&remote.addr, path);
     let source = Arc::new(RemoteTiles { remote, path: path.to_string() });
     Pyramid::from_source(info.name.clone(), Some(PathBuf::from(name)), levels, channels, info.pixel_size_um, info.z_spacing_um, info.dtype.clone(), source).map_err(|e| StreamError::protocol(e.to_string()))

@@ -33,6 +33,8 @@ members = [
     "app/lucem-mcp",
     "app/lucem-app-core",
     "app/lucem-app",
+    # The app in a browser tab (a client of `lucem serve --web`)
+    "app/lucem-app-web",
     # Plugins: ml/ programs the app and the command line run (one per model family, never
     # linked, so ONNX Runtime and model licences stay out of lucem itself)
     "plugins/ml/lucem-ml-sam",
@@ -60,7 +62,7 @@ lucem-ops = { path = "crates/lucem-ops", version = "0.0.2", default-features = f
 lucem-ml = { path = "crates/lucem-ml", version = "0.0.2" }
 lucem-hist = { path = "histology/lucem-hist", version = "0.0.2", default-features = false }
 lucem-session = { path = "engine/lucem-session", version = "0.0.2" }
-lucem-table = { path = "crates/lucem-table", version = "0.0.2" }
+lucem-table = { path = "crates/lucem-table", version = "0.0.2", default-features = false }
 lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.0.2" }
 lucem-view = { path = "serve/lucem-view", version = "0.0.2" }
 lucem-stream = { path = "serve/lucem-stream", version = "0.0.2" }
@@ -114,6 +116,27 @@ getrandom = "0.4.3"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1.16.0"
 sha2 = "0.11.1"
+# Pages: WebTransport (HTTP/3 over QUIC, on quinn) first, a WebSocket where UDP does not get
+# through; the page's files over HTTP(S); protobuf on the wire (versions as dsp-kitchen's)
+wtransport = "0.7.2"
+prost = "0.14.6"
+prost-build = "0.14.6"
+protox = "0.10.0"
+hyper = { version = "1.12.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+http-body-util = "0.1.5"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+futures-channel = { version = "0.3.31", features = ["sink"] }
+# The page (WebAssembly)
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+wasm_thread = { version = "0.3.3", features = ["es_modules"] }
+web-time = "1.1.0"
+log = "0.4"
 # Machine learning plugins: ONNX Runtime loaded at run time (no download at build, nothing in the
 # app); HTTP for verified weight downloads (lucem-hub)
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std", "api-31", "cuda"] }
@@ -138,6 +161,14 @@ tokio = { version = "1.54.1", features = ["full"] }
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+# Profiling: the app's and the server's spans in Tracy (`--features tracy`)
+tracing-tracy = "0.12.0"
+# Codecs measured on lucem's own data (`lucem bench-codecs`): zstd (C) and ruzstd (its pure-Rust
+# decoder, what a page would use), LZ4, Pcodec (numeric sequences)
+zstd = "0.14.4"
+ruzstd = "0.9.1"
+lz4_flex = "0.14.2"
+pco = "1.1.0"
 # Background results into the UI; JSON Schema of the project document (for agents / MCP)
 async-channel = "2.5.0"
 schemars = "1.2.3"

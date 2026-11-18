@@ -20,6 +20,7 @@ use crate::commands::{self, Ctx};
 use crate::data::store::{AppEvent, Store, ViewRequest};
 use crate::navigation::actions::{ToggleSidebar, HELP};
 use crate::navigation::route::Workspace;
+#[cfg(not(target_family = "wasm"))]
 use crate::screens::analyze::AnalyzeView;
 use crate::screens::explore::ExploreView;
 use crate::screens::pipeline::PipelineView;
@@ -147,6 +148,7 @@ pub struct LucemApp {
     pub registry: Registry,
     pub explore: Entity<ExploreView>,
     pub pipeline: Entity<PipelineView>,
+    #[cfg(not(target_family = "wasm"))]
     pub analyze: Entity<AnalyzeView>,
     _subs: Vec<Subscription>,
 }
@@ -158,6 +160,7 @@ impl LucemApp {
         let pipeline = cx.new(|cx| PipelineView::new(store.clone(), window, cx));
         // Explore can dock the same Pipeline under its views
         let explore = cx.new(|cx| ExploreView::new(store.clone(), pipeline.clone(), window, cx));
+        #[cfg(not(target_family = "wasm"))]
         let analyze = cx.new(|cx| AnalyzeView::new(store.clone(), window, cx));
         // Model plugins are looked for once, in the background
         store.update(cx, |s, cx| s.scan_plugins(cx));
@@ -186,21 +189,30 @@ impl LucemApp {
             });
             toggle
         };
-        let ctx = Ctx { store: store.clone(), shell: shell_cell.clone(), pipeline: pipeline.downgrade(), analyze: analyze.downgrade(), toggle_help: help };
+        let ctx = Ctx {
+            store: store.clone(),
+            shell: shell_cell.clone(),
+            pipeline: pipeline.downgrade(),
+            #[cfg(not(target_family = "wasm"))]
+            analyze: analyze.downgrade(),
+            toggle_help: help,
+        };
         commands::register(&registry, &ctx);
         registry.extend(PipelineView::commands(pipeline.downgrade(), store.clone()));
         PipelineView::provide(&registry, store.clone());
-        registry.extend(AnalyzeView::commands(analyze.downgrade()));
-        AnalyzeView::provide(&registry, analyze.downgrade());
+        #[cfg(not(target_family = "wasm"))]
+        {
+            registry.extend(AnalyzeView::commands(analyze.downgrade()));
+            AnalyzeView::provide(&registry, analyze.downgrade());
+        }
         pipeline.update(cx, |p, _| p.set_registry(registry.clone()));
 
         let explore_body = cx.new(|cx| ExploreBody { store: store.clone(), explore: explore.clone(), _subs: vec![cx.subscribe(&store, |_, _, _: &AppEvent, cx| cx.notify())] });
         let workspace = |w: Workspace, view: gpui_kit::AnyView, menus| WorkspaceSpec::new(commands::workspace_id(w), w.title(), w.icon(), view).hint(w.hint()).menus(menus);
-        let workspaces = vec![
-            workspace(Workspace::Explore, explore_body.into(), commands::explore_menus()),
-            workspace(Workspace::Pipeline, pipeline.clone().into(), PipelineView::menu_specs()),
-            workspace(Workspace::Analyze, analyze.clone().into(), AnalyzeView::menu_specs()),
-        ];
+        #[allow(unused_mut)]
+        let mut workspaces = vec![workspace(Workspace::Explore, explore_body.into(), commands::explore_menus()), workspace(Workspace::Pipeline, pipeline.clone().into(), PipelineView::menu_specs())];
+        #[cfg(not(target_family = "wasm"))]
+        workspaces.push(workspace(Workspace::Analyze, analyze.clone().into(), AnalyzeView::menu_specs()));
         let settings_view = cx.new(|_| SettingsView::new(store.clone()));
         let sections = Section::ALL
             .into_iter()
@@ -260,7 +272,16 @@ impl LucemApp {
                 }
             }),
         ];
-        let this = Self { store, shell, registry, explore, pipeline, analyze, _subs: subs };
+        let this = Self {
+            store,
+            shell,
+            registry,
+            explore,
+            pipeline,
+            #[cfg(not(target_family = "wasm"))]
+            analyze,
+            _subs: subs,
+        };
         this.sync_shell(&AppEvent::Workspace, cx);
         this.sync_shell(&AppEvent::Status, cx);
         this

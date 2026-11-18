@@ -22,3 +22,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 lucem-core = { workspace = true, features = ["compute", "wgpu", "cuda", "cpu"] }
+
+# Polars on computers; a browser build has none (see lucem-table)
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+lucem-table = { workspace = true, features = ["polars"] }

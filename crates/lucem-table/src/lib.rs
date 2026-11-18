@@ -6,7 +6,10 @@
 //! Domain tables are built on it in their own crates (measurements in `lucem-hist`, analytics in
 //! `lucem-ops`).
 
+#[cfg(feature = "polars")]
 pub use polars;
+#[cfg(feature = "polars")]
 pub use polars::prelude;
 
+#[cfg(feature = "polars")]
 pub mod view;

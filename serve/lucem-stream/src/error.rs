@@ -9,16 +9,22 @@ pub enum StreamError {
     Io(#[from] std::io::Error),
     #[error("TLS: {0}")]
     Tls(String),
+    #[cfg(feature = "native")]
     #[error("connect: {0}")]
     Connect(#[from] quinn::ConnectError),
+    #[cfg(feature = "native")]
     #[error("connection: {0}")]
     Connection(#[from] quinn::ConnectionError),
+    #[cfg(feature = "native")]
     #[error("read: {0}")]
     Read(#[from] quinn::ReadExactError),
+    #[cfg(feature = "native")]
     #[error("read: {0}")]
     ReadToEnd(#[from] quinn::ReadToEndError),
+    #[cfg(feature = "native")]
     #[error("write: {0}")]
     Write(#[from] quinn::WriteError),
+    #[cfg(feature = "native")]
     #[error("stream closed: {0}")]
     Closed(#[from] quinn::ClosedStream),
     #[error("message of {len} bytes exceeds the {max}-byte limit")]
@@ -34,7 +40,7 @@ pub enum StreamError {
 }
 
 impl StreamError {
-    pub(crate) fn protocol(message: impl fmt::Display) -> Self {
+    pub fn protocol(message: impl fmt::Display) -> Self {
         Self::Protocol(message.to_string())
     }
 }

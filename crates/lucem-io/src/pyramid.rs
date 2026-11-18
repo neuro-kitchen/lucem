@@ -37,7 +37,8 @@ pub const MAX_ARRAY_ELEMENTS: u128 = 1 << 48;
 /// Most bytes one decoded chunk may hold.
 pub const MAX_CHUNK_BYTES: u128 = 1 << 31;
 /// Most elements of one read.
-pub const MAX_READ_ELEMENTS: usize = 1 << 34;
+/// (A 32-bit build, a browser page, has 4 GiB in all: 2^28 elements there.)
+pub const MAX_READ_ELEMENTS: usize = if usize::BITS >= 64 { (1u64 << 34) as usize } else { 1 << 28 };
 /// Most resolution levels a file may declare.
 pub const MAX_LEVELS: usize = 32;
 /// Decoded multi-plane chunks kept for repeated plane reads (bytes).
@@ -701,8 +702,16 @@ impl Pyramid {
         // The chunks under the region, read in parallel (each is its own file), then assembled
         let coords: Vec<(usize, usize)> = (y0 / l.tile_h..=(y1 - 1) / l.tile_h).flat_map(|ty| (x0 / l.tile_w..=(x1 - 1) / l.tile_w).map(move |tx| (tx, ty))).collect();
         let tiles: Vec<_> = {
-            use rayon::prelude::*;
-            coords.par_iter().map(|&(tx, ty)| self.read_tile_at(level, channel, z, tx, ty).map(|t| (tx, ty, t))).collect::<IoResult<Vec<_>>>()?
+            let read = |&(tx, ty): &(usize, usize)| self.read_tile_at(level, channel, z, tx, ty).map(|t| (tx, ty, t));
+            // A browser page reads in turn (rayon's pool does not start there)
+            #[cfg(not(target_family = "wasm"))]
+            let tiles = {
+                use rayon::prelude::*;
+                coords.par_iter().map(read).collect::<IoResult<Vec<_>>>()?
+            };
+            #[cfg(target_family = "wasm")]
+            let tiles = coords.iter().map(read).collect::<IoResult<Vec<_>>>()?;
+            tiles
         };
         for (tx, ty, t) in tiles {
             {

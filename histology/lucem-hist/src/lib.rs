@@ -35,6 +35,7 @@ pub mod intensity;
 pub mod models;
 pub mod multiplex;
 pub mod objects;
+#[cfg(not(target_family = "wasm"))]
 pub mod output;
 pub mod pixel;
 pub mod polygon;

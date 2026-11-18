@@ -11,7 +11,8 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -481,13 +482,13 @@ impl VolumeView {
             // The channels on the device, read and uploaded once per image and level
             // Volumes uploaded to a device used before a switch are not on this one
             {
-                let mut v = volumes.lock().map_err(|e| err(&e))?;
+                let mut v = crate::platform::lock(&volumes);
                 if v.generation != generation {
                     *v = DeviceVolumes { generation, ..Default::default() };
                 }
             }
             let image_key = (id.clone(), level);
-            let cached = volumes.lock().map_err(|e| err(&e))?.image.as_ref().filter(|(k, _)| *k == image_key).map(|(_, v)| v.clone());
+            let cached = crate::platform::lock(&volumes).image.as_ref().filter(|(k, _)| *k == image_key).map(|(_, v)| v.clone());
             let volume = match cached {
                 Some(v) => v,
                 None => {
@@ -496,19 +497,19 @@ impl VolumeView {
                         values.extend(py.read_block(level, c, [0, 0, 0], dims).map_err(|e| err(&e))?);
                     }
                     let v = Arc::new(DeviceArray::from_host(client, Shape::new([displays.len() * dims[0], dims[1], dims[2]]), values).map_err(|e| err(&e))?);
-                    volumes.lock().map_err(|e| err(&e))?.image = Some((image_key, v.clone()));
+                    crate::platform::lock(&volumes).image = Some((image_key, v.clone()));
                     v
                 }
             };
             // The annotation classes, rasterized again when the annotations change
             let labels_key = (id.clone(), level, rev);
-            let cached = volumes.lock().map_err(|e| err(&e))?.labels.as_ref().filter(|(k, _, _)| *k == labels_key).map(|(_, v, c)| (v.clone(), c.clone()));
+            let cached = crate::platform::lock(&volumes).labels.as_ref().filter(|(k, _, _)| *k == labels_key).map(|(_, v, c)| (v.clone(), c.clone()));
             let (labels, label_colors) = match cached {
                 Some(l) => l,
                 None => {
                     let (values, colors) = volume_labels(&anns, &classes, &l);
                     let v = if colors.is_empty() { None } else { Some(Arc::new(DeviceArray::from_host(client, Shape::new([colors.len() * dims[0], dims[1], dims[2]]), values).map_err(|e| err(&e))?)) };
-                    volumes.lock().map_err(|e| err(&e))?.labels = Some((labels_key, v.clone(), colors.clone()));
+                    crate::platform::lock(&volumes).labels = Some((labels_key, v.clone(), colors.clone()));
                     (v, colors)
                 }
             };

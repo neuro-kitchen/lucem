@@ -9,5 +9,10 @@ license.workspace = true
 repository.workspace = true
 publish = true
 
+[features]
+default = ["polars"]
+# Polars (data frames, the table view): off in a browser build (Polars does not build for wasm32)
+polars = ["dep:polars"]
+
 [dependencies]
-polars.workspace = true
+polars = { workspace = true, optional = true }

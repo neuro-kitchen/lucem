@@ -22,9 +22,12 @@ USAGE
                                          model plugin, on every usable runtime
   lucem run <spec.json> <image> <output> [--block N] [--runtime NAME]
                                          Run a pipeline over a whole image
+  lucem bench-codecs <image> [--level N (0)] [--tiles N (64)]
+                                         Ratio and speed of zstd, LZ4 and Pcodec on its tiles
   lucem sample <output.ome.zarr> [--size N] [--depth N]
                                          Write a synthetic image (a volume with --depth)
   lucem serve [--data DIR] [--bind ADDR] [--name HOST]... [--max-clients N] [--allow-anonymous]
+              [--web DIST [--web-bind ADDR] [--web-plain-http] [--web-cache-mib N (512)] [--runtime wgpu|cuda|cpu]]
               [--pair] [--certificate FILE --private-key FILE]
                                          Serve the images under DIR to enrolled clients
                                          (--pair: show a pairing code on the terminal at start)
@@ -50,9 +53,11 @@ USAGE
 ";
 
 mod autotune;
+mod bench;
 mod hist;
 mod ops;
 mod session;
+mod web;
 
 fn main() -> ExitCode {
     lucem_ml::legacy::adopt();
@@ -134,6 +139,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "autotune" => autotune::autotune(args),
         "run" => run_pipeline(args),
         "sample" => sample(args),
+        "bench-codecs" => bench_codecs(args),
         "serve" => serve(args),
         "clients" => clients(args),
         "fetch" => fetch(args),
@@ -232,6 +238,14 @@ fn run_pipeline(mut args: Args) -> Result<(), String> {
     Ok(())
 }
 
+fn bench_codecs(mut args: Args) -> Result<(), String> {
+    let level = args.number("--level")?.unwrap_or(0);
+    let tiles = args.number("--tiles")?.unwrap_or(64);
+    let a = args.positional(1)?;
+    print!("{}", bench::bench_codecs(Path::new(&a[0]), level, tiles)?);
+    Ok(())
+}
+
 fn sample(mut args: Args) -> Result<(), String> {
     let size = args.number("--size")?.unwrap_or(256);
     let depth = args.number("--depth")?;
@@ -280,7 +294,17 @@ fn serve(mut args: Args) -> Result<(), String> {
     let pair_now = args.take_flag("--pair");
     let certificate = args.take_value("--certificate")?;
     let key = args.take_value("--private-key")?;
+    // Browser pages: their files, WebTransport (UDP) and a WebSocket fallback on one port
+    let web_root = args.take_value("--web")?;
+    let web_bind = args.take_value("--web-bind")?.unwrap_or_else(|| "127.0.0.1:8443".into());
+    let web_plain = args.take_flag("--web-plain-http");
+    let tile_cache_mib = args.number("--web-cache-mib")?.unwrap_or(lucem_stream::web::DEFAULT_TILE_CACHE_MIB);
+    let runtime_name = args.take_value("--runtime")?;
     args.positional(0)?;
+    let web_files = match (&certificate, &key) {
+        (Some(c), Some(k)) => Some(ServerIdentity::Files { certificate_chain: c.into(), private_key: k.into() }),
+        _ => None,
+    };
     let pair_names = names.clone();
     let identity = match (certificate, key) {
         (Some(c), Some(k)) => ServerIdentity::Files { certificate_chain: c.into(), private_key: k.into() },
@@ -294,7 +318,35 @@ fn serve(mut args: Args) -> Result<(), String> {
     // a live secret nobody asked for. `--pair` shows one on the terminal (never in a log).
     let terminal = if pair_now { Some(Terminal::open().map_err(|e| format!("--pair: {e}"))?) } else { None };
     runtime()?.block_on(async move {
-        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority.clone()).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max).with_plugins(vec![std::sync::Arc::new(HistPlugin::default())]);
+        let plugins: Vec<Arc<dyn lucem_stream::plugin::ServerPlugin>> = vec![Arc::new(HistPlugin::default()), Arc::new(web::PipelinePlugin::default())];
+        let web = match web_root.as_deref().map(PathBuf::from) {
+            None => None,
+            Some(root) => {
+                let web_addr: std::net::SocketAddr = web_bind.parse().map_err(|e| format!("--web-bind {web_bind}: {e}"))?;
+                // Pipelines on the tiles pages ask for, on this server's device (pages only draw)
+                let target = lucem_mcp::work::target(runtime_name.as_deref())?;
+                let (processor, runtime) = match web::PipelineTiles::open(target) {
+                    Ok(p) => (Some(p.clone() as Arc<dyn lucem_stream::engine::TileProcessor>), p.runtime().to_string()),
+                    Err(e) => {
+                        eprintln!("pages: no processing on this server ({e})");
+                        (None, String::new())
+                    }
+                };
+                let tls = match (web_files, web_plain) {
+                    (Some(identity), _) => lucem_stream::WebTls::Files(identity),
+                    (None, true) => lucem_stream::WebTls::PlainOffLoopback,
+                    (None, false) if web_addr.ip().is_loopback() => lucem_stream::WebTls::Plain,
+                    (None, false) => lucem_stream::WebTls::Authority,
+                };
+                let options = lucem_stream::WebOptions { bind: web_addr, web_root: Some(root), tls, names: pair_names.clone(), server_name: computer_name(), runtime, tile_cache_mib };
+                let server = lucem_stream::WebServer::bind(options, authority.clone(), Path::new(&data), plugins.clone(), processor).await.map_err(|e| format!("--web: {e}"))?;
+                let scheme = if server.is_tls() { "https" } else { "http" };
+                let at = server.local_addr().map_err(|e| e.to_string())?;
+                eprintln!("pages: {scheme}://{at}/ (WebTransport on UDP {}, a WebSocket where UDP is blocked)", at.port());
+                Some(server)
+            }
+        };
+        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority.clone()).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max).with_plugins(plugins);
         eprintln!("serving {data} on {addr} to paired computers");
         match terminal {
             Some(mut t) => {
@@ -303,8 +355,15 @@ fn serve(mut args: Args) -> Result<(), String> {
             }
             None => eprintln!("pair a computer: `lucem clients pair` (in a container: podman exec -it <container> lucem clients pair)"),
         }
+        let pages = async move {
+            match web {
+                Some(w) => w.run().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             r = server.run(ServeOptions { data: PathBuf::from(&data) }) => r.map_err(|e| e.to_string()),
+            _ = pages => Ok(()),
             _ = shutdown() => { Ok(()) }
         }
     })

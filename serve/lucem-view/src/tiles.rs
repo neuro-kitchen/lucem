@@ -163,7 +163,11 @@ impl TileService {
         });
         for i in 0..threads.max(1) {
             let (shared, tx) = (shared.clone(), tx.clone());
+            #[cfg(not(target_family = "wasm"))]
             thread::Builder::new().name(format!("lucem-tiles-{i}")).spawn(move || worker(shared, tx)).expect("failed to spawn a tile worker");
+            // A page's workers: where the tiles wait for the server and are coloured
+            #[cfg(target_family = "wasm")]
+            wasm_thread::Builder::new().name(format!("lucem-tiles-{i}")).spawn(move || worker(shared, tx)).expect("failed to start a tile worker");
         }
         (Self { shared }, rx)
     }
@@ -302,13 +306,15 @@ fn worker(shared: Arc<Shared>, tx: async_channel::Sender<TileResult>) {
             Ok((w, h, bgra)) => TileResult::Ready(TileImage { key, rev, width: w, height: h, image: bgra_image(w, h, bgra) }),
             Err(e) => TileResult::Failed(key, e),
         };
-        if tx.send_blocking(result).is_err() {
+        // Unbounded: never waits (send_blocking does not exist in a browser build)
+        if tx.try_send(result).is_err() {
             return;
         }
     }
 }
 
 fn make_tile(shared: &Shared, key: TileKey, displays: &[ChannelDisplay]) -> Result<(usize, usize, Vec<u8>), String> {
+    let _span = tracing::trace_span!("tile", level = key.level, tx = key.tx, ty = key.ty).entered();
     let py = &shared.pyramid;
     let mut planes: Vec<(Arc<Vec<f32>>, ChannelDisplay)> = Vec::new();
     let (mut w, mut h) = (0, 0);
@@ -336,6 +342,7 @@ fn make_tile(shared: &Shared, key: TileKey, displays: &[ChannelDisplay]) -> Resu
         h = (l.height - key.ty * l.tile_h).min(l.tile_h);
     }
     let refs: Vec<(&[f32], ChannelDisplay)> = planes.iter().map(|(d, c)| (d.as_slice(), *c)).collect();
+    let _colour = tracing::trace_span!("tile.colour").entered();
     Ok((w, h, composite_bgra(&refs, w * h)))
 }
 

@@ -38,6 +38,13 @@ pub const CACHE_DIR_ENV: &str = "LUCEM_CACHE_DIR";
 /// A `cubecl.toml` or CubeCL's own environment variables still apply. Called by
 /// [`ComputeTarget::device`] and [`open_device`]; harmless to call again.
 pub fn configure_runtime() {
+    // A browser page has no files to cache kernels in: CubeCL's defaults
+    #[cfg(not(target_family = "wasm"))]
+    configure_runtime_files();
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn configure_runtime_files() {
     use cubecl::config::cache::CacheConfig;
     use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
     static ONCE: std::sync::Once = std::sync::Once::new();

@@ -35,3 +35,7 @@ serde_json.workspace = true
 schemars.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
+zstd.workspace = true
+ruzstd.workspace = true
+lz4_flex.workspace = true
+pco.workspace = true

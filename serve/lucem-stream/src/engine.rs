@@ -133,3 +133,52 @@ pub fn work(images: &Images, request: Request, plugins: &[Arc<dyn crate::plugin:
     })
 }
 
+
+/// Runs a pipeline on one tile on the server (a page asked for a processed tile): registered by
+/// the program that serves (`lucem serve`), which has the compute devices; this crate has none.
+pub trait TileProcessor: Send + Sync {
+    /// Tile `(tx, ty)` of plane `z` at `level` of `image`, processed by the pipeline in
+    /// `spec_json` (`lucem_pipeline::PipelineSpec`), its halo read around it: `(width, height,
+    /// values)`, the tile's size.
+    fn tile(&self, image: &Pyramid, spec_json: &str, level: usize, z: usize, tx: usize, ty: usize) -> Result<(usize, usize, Vec<f32>), String>;
+}
+
+/// The answer to a page's request (the browser protocol, [`crate::wire`]), as [`work`] answers a
+/// computer's: the same checks, the same images, the same plugins.
+pub fn answer_wire(images: &Images, plugins: &[Arc<dyn crate::plugin::ServerPlugin>], processor: Option<&dyn TileProcessor>, request: crate::wire::Request, context: &crate::plugin::PluginContext) -> crate::wire::Response {
+    use crate::wire::{request::Kind as Ask, response::Kind as Say};
+    let answer = || -> Result<Say, String> {
+        Ok(match request.kind.ok_or("an empty request")? {
+            Ask::List(_) => Say::Images(crate::wire::ImageList { paths: images.list() }),
+            Ask::Info(i) => Say::Info(crate::wire::info_to_wire(&describe(images.open(&i.path)?.as_ref()))),
+            Ask::Tile(t) => {
+                let p = images.open(&t.path)?;
+                let (level, channel, z, tx, ty) = (t.level as usize, t.channel as usize, t.z as usize, t.tx as usize, t.ty as usize);
+                if channel >= p.channels.len() {
+                    return Err(format!("no channel {channel}"));
+                }
+                match t.processing {
+                    None => {
+                        let tile = p.read_tile_at(level, channel, z, tx, ty).map_err(|e| e.to_string())?;
+                        Say::Tile(crate::wire::encode_tile(tile.width, tile.height, &tile.data, &p.dtype))
+                    }
+                    Some(processing) => {
+                        let processor = processor.ok_or("this server does not process tiles")?;
+                        let (w, h, values) = processor.tile(&p, &processing.spec_json, level, z, tx, ty)?;
+                        Say::Tile(crate::wire::encode_tile(w, h, &values, "float32"))
+                    }
+                }
+            }
+            Ask::Plugin(call) => {
+                let p = plugins.iter().find(|p| p.id() == call.plugin).ok_or_else(|| format!("this server has no plugin {:?}", call.plugin))?;
+                let body: serde_json::Value = if call.body.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&call.body).map_err(|e| format!("the call's body: {e}"))? };
+                let reply = p.call(&call.method, body, context)?;
+                Say::Plugin(crate::wire::PluginReply { body: serde_json::to_vec(&reply).map_err(|e| e.to_string())? })
+            }
+        })
+    };
+    match answer() {
+        Ok(kind) => crate::wire::Response { kind: Some(kind) },
+        Err(reason) => crate::wire::error(reason),
+    }
+}

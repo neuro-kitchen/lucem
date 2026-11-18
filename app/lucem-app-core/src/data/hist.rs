@@ -832,6 +832,14 @@ impl Store {
     /// `lucem/shapes.parquet` (GeoParquet), `lucem/provenance.json` (the session, the pipeline,
     /// the version).
     pub fn hist_export(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_family = "wasm")]
+        return self.hist_report(false, "Exporting is done by the desktop app or the server for now", cx);
+        #[cfg(not(target_family = "wasm"))]
+        self.hist_export_native(cx);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn hist_export_native(&mut self, cx: &mut Context<Self>) {
         let Some(img) = self.doc.active().cloned() else { return };
         let Some(p) = self.pyramids.get(&img.id).cloned() else { return };
         let Some(um) = p.pixel_size_um else { return self.hist_report(false, "Export needs the image's pixel size (µm)", cx) };

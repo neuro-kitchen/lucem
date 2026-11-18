@@ -1,0 +1,121 @@
+// lucem-stream's messages for browser pages, version 1.
+//
+// A page reaches `lucem serve --web` by WebTransport (HTTP/3 over QUIC, path /lucem) or, where
+// UDP does not get through, a WebSocket (path /ws). Who the page is (a token, or pairing with a
+// code) is said first, as JSON (crate::pair). Then:
+//
+//   WebTransport  one bidirectional stream per request: the client writes a 4-byte big-endian
+//                 length and the Request, the server answers the same way with the Response and
+//                 closes the stream. Closing the stream early cancels the request.
+//   WebSocket     binary frames: a 4-byte big-endian id the page chose, then the Request; each
+//                 answer is the same id, then the Response.
+//
+// Paths are relative to the server's data folder; anything outside it, hidden, or reached through
+// a link out of it is refused.
+
+syntax = "proto3";
+
+package lucem_stream.v1;
+
+message ListImages {}
+
+message GetInfo {
+  string path = 1;
+}
+
+// A pipeline to run on the tile on the server (lucem_pipeline::PipelineSpec as JSON: sources by
+// channel, nodes, the target). The tile's neighbourhood (the operators' halo) is read there.
+message Processing {
+  string spec_json = 1;
+}
+
+message GetTile {
+  string path = 1;
+  uint32 level = 2;
+  uint32 channel = 3;
+  uint32 z = 4;
+  uint32 tx = 5;
+  uint32 ty = 6;
+  // Absent: the stored values.
+  Processing processing = 7;
+}
+
+// A call to one of the server's plugins (`hist`, `pipeline`, …), its body and reply JSON.
+message PluginCall {
+  string plugin = 1;
+  string method = 2;
+  bytes body = 3;
+}
+
+message Request {
+  oneof kind {
+    ListImages list = 1;
+    GetInfo info = 2;
+    GetTile tile = 3;
+    PluginCall plugin = 4;
+  }
+}
+
+message ImageList {
+  repeated string paths = 1;
+}
+
+message Channel {
+  string label = 1;
+  // 0xRRGGBB
+  uint32 color = 2;
+  float window_low = 3;
+  float window_high = 4;
+  float range_low = 5;
+  float range_high = 6;
+  bool active = 7;
+}
+
+message Level {
+  uint32 depth = 1;
+  uint32 height = 2;
+  uint32 width = 3;
+  uint32 tile_d = 4;
+  uint32 tile_h = 5;
+  uint32 tile_w = 6;
+}
+
+message ImageInfo {
+  string name = 1;
+  string dtype = 2;
+  repeated Channel channels = 3;
+  optional double pixel_size_um = 4;
+  optional double z_spacing_um = 5;
+  // Finest first.
+  repeated Level levels = 6;
+}
+
+// How a tile's values are packed (little-endian): the stored type when it holds them exactly
+// (half the bytes of f32 for 16-bit images, a quarter for 8-bit), else f32.
+enum TileEncoding {
+  TILE_ENCODING_UNSPECIFIED = 0;
+  TILE_ENCODING_F32 = 1;
+  TILE_ENCODING_U16 = 2;
+  TILE_ENCODING_U8 = 3;
+}
+
+message Tile {
+  uint32 width = 1;
+  uint32 height = 2;
+  TileEncoding encoding = 3;
+  bytes values = 4;
+}
+
+message PluginReply {
+  bytes body = 1;
+}
+
+message Response {
+  oneof kind {
+    ImageList images = 1;
+    ImageInfo info = 2;
+    Tile tile = 3;
+    PluginReply plugin = 4;
+    string error = 5;
+  }
+}

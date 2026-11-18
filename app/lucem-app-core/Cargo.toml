@@ -18,19 +18,20 @@ gpui-kit.workspace = true
 kitchen-ui.workspace = true
 # The shared frame: command registry, menus, search, status bar, Settings, jobs
 kitchen-shell.workspace = true
-sysinfo.workspace = true
-lucem-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
 lucem-io.workspace = true
 flate2.workspace = true
-# Histology workflows (stains, tissue, cells, classifiers)
-lucem-hist = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
+# Histology workflows (stains, tissue, cells, classifiers): its compute below, per target
+lucem-hist.workspace = true
+lucem-ops.workspace = true
+lucem-core = { workspace = true, default-features = false, features = ["compute"] }
+# Instant that works in a browser page (std's panics there); std's elsewhere
+web-time.workspace = true
+# Spans for profiling (Tracy with lucem-app's `tracy` feature)
+tracing.workspace = true
 # Machine-learning plugins: the contract only (the models run in separate programs)
 lucem-ml.workspace = true
-lucem-ops = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
 lucem-pipeline.workspace = true
 lucem-session.workspace = true
-# Images on a paired server, read as pyramids (lucem:// paths)
-lucem-stream.workspace = true
 lucem-view.workspace = true
 lucem-table.workspace = true
 schemars.workspace = true
@@ -39,6 +40,19 @@ image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+# A computer: every compute runtime; images on paired servers over QUIC (lucem:// paths)
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+sysinfo.workspace = true
+lucem-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
+lucem-hist = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
+lucem-ops = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
+lucem-stream.workspace = true
+
+# A browser page: no compute of its own (the server computes), the page's server over
+# WebTransport or a WebSocket
+[target.'cfg(target_family = "wasm")'.dependencies]
+lucem-stream = { workspace = true, default-features = false, features = ["web"] }
 
 [dev-dependencies]
 # Headless UI tests (`#[gpui_kit::test]`)

@@ -33,6 +33,7 @@ pub struct Ctx {
     /// The frame (set once it exists: commands only run after).
     pub shell: Rc<std::cell::OnceCell<WeakEntity<Shell>>>,
     pub pipeline: WeakEntity<crate::screens::pipeline::PipelineView>,
+    #[cfg(not(target_family = "wasm"))]
     pub analyze: WeakEntity<crate::screens::analyze::AnalyzeView>,
     /// Shows or hides the Keyboard & mouse sheet.
     pub toggle_help: Rc<dyn Fn(&mut Window, &mut App)>,
@@ -445,18 +446,23 @@ pub fn register(registry: &Registry, c: &Ctx) {
         classify("hist.class_regions", "Class map → shapes", IconName::Shapes, "The class map's regions as shapes", |s, cx| s.hist_class_regions(cx)),
     ]);
     // Automate: scripts
-    let (p1, p2, an) = (s.clone(), s.clone(), c.analyze.clone());
-    let an_store = s.clone();
+    let (p1, p2) = (s.clone(), s.clone());
     list.extend([
         CommandSpec::new("script.new_python", "New Python script node…", IconName::SquareTerminal, move |_, cx| p1.update(cx, |s, cx| s.add_script_node(crate::data::script::Language::Python, cx))).group("Automate").hint("A step written in Python"),
         CommandSpec::new("script.new_rust", "New Rust script node…", IconName::SquareTerminal, move |_, cx| p2.update(cx, |s, cx| s.add_script_node(crate::data::script::Language::Rust, cx))).group("Automate").hint("A step written in Rust (crates allowed)"),
-        CommandSpec::new("analyze.code", "Code on the measurement table", IconName::Code, move |_, cx| {
-            an_store.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx));
-            let _ = an.update(cx, |a, cx| a.open_code(cx));
-        })
-        .group("Automate")
-        .hint("Python or Rust over the table"),
     ]);
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let (an, an_store) = (c.analyze.clone(), s.clone());
+        list.push(
+            CommandSpec::new("analyze.code", "Code on the measurement table", IconName::Code, move |_, cx| {
+                an_store.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx));
+                let _ = an.update(cx, |a, cx| a.open_code(cx));
+            })
+            .group("Automate")
+            .hint("Python or Rust over the table"),
+        );
+    }
     // What an agent needs to see and point: a snapshot, the shapes, drawing and naming them
     let (n1, n2, n3, n4, n5, n6) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
     list.extend([
@@ -525,7 +531,7 @@ pub fn register(registry: &Registry, c: &Ctx) {
         })
         .group("App")
         .hint("List the images of the servers this computer is paired with (lucem pair); open them from the server menu")
-        .enabled(|_| if crate::data::remote::paired().is_empty() { Err("No paired servers: `lucem pair <host:port> <code>` pairs this computer with one".into()) } else { Ok(()) }),
+        .enabled(|_| if !crate::data::remote::has_servers() { Err("No paired servers: `lucem pair <host:port> <code>` pairs this computer with one".into()) } else { Ok(()) }),
     ]);
     registry.extend(list);
     providers(registry, s);
@@ -755,7 +761,7 @@ fn providers(registry: &Registry, s: &Entity<Store>) {
                 Ok(images) if images.is_empty() => out.push(MenuItem::label(format!("{addr}: no images"))),
                 Ok(images) => {
                     out.push(MenuItem::label(addr.clone()));
-                    out.extend(images.iter().take(40).map(|p| MenuItem::run(p.clone(), "file.open", json!({"path": lucem_stream::remote::remote_name(&addr, p)})).icon(IconName::Image)));
+                    out.extend(images.iter().take(40).map(|p| MenuItem::run(p.clone(), "file.open", json!({"path": lucem_stream::remote_name(&addr, p)})).icon(IconName::Image)));
                 }
                 Err(e) => out.push(MenuItem::label(e)),
             }

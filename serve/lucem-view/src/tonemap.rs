@@ -148,7 +148,8 @@ pub fn build_render_image(
         .unwrap_or(4)
         .clamp(1, 16);
 
-    if n_pixels >= 65_536 && num_threads > 1 {
+    // A browser page has no threads to scope (std::thread does not spawn there): in turn
+    if n_pixels >= 65_536 && num_threads > 1 && cfg!(not(target_family = "wasm")) {
         let pixels_per_chunk = valid_lum.len().div_ceil(num_threads);
         let bytes_per_chunk = pixels_per_chunk * 4;
 

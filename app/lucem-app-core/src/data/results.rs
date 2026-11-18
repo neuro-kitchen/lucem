@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 use gpui_kit::RenderImage;
 use lucem_core::cubecl::prelude::Client;

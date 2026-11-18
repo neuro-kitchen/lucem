@@ -18,6 +18,11 @@ lucem-core = { workspace = true, default-features = false, features = ["compute"
 lucem-io.workspace = true
 serde.workspace = true
 smallvec.workspace = true
+tracing.workspace = true
+
+# A browser page starts its tile workers as web workers (std cannot spawn threads there)
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm_thread.workspace = true
 
 [dev-dependencies]
 lucem-core = { workspace = true, features = ["compute", "wgpu", "cuda", "cpu"] }

@@ -649,7 +649,7 @@ impl Store {
             let n = 512usize;
             let host: Vec<f32> = (0..n * n).map(|i| ((i % n) as f32 / n as f32) * 0.8 + 0.1).collect();
             let mean_in = host.iter().sum::<f32>() / host.len() as f32;
-            let t0 = std::time::Instant::now();
+            let t0 = web_time::Instant::now();
             let a = DeviceArray::from_host(&device.client, lucem_core::Shape::new([n, n]), host).map_err(|e| e.to_string())?;
             let out = Op::GaussianBlur { sigma: 2.0 }.run(&device.client, &[lucem_pipeline::Value::Image(a)])?;
             let back = out.to_host(&device.client).ok_or("no raster came back")?;

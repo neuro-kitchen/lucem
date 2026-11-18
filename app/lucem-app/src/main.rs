@@ -8,6 +8,12 @@ use lucem_app_core::data::store::Store;
 use lucem_app_core::navigation::actions;
 
 fn main() {
+    // Profiling: every span goes to Tracy while it runs
+    #[cfg(feature = "tracy")]
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(tracing_tracy::TracyLayer::default()));
+    }
     lucem_app_core::legacy::adopt();
     // `lucem-app <path>` opens an image, an OME-Zarr container or a project
     let open = std::env::args().nth(1).map(std::path::PathBuf::from);

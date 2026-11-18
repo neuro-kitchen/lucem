@@ -18,12 +18,13 @@
 
 use std::path::{Path, PathBuf};
 
-use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 
 use crate::auth::{now_unix, Authority, ClientIdentity, Permission};
+pub use crate::pair::{parse_code, ClientPairing, ClientPairingToken, PairHello, PairKey, PairReply, PairToken, PairedToken};
+use crate::pair::{mac, mac_ok, ID_CLIENT, ID_SERVER};
 use crate::error::{StreamError, StreamResult};
 
 /// How long a code works (minutes).
@@ -32,8 +33,6 @@ pub const CODE_MINUTES: u64 = 10;
 pub const CODE_TRIES: u32 = 3;
 
 const CODES_FILE: &str = "pairing.json";
-const ID_CLIENT: &[u8] = b"lucem-pair-client";
-const ID_SERVER: &[u8] = b"lucem-pair-server";
 
 /// A pairing code: `id-secret` as people type it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,11 +62,6 @@ pub struct LiveCode {
     pub tries_left: u32,
 }
 
-/// `42-8317-2956` (spaces and dashes optional) as its id and secret.
-pub fn parse_code(code: &str) -> Option<(String, String)> {
-    let digits: String = code.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
-    (digits.len() == 10 && digits.chars().all(|c| c.is_ascii_digit())).then(|| (digits[..2].to_string(), digits[2..].to_string()))
-}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Codes {
@@ -176,85 +170,86 @@ impl Authority {
     }
 }
 
-// ---- the exchange ------------------------------------------------------------------------------
+// ---- the exchange (no transport: QUIC, the WebSocket and WebTransport carry it) ---------------
 
-/// The computer's first message: which code, its name, its SPAKE2 message.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PairHello {
-    pub id: String,
-    pub name: String,
-    pub spake: Vec<u8>,
+fn error(reason: impl Into<String>) -> PairReply {
+    PairReply::Error { reason: reason.into() }
 }
 
-/// The server's SPAKE2 message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "pair", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PairReply {
-    Spake { spake: Vec<u8> },
-    /// The certificate issued, the CA, the server's names (to connect by) and the permission,
-    /// with a MAC proving the server knows the code.
-    Paired { certificate_pem: String, ca_pem: String, names: Vec<String>, permission: Permission, mac: Vec<u8> },
-    Error { reason: String },
+/// The server's side after its SPAKE2 message: waits for the computer's key or the page's proof.
+pub struct ServerPairing {
+    key: Vec<u8>,
+    name: String,
+    code: PairingCode,
 }
 
-/// The computer's public key (SubjectPublicKeyInfo, DER) and its MAC.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PairKey {
-    pub public_key: Vec<u8>,
-    pub mac: Vec<u8>,
-}
-
-fn mac(key: &[u8], parts: &[&[u8]]) -> Vec<u8> {
-    let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC takes any key length");
-    for p in parts {
-        m.update(&(p.len() as u64).to_le_bytes());
-        m.update(p);
+impl Authority {
+    /// The server's first step: one try is taken from the code `hello` names, and the answer is
+    /// the server's SPAKE2 message (then a finish with the returned state), or an error to send.
+    pub fn pairing_start(&self, hello: &PairHello) -> Result<(ServerPairing, PairReply), PairReply> {
+        let code = self.take_try(&hello.id).map_err(|e| error(e.to_string()))?;
+        if crate::auth::check_name(&hello.name).is_err() {
+            return Err(error("a computer's name is letters, digits, '-', '_' or '.'"));
+        }
+        let (state, outbound) = Spake2::<Ed25519Group>::start_b(&Password::new(code.secret.as_bytes()), &Identity::new(ID_CLIENT), &Identity::new(ID_SERVER));
+        let key = state.finish(&hello.spake).map_err(|_| error("pairing failed"))?;
+        Ok((ServerPairing { key, name: hello.name.clone(), code }, PairReply::Spake { spake: outbound }))
     }
-    m.finalize().into_bytes().to_vec()
-}
 
-fn mac_ok(key: &[u8], parts: &[&[u8]], tag: &[u8]) -> bool {
-    let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC takes any key length");
-    for p in parts {
-        m.update(&(p.len() as u64).to_le_bytes());
-        m.update(p);
+    /// The server's second step for a computer: checks it knows the code, issues its
+    /// certificate, spends the code. `names`: the names the server's certificate carries.
+    pub fn pairing_finish(&self, pairing: ServerPairing, key: &PairKey, names: &[String]) -> PairReply {
+        let ServerPairing { key: shared, name, code } = pairing;
+        if !mac_ok(&shared, &[b"client", name.as_bytes(), &key.public_key], &key.mac) {
+            tracing::warn!("pairing as {name:?} failed: wrong code ({} tries left)", code.tries_left);
+            return error("wrong code");
+        }
+        let (record, certificate_pem) = match self.enroll_public_key(&name, code.permission, &key.public_key) {
+            Ok(r) => r,
+            Err(e) => return error(e.to_string()),
+        };
+        if let Err(e) = self.spend(&code.id) {
+            return error(e.to_string());
+        }
+        let ca_pem = self.ca_pem().to_string();
+        let tag = mac(&shared, &[b"server", certificate_pem.as_bytes(), ca_pem.as_bytes(), names.join(",").as_bytes()]);
+        tracing::info!("paired {} ({})", record.name, record.permission);
+        PairReply::Paired { certificate_pem, ca_pem, names: names.to_vec(), permission: code.permission, mac: tag }
     }
-    m.verify_slice(tag).is_ok()
+
+    /// The server's second step for a browser: checks it knows the code, issues a token (a page
+    /// cannot hold a certificate it made), spends the code.
+    pub fn pairing_finish_token(&self, pairing: ServerPairing, proof: &PairToken, names: &[String]) -> PairReply {
+        let ServerPairing { key: shared, name, code } = pairing;
+        if !mac_ok(&shared, &[b"client-token", name.as_bytes()], &proof.mac) {
+            tracing::warn!("pairing as {name:?} failed: wrong code ({} tries left)", code.tries_left);
+            return error("wrong code");
+        }
+        let (record, token) = match self.enroll_token(&name, code.permission) {
+            Ok(r) => r,
+            Err(e) => return error(e.to_string()),
+        };
+        if let Err(e) = self.spend(&code.id) {
+            return error(e.to_string());
+        }
+        let tag = mac(&shared, &[b"server-token", token.as_bytes(), names.join(",").as_bytes()]);
+        tracing::info!("paired {} ({}, a browser)", record.name, record.permission);
+        PairReply::Token { token, names: names.to_vec(), permission: code.permission, mac: tag }
+    }
 }
 
-/// The server's side, on one stream: `hello` read, the rest exchanged.
+/// The server's side over QUIC, on one stream: `hello` read, the rest exchanged.
 pub(crate) async fn serve_pairing(authority: &Authority, names: &[String], hello: PairHello, send: &mut quinn::SendStream, recv: &mut quinn::RecvStream) -> StreamResult<()> {
     use crate::protocol::{read_message, write_message};
-    let code = match authority.take_try(&hello.id) {
-        Ok(c) => c,
-        Err(e) => return write_message(send, &PairReply::Error { reason: e.to_string() }).await,
+    let pairing = match authority.pairing_start(&hello) {
+        Ok((pairing, reply)) => {
+            write_message(send, &reply).await?;
+            pairing
+        }
+        Err(refusal) => return write_message(send, &refusal).await,
     };
-    if crate::auth::check_name(&hello.name).is_err() {
-        return write_message(send, &PairReply::Error { reason: "a computer's name is letters, digits, '-', '_' or '.'".into() }).await;
-    }
-    let (state, outbound) = Spake2::<Ed25519Group>::start_b(&Password::new(code.secret.as_bytes()), &Identity::new(ID_CLIENT), &Identity::new(ID_SERVER));
-    write_message(send, &PairReply::Spake { spake: outbound }).await?;
-    let key = match state.finish(&hello.spake) {
-        Ok(k) => k,
-        Err(_) => return write_message(send, &PairReply::Error { reason: "pairing failed".into() }).await,
-    };
-    let pk: PairKey = read_message(recv).await?;
-    if !mac_ok(&key, &[b"client", hello.name.as_bytes(), &pk.public_key], &pk.mac) {
-        tracing::warn!("pairing as {:?} failed: wrong code ({} tries left)", hello.name, code.tries_left);
-        return write_message(send, &PairReply::Error { reason: "wrong code".into() }).await;
-    }
-    let (record, certificate_pem) = match authority.enroll_public_key(&hello.name, code.permission, &pk.public_key) {
-        Ok(r) => r,
-        Err(e) => return write_message(send, &PairReply::Error { reason: e.to_string() }).await,
-    };
-    authority.spend(&code.id)?;
-    let ca_pem = authority.ca_pem().to_string();
-    let names_joined = names.join(",");
-    let tag = mac(&key, &[b"server", certificate_pem.as_bytes(), ca_pem.as_bytes(), names_joined.as_bytes()]);
-    tracing::info!("paired {} ({})", record.name, record.permission);
-    write_message(send, &PairReply::Paired { certificate_pem, ca_pem, names: names.to_vec(), permission: code.permission, mac: tag }).await
+    let key: PairKey = read_message(recv).await?;
+    write_message(send, &authority.pairing_finish(pairing, &key, names)).await
 }
 
 /// What a computer keeps after pairing.
@@ -269,11 +264,51 @@ pub struct Paired {
     pub ca_fingerprint: String,
 }
 
+/// After the server's SPAKE2 message: waits for the certificate.
+pub struct ClientPairingKey {
+    shared: Vec<u8>,
+    key_pair: rcgen::KeyPair,
+}
+
+/// With the server's first answer: the computer's key to send (its private key is made here and
+/// never sent).
+pub fn client_key(client: ClientPairing, reply: PairReply) -> StreamResult<(ClientPairingKey, PairKey)> {
+    let spake = match reply {
+        PairReply::Spake { spake } => spake,
+        PairReply::Error { reason } => return Err(StreamError::Server(reason)),
+        PairReply::Paired { .. } | PairReply::Token { .. } => return Err(StreamError::Server("the server answered out of turn".into())),
+    };
+    let shared = client.state.finish(&spake).map_err(|_| StreamError::Server("pairing failed".into()))?;
+    let key_pair = rcgen::KeyPair::generate().map_err(|e| StreamError::Tls(e.to_string()))?;
+    let public_key = rcgen::PublicKeyData::subject_public_key_info(&key_pair);
+    let tag = mac(&shared, &[b"client", client.name.as_bytes(), &public_key]);
+    Ok((ClientPairingKey { shared, key_pair }, PairKey { public_key, mac: tag }))
+}
+
+impl ClientPairingKey {
+    /// With the server's last answer: the identity to keep, once the server has proved it knows
+    /// the code.
+    pub fn finish(self, reply: PairReply) -> StreamResult<Paired> {
+        match reply {
+            PairReply::Paired { certificate_pem, ca_pem, names, permission, mac: tag } => {
+                if !mac_ok(&self.shared, &[b"server", certificate_pem.as_bytes(), ca_pem.as_bytes(), names.join(",").as_bytes()], &tag) {
+                    return Err(StreamError::Server("the server could not prove it knows the code: not paired".into()));
+                }
+                let identity_pem = format!("{certificate_pem}{}{ca_pem}", self.key_pair.serialize_pem());
+                let identity = ClientIdentity::from_pem(identity_pem.as_bytes())?;
+                Ok(Paired { ca_fingerprint: identity.ca_fingerprint(), identity_pem, names, permission })
+            }
+            PairReply::Error { reason } => Err(StreamError::Server(reason)),
+            PairReply::Spake { .. } | PairReply::Token { .. } => Err(StreamError::Server("the server answered out of turn".into())),
+        }
+    }
+}
+
 /// The computer's side: pairs with the server at `addr` using `code`, as `name`. Its private key
 /// is made here and never sent.
 pub async fn pair(addr: std::net::SocketAddr, code: &str, name: &str) -> StreamResult<Paired> {
     use crate::protocol::{read_message, write_message};
-    let (id, secret) = parse_code(code).ok_or_else(|| StreamError::Server("a pairing code is ten digits, like 42-8317-2956".into()))?;
+    let (client, hello) = ClientPairing::start(code, name)?;
     // Encrypted, the server not yet trusted: SPAKE2 decides who is who
     // (accepting any certificate is safe here only because SPAKE2 then authenticates the server)
     let config = crate::tls::client_config_with(&crate::tls::ServerTrust::DangerAcceptAnyCertificate, None)?;
@@ -281,33 +316,12 @@ pub async fn pair(addr: std::net::SocketAddr, code: &str, name: &str) -> StreamR
     endpoint.set_default_client_config(config);
     let connection = endpoint.connect(addr, "lucem-pairing").map_err(StreamError::protocol)?.await.map_err(StreamError::protocol)?;
     let (mut send, mut recv) = connection.open_bi().await.map_err(StreamError::protocol)?;
-
-    let (state, outbound) = Spake2::<Ed25519Group>::start_a(&Password::new(secret.as_bytes()), &Identity::new(ID_CLIENT), &Identity::new(ID_SERVER));
-    write_message(&mut send, &crate::protocol::Request::Pair { hello: PairHello { id, name: name.into(), spake: outbound } }).await?;
-    let spake = match read_message::<PairReply>(&mut recv).await? {
-        PairReply::Spake { spake } => spake,
-        PairReply::Error { reason } => return Err(StreamError::Server(reason)),
-        PairReply::Paired { .. } => return Err(StreamError::Server("the server answered out of turn".into())),
-    };
-    let key = state.finish(&spake).map_err(|_| StreamError::Server("pairing failed".into()))?;
-    let key_pair = rcgen::KeyPair::generate().map_err(|e| StreamError::Tls(e.to_string()))?;
-    let public_key = rcgen::PublicKeyData::subject_public_key_info(&key_pair);
-    let tag = mac(&key, &[b"client", name.as_bytes(), &public_key]);
-    write_message(&mut send, &PairKey { public_key, mac: tag }).await?;
-    let reply = read_message::<PairReply>(&mut recv).await?;
+    write_message(&mut send, &crate::protocol::Request::Pair { hello }).await?;
+    let (client, key) = client_key(client, read_message(&mut recv).await?)?;
+    write_message(&mut send, &key).await?;
+    let reply: PairReply = read_message(&mut recv).await?;
     connection.close(quinn::VarInt::from_u32(0), b"paired");
-    match reply {
-        PairReply::Paired { certificate_pem, ca_pem, names, permission, mac: tag } => {
-            if !mac_ok(&key, &[b"server", certificate_pem.as_bytes(), ca_pem.as_bytes(), names.join(",").as_bytes()], &tag) {
-                return Err(StreamError::Server("the server could not prove it knows the code: not paired".into()));
-            }
-            let identity_pem = format!("{certificate_pem}{}{ca_pem}", key_pair.serialize_pem());
-            let identity = ClientIdentity::from_pem(identity_pem.as_bytes())?;
-            Ok(Paired { ca_fingerprint: identity.ca_fingerprint(), identity_pem, names, permission })
-        }
-        PairReply::Error { reason } => Err(StreamError::Server(reason)),
-        PairReply::Spake { .. } => Err(StreamError::Server("the server answered out of turn".into())),
-    }
+    client.finish(reply)
 }
 
 /// Writes a pairing code to `path`, readable by its owner only (for a script that pairs: it
