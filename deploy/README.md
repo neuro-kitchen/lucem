@@ -57,8 +57,10 @@ podman run --rm --device nvidia.com/gpu=all --security-opt=label=disable --usern
 ## The page (browsers)
 
 `lucem serve --web /usr/share/lucem/web` (the image's default command) serves the page on TCP
-8443 and WebTransport on UDP 8443. The page signs in with a pairing code once (`--pair` prints
-one at start; `lucem clients pair` makes more) and keeps a token; `lucem clients revoke` ends it.
+8443 and WebTransport on UDP 8443. The page signs in with a pairing code once and keeps a token:
+`podman exec -it <container> lucem clients pair` shows a code and the page's sign-in link on
+your terminal (never in the log; the link uses `LUCEM_PAGE_URL`, `http://localhost:8443` in the
+image); `lucem clients revoke` ends it.
 It views the images under `/data`; the server computes for it (pipelines on tiles, histology,
 whole-image runs).
 
