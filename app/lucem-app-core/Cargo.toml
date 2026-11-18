@@ -53,6 +53,8 @@ lucem-stream.workspace = true
 # WebTransport or a WebSocket
 [target.'cfg(target_family = "wasm")'.dependencies]
 lucem-stream = { workspace = true, default-features = false, features = ["web"] }
+# The session kept in the browser's storage between reloads
+web-sys = { workspace = true, features = ["Window", "Storage"] }
 
 [dev-dependencies]
 # Headless UI tests (`#[gpui_kit::test]`)

@@ -316,7 +316,9 @@ fn serve(mut args: Args) -> Result<(), String> {
     let tls = server_config_with_clients(&authority, &identity, anonymous).map_err(|e| e.to_string())?;
     // No pairing code unless asked for: a code is a secret, and one made at every start would be
     // a live secret nobody asked for. `--pair` shows one on the terminal (never in a log).
-    let terminal = if pair_now { Some(Terminal::open().map_err(|e| format!("--pair: {e}"))?) } else { None };
+    // A pairing code is a secret: shown on the terminal when there is one; in the log only when
+    // asked for (--pair: a container's log, as dsp-kitchen's image does)
+    let terminal = Terminal::open().ok();
     runtime()?.block_on(async move {
         let plugins: Vec<Arc<dyn lucem_stream::plugin::ServerPlugin>> = vec![Arc::new(HistPlugin::default()), Arc::new(web::PipelinePlugin::default())];
         let web = match web_root.as_deref().map(PathBuf::from) {
@@ -348,12 +350,24 @@ fn serve(mut args: Args) -> Result<(), String> {
         };
         let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority.clone()).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max).with_plugins(plugins);
         eprintln!("serving {data} on {addr} to paired computers");
-        match terminal {
-            Some(mut t) => {
-                let code = authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?;
-                t.show(&format!("pair a computer (read only, {} minutes, once): {addr}  code {}\n  in lucem: the server button › Pair with a lucem server…   or: lucem pair {addr} {}", lucem_stream::pairing::CODE_MINUTES, code.display(), code.display()))?;
+        // The page's link carries a one-time code after `#` (never sent to the server, so never in
+        // a log of it): opening it signs the browser in, nothing to type. Made when there is a
+        // terminal to show it on, or when asked for (--pair)
+        let page_link = web.as_ref().and_then(|w| w.local_addr().ok().map(|a| (w.is_tls(), a)));
+        if pair_now || (terminal.is_some() && page_link.is_some()) {
+            let code = authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?;
+            let minutes = lucem_stream::pairing::CODE_MINUTES;
+            let mut text = format!("pair a computer (read only, {minutes} minutes, once): {addr}  code {}\n  or: lucem pair {addr} {}", code.display(), code.display());
+            if let Some((tls, at)) = page_link {
+                let host = if at.ip().is_loopback() || at.ip().is_unspecified() { format!("localhost:{}", at.port()) } else { at.to_string() };
+                text.push_str(&format!("\nopen the page (signs this browser in, once, {minutes} minutes): {}://{host}/#pair={}", if tls { "https" } else { "http" }, code.display()));
             }
-            None => eprintln!("pair a computer: `lucem clients pair` (in a container: podman exec -it <container> lucem clients pair)"),
+            match terminal {
+                Some(mut t) => t.show(&text)?,
+                None => eprintln!("{text}"),
+            }
+        } else {
+            eprintln!("pair a computer or a browser: `lucem clients pair` (in a container: podman exec -it <container> lucem clients pair)");
         }
         let pages = async move {
             match web {

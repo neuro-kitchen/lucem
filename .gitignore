@@ -171,3 +171,6 @@ tempCodeRunnerFile.py
 *.ckpt
 *.pt
 *.pth
+
+# A server authority (its CA key, enrolled clients, pairing codes): never in git
+.lucem-auth/

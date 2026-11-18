@@ -545,7 +545,7 @@ pub fn load_ome_zarr_with_options(info: &OmeZarrContainerInfo) -> IoResult<Loade
         }
     };
 
-    let n_pixels = height.checked_mul(width).filter(|n| *n <= (1usize << 32)).ok_or_else(|| IoError::OmeZarr(format!("Zarr level {height} × {width} is too large to load whole")))?;
+    let n_pixels = height.checked_mul(width).filter(|n| *n as u64 <= (1u64 << 32)).ok_or_else(|| IoError::OmeZarr(format!("Zarr level {height} × {width} is too large to load whole")))?;
     let num_c_load = channels.min(3);
     let mut channel_planes = vec![vec![0.0f32; n_pixels]; num_c_load];
 

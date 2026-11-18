@@ -143,6 +143,8 @@ if (!threads) {
     await app.default();
     note.remove();
   } catch (e) {
-    say(`<h1>Lucem did not start</h1><p><code>${String(e).replace(/</g, "&lt;")}</code></p>`);
+    // A Rust panic arrives here as "unreachable": the app's panic hook left what it was
+    const why = window.lucemLastPanic ?? String(e);
+    say(`<h1>Lucem did not start</h1><p><code>${why.replace(/</g, "&lt;")}</code></p>`);
   }
 }

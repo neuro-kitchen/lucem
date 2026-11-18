@@ -112,6 +112,8 @@ impl Render for HelpSheet {
         div()
             .id("help-overlay")
             .absolute()
+            // Takes the pointer: a click here never reaches the buttons under it
+            .occlude()
             .size_full()
             .flex()
             .items_center()
@@ -257,6 +259,19 @@ impl LucemApp {
                             cx,
                         )
                     });
+                }
+            }),
+            // A page's "Open image…": the server's images, over the frame
+            cx.subscribe_in(&store, window, |this, _, e: &AppEvent, window, cx| {
+                if matches!(e, AppEvent::ServerImages) {
+                    let shell = this.shell.downgrade();
+                    let close: crate::screens::server_images::Close = Rc::new(move |window, cx| {
+                        if let Some(s) = shell.upgrade() {
+                            s.update(cx, |s, cx| s.set_overlay(None, window, cx));
+                        }
+                    });
+                    let list = cx.new(|cx| crate::screens::server_images::ServerImages::new(this.store.clone(), close, cx));
+                    this.shell.update(cx, |s, cx| s.set_overlay(Some(list.into()), window, cx));
                 }
             }),
             cx.subscribe(&store, |this, _, e: &AppEvent, cx| {

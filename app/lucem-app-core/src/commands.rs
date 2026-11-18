@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::data::store::{Arrangement, MaskOperation, Store, ViewKind, ViewRequest};
+use crate::data::store::{AppEvent, Arrangement, MaskOperation, Store, ViewKind, ViewRequest};
 use crate::domain::boolean::ShapeOp;
 use crate::domain::command::Command;
 use crate::domain::tool::{Tool, ToolState};
@@ -69,6 +69,18 @@ fn needs_image(store: &Entity<Store>) -> impl Fn(&App) -> Result<(), String> + '
 // ----------------------------------------------------------------------------
 
 fn prompt(store: Entity<Store>, directories: bool, files: bool, prompt: &'static str, save_folder: bool, cx: &mut App) {
+    // A browser page has no file dialog: it opens what its server offers
+    if !crate::platform::LOCAL_FILES {
+        let _ = (directories, files, prompt);
+        store.update(cx, |s, cx| {
+            if save_folder {
+                s.set_status("Saving a project is done by the desktop app for now (the page keeps it while it is open)", cx);
+            } else {
+                cx.emit(AppEvent::ServerImages);
+            }
+        });
+        return;
+    }
     let rx = cx.prompt_for_paths(PathPromptOptions { files, directories, multiple: false, prompt: Some(prompt.into()) });
     cx.spawn(async move |cx| match rx.await {
         Ok(Ok(Some(paths))) => {

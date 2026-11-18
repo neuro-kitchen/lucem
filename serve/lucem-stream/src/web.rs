@@ -49,16 +49,31 @@ const MAX_HELLO_BYTES: usize = 64 << 10;
 const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// What the page may load and connect to: its own files and server only (no inline script: the
 /// loader is `loader.js`; WebAssembly compiled from the page's own module; workers from the page
-/// or the blobs the threads start from).
-pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+/// or the blobs the threads start from). `'unsafe-eval'`: `wasm_thread`, which starts the page's
+/// worker threads, evaluates two constant strings (`eval("self")` and its script-path finder);
+/// scripts still come from this origin only. To drop it: wasm_thread using `js_sys::global()` and
+/// an explicit shim URL (an upstream patch). `connect-src` also names this computer's loopback
+/// addresses: a page at `localhost` reaches WebTransport at 127.0.0.1 (QUIC does not fall back from
+/// ::1); elsewhere WebTransport is the page's own host, which `'self'` covers.
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; worker-src 'self' blob:; connect-src 'self' https://127.0.0.1:* https://[::1]:*; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// Whether a connection's `Origin` is the page's own (`authority`: the `host:port` it reached):
 /// another site open in the same browser may not use the server, whatever it knows. No origin:
 /// not a browser (a script, a test), which still needs a token or a code.
 fn same_origin(origin: Option<&str>, authority: &str) -> bool {
     let Some(origin) = origin else { return true };
-    let host = origin.strip_prefix("https://").or_else(|| origin.strip_prefix("http://")).unwrap_or("");
-    !host.is_empty() && host.trim_end_matches('/').eq_ignore_ascii_case(authority)
+    let host = origin.strip_prefix("https://").or_else(|| origin.strip_prefix("http://")).unwrap_or("").trim_end_matches('/');
+    if host.is_empty() {
+        return false;
+    }
+    if host.eq_ignore_ascii_case(authority) {
+        return true;
+    }
+    // This computer by any of its loopback names, on the same port: a page opened at localhost
+    // reaches WebTransport at 127.0.0.1 (QUIC does not fall back from ::1 as TCP does)
+    let split = |a: &str| a.rsplit_once(':').map(|(h, p)| (h.trim_matches(['[', ']']).to_ascii_lowercase(), p.to_string()));
+    let loopback = |h: &str| h == "localhost" || h == "::1" || h.starts_with("127.");
+    matches!((split(host), split(authority)), (Some((h1, p1)), Some((h2, p2))) if p1 == p2 && loopback(&h1) && loopback(&h2))
 }
 
 /// How the HTTP side is secured (WebTransport always has its own 14-day certificate).
@@ -756,6 +771,11 @@ mod tests {
         assert!(!same_origin(Some("https://evil.example"), "127.0.0.1:8443"));
         assert!(!same_origin(Some("http://127.0.0.1:9000"), "127.0.0.1:8443"), "another port is another origin");
         assert!(!same_origin(Some("null"), "127.0.0.1:8443"));
+        // This computer by another loopback name, same port
+        assert!(same_origin(Some("http://localhost:8443"), "127.0.0.1:8443"));
+        assert!(same_origin(Some("http://localhost:8443"), "[::1]:8443"));
+        assert!(!same_origin(Some("http://localhost:9000"), "127.0.0.1:8443"), "another port");
+        assert!(!same_origin(Some("http://lab.example:8443"), "127.0.0.1:8443"), "not loopback");
     }
 
     #[test]

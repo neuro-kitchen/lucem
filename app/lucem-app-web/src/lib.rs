@@ -54,6 +54,19 @@ fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
 }
 
+/// The pairing code of the link the page was opened with (`#pair=<code>`), taken out of the
+/// address bar.
+fn link_code() -> Option<String> {
+    let window = web_sys::window()?;
+    let hash = window.location().hash().ok()?;
+    let code = hash.trim_start_matches('#').split('&').find_map(|p| p.strip_prefix("pair="))?.to_string();
+    if let Ok(history) = window.history() {
+        let clean = format!("{}{}", window.location().pathname().unwrap_or_default(), window.location().search().unwrap_or_default());
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&clean));
+    }
+    (!code.is_empty()).then_some(code)
+}
+
 fn kept_token() -> Option<String> {
     storage().and_then(|s| s.get_item(TOKEN_KEY).ok().flatten())
 }
@@ -67,6 +80,20 @@ fn browser_name() -> String {
 /// accepts it: revoked) with a pairing code typed into the app's sign-in form, tried until one
 /// works. The form says why a code did not.
 async fn sign_in(info: &lucem_stream::ServeInfo, (window, app): (gpui_kit::AnyWindowHandle, gpui_kit::Entity<LucemApp>), cx: &mut gpui_kit::AsyncApp) -> Result<Arc<web_client::PageLink>, String> {
+    // The link `lucem serve` printed (`…/#pair=<code>`): signs in with nothing to type. The code
+    // leaves the address bar at once (it is spent anyway)
+    if let Some(code) = link_code() {
+        let name = browser_name();
+        match web_client::connect(info, || Hello::Code { code: code.clone(), name: name.clone() }).await {
+            Ok((link, token)) => {
+                if let (Some(token), Some(s)) = (token, storage()) {
+                    let _ = s.set_item(TOKEN_KEY, &token);
+                }
+                return Ok(link);
+            }
+            Err(e) => log::info!("lucem: the link's code did not sign in ({e})"),
+        }
+    }
     if let Some(token) = kept_token() {
         match web_client::connect(info, || Hello::Token(token.clone())).await {
             Ok((link, _)) => return Ok(link),
@@ -112,23 +139,37 @@ async fn sign_in(info: &lucem_stream::ServeInfo, (window, app): (gpui_kit::AnyWi
 
 #[wasm_bindgen(start)]
 pub fn start() {
+    // A panic in a page aborts with "unreachable": say what it was first, on the console and on
+    // the loader's note
+    std::panic::set_hook(Box::new(|info| {
+        let text = format!("lucem panicked: {info}");
+        console_error(&text);
+        // The loader shows it (its own catch would only see "unreachable")
+        if let Some(w) = web_sys::window() {
+            let _ = js_sys::Reflect::set(&w, &"lucemLastPanic".into(), &text.clone().into());
+        }
+    }));
+    console_log("lucem: start");
     static CONSTRUCTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !CONSTRUCTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         // SAFETY: the linker's own function; called once, before anything reads a registry
         unsafe { __wasm_call_ctors() };
     }
+    console_log("lucem: constructors ran");
     gpui_kit::platform::web_init();
+    console_log("lucem: web platform ready");
     // With threads in the build, GPUI's background work (tile reads, which wait for the server)
     // runs on web workers
     let threads = cfg!(target_feature = "atomics");
     let platform = std::rc::Rc::new(gpui_kit::web::WebPlatform::new_with_backend(threads, backend()));
     let application = gpui_kit::Application::with_platform(platform);
     log::info!("lucem: threads in this build: {threads}, drawing: {:?}", backend());
-    application.with_assets(kitchen_ui::icons::AppAssets::new().all_icons()).run(|cx: &mut App| {
+    application.with_assets(lucem_app_core::ui::assets::app_assets()).run(|cx: &mut App| {
         cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("AdwaitaSans-Regular.ttf").as_slice())]).expect("the font");
         gpui_kit::init(cx);
         gpui_kit::component::Theme::global_mut(cx).font_family = FONT.into();
         actions::bind_keys(cx);
+        console_log("lucem: application running");
         let store = cx.new(|_| Store::new(Prefs::default(), None));
         let options = WindowOptions { titlebar: Some(TitlebarOptions { title: Some("Lucem".into()), ..TitleBar::title_bar_options() }), ..Default::default() };
         let s = store.clone();
@@ -144,6 +185,10 @@ pub fn start() {
                         let host = link.host().to_string();
                         let transport = link.transport();
                         lucem_app_core::data::remote::set_page_link(link);
+                        // The work of the last visit, as it was left (its images are the server's)
+                        let _ = s.update(cx, |s, cx| {
+                            s.restore_session(cx);
+                        });
                         if let Some(path) = link_parameter("open") {
                             let name = lucem_stream::remote_name(&host, &path);
                             let _ = s.update(cx, |s, cx| s.open(std::path::PathBuf::from(name), cx));
@@ -160,4 +205,12 @@ pub fn start() {
         })
         .detach();
     });
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(s: &str);
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn console_log(s: &str);
 }

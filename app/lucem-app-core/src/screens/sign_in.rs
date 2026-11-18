@@ -66,6 +66,8 @@ impl Render for SignIn {
         div()
             .id("sign-in-overlay")
             .absolute()
+            // Takes the pointer: a click here never reaches the buttons under it
+            .occlude()
             .size_full()
             .flex()
             .items_center()

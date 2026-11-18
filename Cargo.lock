@@ -7335,6 +7335,7 @@ dependencies = [
  "sysinfo 0.40.4",
  "thiserror 2.0.21",
  "tracing",
+ "web-sys",
  "web-time",
 ]
 

@@ -48,6 +48,8 @@ pub enum AppEvent {
     /// Select this Pipeline node and show the Pipeline (a new script node: its code opens in the
     /// Inspector's editor).
     RevealNode(String),
+    /// Show the images of the server (a browser page's "Open image…": it has no file dialog).
+    ServerImages,
 }
 
 /// What a pane of Explore shows.
@@ -195,6 +197,12 @@ pub struct Store {
     results_gen: Arc<AtomicU64>,
     pub device: Option<Arc<Device>>,
     device_pending: bool,
+    /// Why there is no compute device (it failed to start, or a browser page has none): asked
+    /// for again only when the runtime changes. Without it, every frame that wants a device would
+    /// start another discovery (a page spun its CPU and GPU so).
+    pub device_unavailable: Option<String>,
+    /// A keeping of the session is scheduled ([`Store::keep_session_soon`]).
+    pub(crate) keep_pending: bool,
     /// Bumped when the device changes: what lives on the old one (3D volumes) is dropped.
     pub device_generation: u64,
     /// Machine-learning plugins and their jobs.
@@ -253,6 +261,8 @@ impl Store {
             results_gen: Arc::new(AtomicU64::new(0)),
             device: None,
             device_pending: false,
+            keep_pending: false,
+            device_unavailable: cfg!(target_family = "wasm").then(|| "Processing runs on the server or in the desktop app: this page views and annotates".to_string()),
             device_generation: 0,
             ml: Default::default(),
             mask_radius: 2,
@@ -572,6 +582,10 @@ impl Store {
         self.save_prefs();
         self.device = None;
         self.device_pending = false;
+        // Another runtime: try again (a page still has none)
+        if cfg!(not(target_family = "wasm")) {
+            self.device_unavailable = None;
+        }
         self.device_generation += 1;
         self.results.clear();
         self.analysis = None;
@@ -1317,7 +1331,7 @@ impl Store {
 
     /// Starts the compute device in the background; results follow once it is up.
     pub fn ensure_device(&mut self, cx: &mut Context<Self>) {
-        if self.device.is_some() || self.device_pending {
+        if self.device.is_some() || self.device_pending || self.device_unavailable.is_some() {
             return;
         }
         self.device_pending = true;
@@ -1340,7 +1354,10 @@ impl Store {
                         s.set_status(format!("Compute device: {label}"), cx);
                         s.recompute(cx);
                     }
-                    Err(e) => s.set_status(e, cx),
+                    Err(e) => {
+                        s.device_unavailable = Some(e.clone());
+                        s.set_status(e, cx);
+                    }
                 }
             });
         })

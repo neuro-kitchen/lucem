@@ -295,6 +295,9 @@ pub async fn connect(serve: &ServeInfo, how: impl Fn() -> Hello) -> StreamResult
     let wt = web_sys::window().and_then(|w| js_sys::Reflect::get(&w, &"lucemTransport".into()).ok()).filter(|t| !t.is_undefined());
     if let (Some(transport), Some(port)) = (wt, serve.webtransport_port) {
         let hostname = host.rsplit_once(':').map_or(host.as_str(), |(h, _)| h).to_string();
+        // `localhost` resolves to ::1 first, and QUIC does not fall back to IPv4 as TCP does: a
+        // server on 127.0.0.1 would be missed (the certificate names both)
+        let hostname = if hostname.eq_ignore_ascii_case("localhost") { "127.0.0.1".to_string() } else { hostname };
         let url = format!("https://{hostname}:{port}{WT_PATH}");
         let hash = js_sys::Uint8Array::from(serve.certificate_sha256.as_slice());
         match call(&transport, "open", &[url.into(), hash.into()]).await {

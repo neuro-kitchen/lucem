@@ -20,7 +20,7 @@ kitchen-ui.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
-web-sys = { workspace = true, features = ["Window", "Location", "Storage"] }
+web-sys = { workspace = true, features = ["Window", "Location", "Storage", "History"] }
 log.workspace = true
 futures-channel.workspace = true
 futures-util.workspace = true

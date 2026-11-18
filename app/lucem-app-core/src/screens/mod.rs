@@ -6,5 +6,6 @@ pub mod analyze;
 pub mod explore;
 pub mod home;
 pub mod pipeline;
+pub mod server_images;
 pub mod settings;
 pub mod sign_in;

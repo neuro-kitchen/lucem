@@ -127,6 +127,7 @@ impl Store {
     }
 
     pub(crate) fn after_change(&mut self, change: Changed, cx: &mut Context<Self>) {
+        self.keep_session_soon(cx);
         match &change {
             Changed::Images => {
                 // Selected layers and objects belong to the image shown before
@@ -211,5 +212,64 @@ mod tests {
         h.record(named("b"), "other".into());
         assert!(!h.can_redo(), "a new change drops the undone one");
         assert_eq!(h.labels().0, vec!["first", "other"]);
+    }
+}
+
+/// How long after the last change the session is kept (a burst of edits is written once).
+const KEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The session as kept between runs: the document, and the project file it is saved as (if any).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeptSession {
+    project_file: Option<PathBuf>,
+    doc: serde_json::Value,
+}
+
+impl Store {
+    /// Keeps the session for the next start, [`KEEP_AFTER`] after the last change (a restart or a
+    /// reload brings the work back instead of the home screen).
+    pub(crate) fn keep_session_soon(&mut self, cx: &mut Context<Self>) {
+        if self.keep_pending {
+            return;
+        }
+        self.keep_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(KEEP_AFTER).await;
+            let _ = this.update(cx, |s, _| {
+                s.keep_pending = false;
+                s.keep_session();
+            });
+        })
+        .detach();
+    }
+
+    fn keep_session(&self) {
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&self.doc.to_json()) else { return };
+        let kept = KeptSession { project_file: self.project_file.clone(), doc };
+        if let Ok(json) = serde_json::to_string(&kept)
+            && let Err(e) = crate::platform::keep_session(&json)
+        {
+            eprintln!("the session was not kept: {e}");
+        }
+    }
+
+    /// Opens the session the last run kept, when there is one with something in it; whether it
+    /// did. (Not when a file was asked for at start: that is opened instead.)
+    pub fn restore_session(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(kept) = crate::platform::kept_session().and_then(|t| serde_json::from_str::<KeptSession>(&t).ok()) else { return false };
+        let Ok(doc) = ProjectDoc::from_json(&kept.doc.to_string()) else { return false };
+        if doc.images.is_empty() && doc.annotations.is_empty() && doc.graph.nodes.is_empty() {
+            return false;
+        }
+        self.undo = Default::default();
+        self.doc = doc;
+        self.project_file = kept.project_file;
+        self.pyramids.clear();
+        self.results.clear();
+        self.sel.shapes.clear();
+        self.after_change(Changed::Images, cx);
+        self.set_workspace(crate::navigation::route::Workspace::Explore, cx);
+        self.set_status(format!("Reopened the last session ({})", self.doc.name), cx);
+        true
     }
 }
