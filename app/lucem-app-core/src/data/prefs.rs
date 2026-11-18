@@ -120,16 +120,48 @@ impl Prefs {
         Self::dir().map(|d| d.join("prefs.json"))
     }
 
-    pub fn load(path: Option<&Path>) -> Self {
-        path.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    /// The keys the user edits: `keybindings.toml` (`kitchen_shell::keys`).
+    pub fn keybindings_path() -> Option<PathBuf> {
+        Self::dir().map(|d| d.join("keybindings.toml"))
     }
 
+    /// `settings.toml` beside `prefs` (`prefs.json`): what the user edits by hand.
+    pub fn settings_path(prefs: &Path) -> PathBuf {
+        prefs.with_file_name("settings.toml")
+    }
+
+    /// `prefs.json`, then `settings.toml` beside it over it (written with every default when it
+    /// is missing; what it says that cannot be read is in [`crate::data::settings::take_notices`]).
+    pub fn load(path: Option<&Path>) -> Self {
+        let mut prefs: Self = path.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        if let Some(p) = path {
+            match std::fs::read_to_string(Self::settings_path(p)) {
+                Ok(text) => match crate::data::settings::Settings::parse(&text) {
+                    Ok((settings, notices)) => {
+                        settings.apply_to(&mut prefs);
+                        notices.into_iter().for_each(crate::data::settings::notice);
+                    }
+                    Err(e) => crate::data::settings::notice(e),
+                },
+                Err(_) => prefs.save(path),
+            }
+        }
+        prefs
+    }
+
+    /// `prefs.json` and `settings.toml` (its comments and order kept).
     pub fn save(&self, path: Option<&Path>) {
         let Some(p) = path else { return };
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
         let _ = std::fs::write(p, serde_json::to_string_pretty(self).unwrap_or_default());
+        let settings = Self::settings_path(p);
+        let current = std::fs::read_to_string(&settings).unwrap_or_default();
+        let text = crate::data::settings::Settings::from_prefs(self).write_into(&current);
+        if text != current {
+            let _ = std::fs::write(settings, text);
+        }
     }
 
     /// Puts `path` first in the recent list.

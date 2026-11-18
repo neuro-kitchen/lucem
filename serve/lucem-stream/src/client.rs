@@ -58,6 +58,14 @@ impl Session {
         Ok(TileData { width, height, data })
     }
 
+    /// Calls `method` of the server's plugin `plugin` with `body`: its JSON answer.
+    pub async fn plugin_call(&self, plugin: &str, method: &str, body: serde_json::Value) -> StreamResult<serde_json::Value> {
+        match self.ask(&Request::Plugin { plugin: plugin.into(), method: method.into(), body }).await?.0 {
+            Response::Plugin { body } => Ok(body),
+            other => Err(StreamError::protocol(format!("unexpected answer {other:?}"))),
+        }
+    }
+
     pub fn close(&self) {
         self.connection.close(quinn::VarInt::from_u32(0), b"done");
     }

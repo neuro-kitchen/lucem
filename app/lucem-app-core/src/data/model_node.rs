@@ -48,25 +48,21 @@ fn stored() -> &'static Mutex<HashMap<String, Stored>> {
 
 /// Asks node `id` to run on its next evaluation.
 pub fn arm(id: &str) {
-    if let Ok(mut a) = armed().lock() {
-        a.insert(id.to_string());
-    }
+    crate::platform::lock(armed()).insert(id.to_string());
 }
 
 /// Whether node `id` was asked to run (and takes the request).
 pub fn take_armed(id: &str) -> bool {
-    armed().lock().is_ok_and(|mut a| a.remove(id))
+    crate::platform::lock(armed()).remove(id)
 }
 
 pub fn store_run(signature: String, run: Stored) {
-    if let Ok(mut s) = stored().lock() {
-        s.insert(signature, run);
-    }
+    crate::platform::lock(stored()).insert(signature, run);
 }
 
 /// The last run of a node with this signature, if any.
 pub fn last_run(signature: &str) -> Option<Stored> {
-    stored().lock().ok()?.get(signature).cloned()
+    crate::platform::lock(stored()).get(signature).cloned()
 }
 
 /// A stored run sampled over a region (`x0, y0, w, h` at `ds` level-0 px per pixel); 0 outside it.
@@ -176,7 +172,7 @@ pub fn run(doc: &ProjectDoc, image: &str, model: &str, prompt_class: Option<&str
     let mut hsh = std::collections::hash_map::DefaultHasher::new();
     (model, w, h, &rgb, format!("{ps:?}")).hash(&mut hsh);
     let key = hsh.finish();
-    if let Some(l) = cache().lock().ok().and_then(|c| c.0.get(&key).cloned()) {
+    if let Some(l) = crate::platform::lock(cache()).0.get(&key).cloned() {
         return Ok(l);
     }
     // A folder per request: model nodes may run at the same time
@@ -234,7 +230,8 @@ pub fn run(doc: &ProjectDoc, image: &str, model: &str, prompt_class: Option<&str
         }
         labels
     };
-    if let Ok(mut c) = cache().lock() {
+    {
+        let mut c = crate::platform::lock(cache());
         c.0.insert(key, labels.clone());
         c.1.push_back(key);
         while c.1.len() > CACHE {
@@ -278,11 +275,11 @@ mod tests {
         assert!(none.iter().any(|r| r.error.as_deref().is_some_and(|e| e.contains("press Run"))), "{:?}", none.iter().map(|r| r.error.clone()).collect::<Vec<_>>());
         // Run: labels; afterwards drawn from that run, without running again
         super::arm("model");
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         let first = crate::data::results::compute(&device.client, &doc, &py, &req, &analysis);
         let t_first = t0.elapsed();
         assert!(first.iter().all(|r| r.error.is_none()) && first.iter().any(|r| r.layer.is_some()), "{:?}", first.iter().map(|r| r.error.clone()).collect::<Vec<_>>());
-        let t1 = std::time::Instant::now();
+        let t1 = web_time::Instant::now();
         let again = crate::data::results::compute(&device.client, &doc, &py, &req, &analysis);
         let t_again = t1.elapsed();
         assert!(again.iter().all(|r| r.error.is_none()));

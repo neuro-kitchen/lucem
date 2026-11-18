@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::data::store::{Arrangement, MaskOperation, Store, ViewKind, ViewRequest};
+use crate::data::store::{AppEvent, Arrangement, MaskOperation, Store, ViewKind, ViewRequest};
 use crate::domain::boolean::ShapeOp;
 use crate::domain::command::Command;
 use crate::domain::tool::{Tool, ToolState};
@@ -33,6 +33,7 @@ pub struct Ctx {
     /// The frame (set once it exists: commands only run after).
     pub shell: Rc<std::cell::OnceCell<WeakEntity<Shell>>>,
     pub pipeline: WeakEntity<crate::screens::pipeline::PipelineView>,
+    #[cfg(not(target_family = "wasm"))]
     pub analyze: WeakEntity<crate::screens::analyze::AnalyzeView>,
     /// Shows or hides the Keyboard & mouse sheet.
     pub toggle_help: Rc<dyn Fn(&mut Window, &mut App)>,
@@ -68,6 +69,29 @@ fn needs_image(store: &Entity<Store>) -> impl Fn(&App) -> Result<(), String> + '
 // ----------------------------------------------------------------------------
 
 fn prompt(store: Entity<Store>, directories: bool, files: bool, prompt: &'static str, save_folder: bool, cx: &mut App) {
+    // A browser page has no file dialog: it opens what its server offers, or (the docs viewer,
+    // running alone) the files the user picks, read by its engine
+    if !crate::platform::LOCAL_FILES {
+        let _ = (files, prompt);
+        if save_folder {
+            store.update(cx, |s, cx| s.set_status("Saving a project is done by the desktop app for now (the page keeps the session itself)", cx));
+            return;
+        }
+        #[cfg(target_family = "wasm")]
+        if crate::data::remote::runs_alone() {
+            // Open file…: the file chooser (no question from the browser); Open project…: the
+            // folder chooser (a project's place, or an OME-Zarr: the browser asks once)
+            let project = prompt.starts_with("Open project");
+            cx.spawn(async move |cx| {
+                let picked = crate::data::remote::pick_files(project).await;
+                let _ = store.update(cx, |s, cx| s.open_picked(picked, cx));
+            })
+            .detach();
+            return;
+        }
+        store.update(cx, |_, cx| cx.emit(AppEvent::ServerImages));
+        return;
+    }
     let rx = cx.prompt_for_paths(PathPromptOptions { files, directories, multiple: false, prompt: Some(prompt.into()) });
     cx.spawn(async move |cx| match rx.await {
         Ok(Ok(Some(paths))) => {
@@ -83,12 +107,12 @@ fn prompt(store: Entity<Store>, directories: bool, files: bool, prompt: &'static
 
 /// Asks for an image or OME-Zarr container (a folder) and opens it.
 pub fn open_image(store: &Entity<Store>, cx: &mut App) {
-    prompt(store.clone(), true, true, "Open image or OME-Zarr", false, cx);
+    prompt(store.clone(), true, true, "Open file (an image or OME-Zarr)", false, cx);
 }
 
 /// Asks for a project (its folder or `project.lucem.json`) and opens it.
 pub fn open_project(store: &Entity<Store>, cx: &mut App) {
-    prompt(store.clone(), true, true, "Open project (folder or project.lucem.json)", false, cx);
+    prompt(store.clone(), true, true, "Open project (or an OME-Zarr)", false, cx);
 }
 
 fn save_project(store: &Entity<Store>, cx: &mut App) {
@@ -198,8 +222,8 @@ pub fn register(registry: &Registry, c: &Ctx) {
     let mut list = vec![
         // File
         CommandSpec::new("file.new", "New project", IconName::FilePlus, st(|s, cx| s.new_project(cx))).group("File").hint("Close the project and start an empty one").key("secondary-n"),
-        CommandSpec::new("file.open_image", "Open image or OME-Zarr…", IconName::ImagePlus, move |_, cx| open_image(&s1, cx)).group("File").hint("Add an image to the project").key("secondary-o"),
-        CommandSpec::new("file.open_project", "Open project…", IconName::FolderOpen, move |_, cx| open_project(&s2, cx)).group("File").hint("A project folder or project.lucem.json").key("secondary-shift-o"),
+        CommandSpec::new("file.open_image", "Open file…", IconName::ImagePlus, move |_, cx| open_image(&s1, cx)).group("File").hint("An image: OME-Zarr, TIFF, PNG, JPEG").key("secondary-o"),
+        CommandSpec::new("file.open_project", "Open project…", IconName::FolderOpen, move |_, cx| open_project(&s2, cx)).group("File").hint("A project (project.lucem.json and what it names), or an OME-Zarr").key("secondary-shift-o"),
         CommandSpec::new("file.save_in", "Save project in folder…", IconName::Save, move |_, cx| save_project(&s3, cx)).group("File").hint("Writes project.lucem.json, pipeline.json and layout.json in a folder").key("secondary-shift-s"),
         CommandSpec::with_args::<PathArgs>("file.open", "Open a file", IconName::FolderOpen, move |a, _, cx| {
             s4.update(cx, |s, cx| s.open(a.path.into(), cx));
@@ -445,18 +469,23 @@ pub fn register(registry: &Registry, c: &Ctx) {
         classify("hist.class_regions", "Class map → shapes", IconName::Shapes, "The class map's regions as shapes", |s, cx| s.hist_class_regions(cx)),
     ]);
     // Automate: scripts
-    let (p1, p2, an) = (s.clone(), s.clone(), c.analyze.clone());
-    let an_store = s.clone();
+    let (p1, p2) = (s.clone(), s.clone());
     list.extend([
         CommandSpec::new("script.new_python", "New Python script node…", IconName::SquareTerminal, move |_, cx| p1.update(cx, |s, cx| s.add_script_node(crate::data::script::Language::Python, cx))).group("Automate").hint("A step written in Python"),
         CommandSpec::new("script.new_rust", "New Rust script node…", IconName::SquareTerminal, move |_, cx| p2.update(cx, |s, cx| s.add_script_node(crate::data::script::Language::Rust, cx))).group("Automate").hint("A step written in Rust (crates allowed)"),
-        CommandSpec::new("analyze.code", "Code on the measurement table", IconName::Code, move |_, cx| {
-            an_store.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx));
-            let _ = an.update(cx, |a, cx| a.open_code(cx));
-        })
-        .group("Automate")
-        .hint("Python or Rust over the table"),
     ]);
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let (an, an_store) = (c.analyze.clone(), s.clone());
+        list.push(
+            CommandSpec::new("analyze.code", "Code on the measurement table", IconName::Code, move |_, cx| {
+                an_store.update(cx, |s, cx| s.set_workspace(Workspace::Analyze, cx));
+                let _ = an.update(cx, |a, cx| a.open_code(cx));
+            })
+            .group("Automate")
+            .hint("Python or Rust over the table"),
+        );
+    }
     // What an agent needs to see and point: a snapshot, the shapes, drawing and naming them
     let (n1, n2, n3, n4, n5, n6) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
     list.extend([
@@ -500,7 +529,7 @@ pub fn register(registry: &Registry, c: &Ctx) {
     ]);
 
     // Help, Settings sections, where lucem runs
-    let (h, m1) = (c.toggle_help.clone(), c.clone());
+    let (h, m1, r1) = (c.toggle_help.clone(), c.clone(), s.clone());
     list.extend([
         CommandSpec::new("help.keys", "Keyboard & mouse", IconName::Keyboard, move |w, cx| h(w, cx)).group("Help").hint("Every key and gesture").key("f1").read_only(),
         CommandSpec::new("settings.models", "Models…", IconName::Sparkles, move |window, cx| {
@@ -513,7 +542,19 @@ pub fn register(registry: &Registry, c: &Ctx) {
         .hint("Install and choose the model plugins (Settings › Models)")
         .read_only(),
         CommandSpec::new("remote.this", "This computer", IconName::Monitor, |_, _| {}).group("App").hint("lucem runs on this computer").checked(|_| true).read_only(),
-        CommandSpec::new("remote.connect", "Connect to a lucem server…", IconName::Server, |_, _| {}).group("App").hint("Images and work on a paired server").enabled(|_| Err("Pairing in the app is next: `lucem pair` pairs from the command line".into())),
+        CommandSpec::new("remote.connect", "Connect to a lucem server…", IconName::Server, move |_, cx| {
+            r1.update(cx, |s, cx| s.set_status("Asking the paired servers for their images…", cx));
+            let st = r1.clone();
+            let task = cx.background_executor().spawn(async { crate::data::remote::refresh() });
+            cx.spawn(async move |cx| {
+                let said = task.await;
+                st.update(cx, |s, cx| s.set_status(said, cx));
+            })
+            .detach();
+        })
+        .group("App")
+        .hint("List the images of the servers this computer is paired with (lucem pair); open them from the server menu")
+        .enabled(|_| if !crate::data::remote::has_servers() { Err("No paired servers: `lucem pair <host:port> <code>` pairs this computer with one".into()) } else { Ok(()) }),
     ]);
     registry.extend(list);
     providers(registry, s);
@@ -735,6 +776,21 @@ fn snapshot(s: &Store, max_side: usize) -> Result<Value, String> {
 /// The menu entries that follow what the project holds.
 fn providers(registry: &Registry, s: &Entity<Store>) {
     let store = s.clone();
+    registry.provide("remote.images", |_| {
+        let mut out = Vec::new();
+        for (addr, found) in crate::data::remote::last_listed() {
+            out.push(MenuItem::Separator);
+            match found {
+                Ok(images) if images.is_empty() => out.push(MenuItem::label(format!("{addr}: no images"))),
+                Ok(images) => {
+                    out.push(MenuItem::label(addr.clone()));
+                    out.extend(images.iter().take(40).map(|p| MenuItem::run(p.clone(), "file.open", json!({"path": lucem_stream::remote_name(&addr, p)})).icon(IconName::Image)));
+                }
+                Err(e) => out.push(MenuItem::label(e)),
+            }
+        }
+        out
+    });
     registry.provide("file.recent", move |cx| {
         let recent = store.read(cx).prefs.recent.clone();
         if recent.is_empty() {

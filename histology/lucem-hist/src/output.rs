@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use polars::prelude::*;
+use lucem_table::polars::prelude::*;
 
 use crate::error::{invalid, HistResult};
 use crate::objects::{HistObject, Polygon};

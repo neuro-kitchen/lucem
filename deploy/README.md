@@ -54,6 +54,29 @@ podman run --rm --device nvidia.com/gpu=all --security-opt=label=disable --usern
   -v ~/lucem-data:/data:z lucem-serve:nvidia run /data/spec.json /data/slide.ome.zarr /data/mask.ome.zarr
 ```
 
+## The page (browsers)
+
+`lucem serve --web /usr/share/lucem/web` (the image's default command) serves the page on TCP
+8443 and WebTransport on UDP 8443. The page signs in with a pairing code once (`--pair` prints
+one at start; `lucem clients pair` makes more) and keeps a token; `lucem clients revoke` ends it.
+It views the images under `/data`; the server computes for it (pipelines on tiles, histology,
+whole-image runs).
+
+### Routes
+
+| Where the browser is | How | Notes |
+|---|---|---|
+| This computer | `-p 127.0.0.1:8443:8443/tcp -p 127.0.0.1:8443:8443/udp`, open `http://localhost:8443` | a browser counts localhost as secure: no certificate needed for the page |
+| A laptop, the server a cluster node | `ssh -L 8443:localhost:8443 node`, open `http://localhost:8443` | SSH carries TCP only: the page falls back to its WebSocket (no WebTransport) |
+| Your tailnet | `tailscale serve --https=443 http://127.0.0.1:8443` | a real certificate for the page; WebTransport needs UDP 8443 reachable too, else the WebSocket |
+| A lab network | `--certificate fullchain.pem --private-key key.pem --web-bind 0.0.0.0:8443`, publish both protocols | the page and the socket on HTTPS; WebTransport keeps its own 14-day certificate (restart the server within 14 days: the page reads the new hash on its next load) |
+
+Plain HTTP off loopback is refused unless asked for (`--web-plain-http`, as the image does, its
+port published only to 127.0.0.1). Every response carries a Content-Security-Policy (the page's
+own scripts only), `Cross-Origin-Opener-Policy` / `-Embedder-Policy` (threads), and
+`X-Content-Type-Options: nosniff`; the WebSocket and WebTransport refuse a browser whose
+`Origin` is not the page's own (another site open in the same browser cannot use the server).
+
 ## Who can connect
 
 Only clients the server has enrolled. The server keeps its own small certificate authority in

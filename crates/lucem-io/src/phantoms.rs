@@ -37,6 +37,11 @@ impl PhantomKind {
         }
     }
 
+    /// Its id in sample names (`sample:<id>`) and files (`samples/<id>.ome.zarr`).
+    pub fn id(self) -> String {
+        self.title().to_lowercase().replace([' ', '&', '/'], "-").replace("--", "-")
+    }
+
     pub fn subtitle(self) -> &'static str {
         match self {
             Self::FluorescenceNuclei => "512×512 · Confocal soma + neurite filaments for Otsu, Watershed & RegionProps",

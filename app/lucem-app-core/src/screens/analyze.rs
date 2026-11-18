@@ -33,7 +33,7 @@ use gpui_kit::{
 };
 use lucem_io::Pyramid;
 use lucem_view::{bgra_image, composite_bgra, ChannelDisplay};
-use polars::prelude::{AnyValue, Column, DataFrame, NamedFrom as _, Series};
+use lucem_table::polars::prelude::{Column, DataFrame, NamedFrom as _, Series};
 
 use crate::data::results::centroid_l0;
 use crate::data::script::{self, Language};
@@ -49,181 +49,8 @@ use crate::ui::widgets::{group_digits, EmptyState, MenuSelect, Section};
 const PREVIEW: f32 = 44.;
 const COL_W: f32 = 124.;
 
-/// The table in a form the filters, the sort and the plots read quickly.
-struct Model {
-    names: Vec<String>,
-    /// Per column: each row's text and, for numeric columns, its number.
-    text: Vec<Vec<String>>,
-    num: Vec<Vec<Option<f64>>>,
-    numeric: Vec<bool>,
-    /// The annotation of each row (the annotations table, or any table with an `id` column).
-    ids: Option<Vec<String>>,
-    /// The detected object of each row (`c12`, `t5`: the Cells and Tiles tables).
-    objects: Option<Vec<String>>,
-}
-
-fn text_of(v: &AnyValue) -> String {
-    match v {
-        AnyValue::Null => String::new(),
-        AnyValue::String(s) => s.to_string(),
-        AnyValue::StringOwned(s) => s.to_string(),
-        other => other.to_string().trim_matches('"').to_string(),
-    }
-}
-
-impl Model {
-    fn of(df: &DataFrame) -> Model {
-        let cols = df.columns();
-        let n = df.height();
-        let mut m = Model { names: Vec::new(), text: Vec::new(), num: Vec::new(), numeric: Vec::new(), ids: None, objects: None };
-        for c in cols {
-            let values: Vec<AnyValue> = (0..n).map(|i| c.get(i).unwrap_or(AnyValue::Null)).collect();
-            let num: Vec<Option<f64>> = values.iter().map(|v| if v.is_null() { None } else { v.extract::<f64>() }).collect();
-            let numeric = values.iter().zip(&num).all(|(v, x)| v.is_null() || x.is_some());
-            let text: Vec<String> = values.iter().zip(&num).map(|(v, x)| match (numeric, x) {
-                (true, Some(x)) => short_num(*x),
-                _ => text_of(v),
-            }).collect();
-            if c.name().as_str() == "id" {
-                m.ids = Some(text.clone());
-            }
-            if c.name().as_str() == "object" {
-                m.objects = Some(text.clone());
-            }
-            m.names.push(c.name().to_string());
-            m.text.push(text);
-            m.num.push(num);
-            m.numeric.push(numeric);
-        }
-        m
-    }
-
-    fn rows(&self) -> usize {
-        self.text.first().map_or(0, Vec::len)
-    }
-
-    /// Whether row `r` passes column `c`'s filter (`> 10`, `>= 1`, `< 5`, `<= 5`, `10..50`,
-    /// `= Tumor`, `!= Tumor`, or text it contains).
-    fn passes(&self, c: usize, r: usize, f: &str) -> bool {
-        let f = f.trim();
-        if f.is_empty() {
-            return true;
-        }
-        let text = &self.text[c][r];
-        let num = self.num[c][r];
-        let number = |s: &str| s.trim().parse::<f64>().ok();
-        if let Some((a, b)) = f.split_once("..") {
-            return match (num, number(a), number(b)) {
-                (Some(x), lo, hi) => lo.is_none_or(|lo| x >= lo) && hi.is_none_or(|hi| x <= hi),
-                _ => false,
-            };
-        }
-        for (op, test) in [(">=", 0), ("<=", 1), ("!=", 2), (">", 3), ("<", 4), ("=", 5)] {
-            if let Some(rest) = f.strip_prefix(op) {
-                let rest = rest.trim();
-                return match (test, num, number(rest)) {
-                    (0, Some(x), Some(v)) => x >= v,
-                    (1, Some(x), Some(v)) => x <= v,
-                    (3, Some(x), Some(v)) => x > v,
-                    (4, Some(x), Some(v)) => x < v,
-                    (2, _, _) => !text.eq_ignore_ascii_case(rest),
-                    (5, _, _) => text.eq_ignore_ascii_case(rest),
-                    _ => false,
-                };
-            }
-        }
-        text.to_lowercase().contains(&f.to_lowercase())
-    }
-
-    /// The rows that pass every filter and the search, in the sort's order.
-    fn order(&self, filters: &[(usize, String)], search: &str, sort: Option<(usize, bool)>) -> Vec<usize> {
-        let search = search.trim().to_lowercase();
-        let mut rows: Vec<usize> = (0..self.rows())
-            .filter(|&r| filters.iter().all(|(c, f)| self.passes(*c, r, f)))
-            .filter(|&r| search.is_empty() || self.text.iter().any(|col| col[r].to_lowercase().contains(&search)))
-            .collect();
-        if let Some((c, desc)) = sort {
-            if self.numeric[c] {
-                rows.sort_by(|&a, &b| self.num[c][a].unwrap_or(f64::NEG_INFINITY).total_cmp(&self.num[c][b].unwrap_or(f64::NEG_INFINITY)));
-            } else {
-                rows.sort_by(|&a, &b| self.text[c][a].cmp(&self.text[c][b]));
-            }
-            if desc {
-                rows.reverse();
-            }
-        }
-        rows
-    }
-
-    /// The rows in `order` as CSV (with a header).
-    fn csv(&self, order: &[usize]) -> String {
-        let mut out = self.names.join(",");
-        out.push('\n');
-        for &r in order {
-            let row: Vec<String> = (0..self.names.len()).map(|c| if self.numeric[c] { self.num[c][r].map_or(String::new(), |x| x.to_string()) } else { cell(&self.text[c][r]) }).collect();
-            out.push_str(&row.join(","));
-            out.push('\n');
-        }
-        out
-    }
-}
-
-/// A number shortened for the table.
-fn short_num(v: f64) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e12 {
-        format!("{}", v as i64)
-    } else if v.abs() >= 1000.0 {
-        format!("{v:.1}")
-    } else {
-        format!("{v:.3}")
-    }
-}
-
-/// A CSV cell (quoted when it holds a comma or quote).
-fn cell(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
-}
-
-/// Splits a CSV line (quotes, doubled quotes).
-fn split_csv(line: &str) -> Vec<String> {
-    let (mut out, mut cur, mut quoted, mut chars) = (Vec::new(), String::new(), false, line.chars().peekable());
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' if quoted && chars.peek() == Some(&'"') => {
-                cur.push('"');
-                chars.next();
-            }
-            '"' => quoted = !quoted,
-            ',' if !quoted => out.push(std::mem::take(&mut cur)),
-            c => cur.push(c),
-        }
-    }
-    out.push(cur);
-    out
-}
-
-/// A CSV text (a header row first) as a frame: a column is numeric when every non-empty cell is
-/// a number.
-fn parse_csv(text: &str) -> Result<DataFrame, String> {
-    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let names = split_csv(lines.next().ok_or("the result table is empty")?);
-    let rows: Vec<Vec<String>> = lines.map(split_csv).collect();
-    let n = rows.len();
-    let cols: Vec<Column> = names
-        .iter()
-        .enumerate()
-        .map(|(c, name)| {
-            let v: Vec<&str> = rows.iter().map(|r| r.get(c).map_or("", |s| s.as_str())).collect();
-            let blank = |s: &str| s.is_empty() || s == "null" || s == "NaN" || s == "nan";
-            if v.iter().all(|s| blank(s) || s.parse::<f64>().is_ok()) {
-                Column::from(Series::new(name.as_str().into(), v.iter().map(|s| if blank(s) { None } else { s.parse::<f64>().ok() }).collect::<Vec<Option<f64>>>()))
-            } else {
-                Column::from(Series::new(name.as_str().into(), v.iter().map(|s| (!blank(s)).then(|| s.to_string())).collect::<Vec<Option<String>>>()))
-            }
-        })
-        .collect();
-    DataFrame::new(n, cols).map_err(|e| e.to_string())
-}
+/// The table as the filters, the sort and the plots read it (lucem-table).
+use lucem_table::view::{parse_csv, short_num, TableView as Model};
 
 /// A run of code on the table.
 #[derive(Clone)]
@@ -1825,7 +1652,7 @@ mod tests {
         assert_eq!(m.order(&[(2, "1..20".into())], "", None), vec![0, 1]);
         assert_eq!(m.order(&[(1, "= stroma".into())], "", None), vec![1]);
         assert_eq!(m.order(&[], "tum", Some((2, true))), vec![2, 0]);
-        assert_eq!(split_csv("a,\"b,c\",\"d\"\"e\""), vec!["a", "b,c", "d\"e"]);
+        assert_eq!(lucem_table::view::split_csv("a,\"b,c\",\"d\"\"e\""), vec!["a", "b,c", "d\"e"]);
     }
 }
 

@@ -8,23 +8,16 @@ use lucem_app_core::data::store::Store;
 use lucem_app_core::navigation::actions;
 
 fn main() {
-    lucem_app_core::legacy::adopt();
-    // An agent's MCP server: the running app's commands, through its socket
-    let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("--mcp-bridge") {
-        let Some(socket) = args.get(2) else {
-            eprintln!("usage: lucem-app --mcp-bridge <socket>");
-            std::process::exit(2);
-        };
-        if let Err(e) = kitchen_agent::bridge::bridge_stdio(std::path::Path::new(socket)) {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-        return;
+    // Profiling: every span goes to Tracy while it runs
+    #[cfg(feature = "tracy")]
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(tracing_tracy::TracyLayer::default()));
     }
+    lucem_app_core::legacy::adopt();
     // `lucem-app <path>` opens an image, an OME-Zarr container or a project
     let open = std::env::args().nth(1).map(std::path::PathBuf::from);
-    gpui_kit::application().with_assets(kitchen_ui::icons::AppAssets::new().all_icons()).run(move |cx| {
+    gpui_kit::application().with_assets(lucem_app_core::ui::assets::app_assets()).run(move |cx| {
         gpui_kit::init(cx);
         actions::bind_keys(cx);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
@@ -44,9 +37,15 @@ fn main() {
         let s = store.clone();
         gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| LucemApp::new(s, window, cx))).expect("failed to open the main window");
         cx.activate(true);
-        if let Some(p) = open.clone() {
-            let p = std::fs::canonicalize(&p).unwrap_or(p);
-            store.update(cx, |s, cx| s.open(p, cx));
+        match open.clone() {
+            Some(p) => {
+                let p = std::fs::canonicalize(&p).unwrap_or(p);
+                store.update(cx, |s, cx| s.open(p, cx));
+            }
+            // The work of the last run, as it was left
+            None => {
+                store.update(cx, |s, cx| s.restore_session(cx));
+            }
         }
     });
 }

@@ -21,7 +21,7 @@ use lucem_ops::morphology::grayscale::{morph_gradient, GrayMorphology};
 use lucem_ops::restore::background::{rolling_ball, RollingBall};
 use lucem_ops::restore::denoise::{tv_chambolle, TvChambolle};
 use lucem_ops::threshold::global::otsu;
-use polars::prelude::DataFrame;
+use lucem_table::polars::prelude::DataFrame;
 
 use crate::modifier::{ModifierKind, ModifierNode};
 

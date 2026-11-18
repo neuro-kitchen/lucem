@@ -1,5 +1,6 @@
 # Build context of deploy/Containerfile (the repository root): sources only
 target/
+# The page is built before the image; only its dist/ goes in (the rest of the folder is source)
 .data/
 .git/
 .tasks/

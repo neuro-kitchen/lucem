@@ -225,7 +225,7 @@ mod tests {
         let mut p = polys[0].clone();
         p.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(p, vec![[2.0, 1.0], [2.0, 4.0], [5.0, 1.0], [5.0, 4.0]]);
-        assert_eq!(crate::domain::annotation::polygon_area(&polys[0]), 9.0);
+        assert_eq!(crate::annotation::polygon_area(&polys[0]), 9.0);
     }
 
     #[test]

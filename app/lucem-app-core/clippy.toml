@@ -1,0 +1,7 @@
+# A browser page's main thread may not wait (dsp-kitchen learned it): locks go through
+# crate::platform::lock, and nothing blocks on a condition or a channel on the UI side.
+disallowed-methods = [
+    { path = "std::sync::Mutex::lock", reason = "use crate::platform::lock: a browser page's main thread may not wait" },
+    { path = "std::sync::Condvar::wait", reason = "a browser page's main thread may not wait: await instead" },
+    { path = "async_channel::Receiver::recv_blocking", reason = "a browser page's main thread may not wait: await instead" },
+]

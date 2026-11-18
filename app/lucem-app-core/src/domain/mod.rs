@@ -1,12 +1,6 @@
 //! Plain models shared by the screens and the data layer: the project document, its graph, its
-//! annotations, and the commands that change it.
+//! annotations, and the commands that change it ([`lucem_session`], re-exported here so the app's
+//! paths stay `crate::domain::…`), and the app's own tools.
 
-pub mod annotation;
-pub mod boolean;
-pub mod command;
-pub mod geometry;
-pub mod graph;
-pub mod hierarchy;
-pub mod paths;
-pub mod project;
+pub use lucem_session::{annotation, boolean, command, geometry, graph, hierarchy, paths, project};
 pub mod tool;

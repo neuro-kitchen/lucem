@@ -11,6 +11,10 @@
 #
 # Build from the repository root (the build context is the whole workspace):
 #   podman build -f deploy/Containerfile --ignorefile deploy/.containerignore --target nvidia -t lucem-serve:nvidia .
+# The page must be built first (it goes into every target): app/lucem-app-web/build.sh
+# Run (images under ./data; the page at http://localhost:8443, the pairing code in the log):
+#   podman run --rm -p 50051:50051/udp -p 127.0.0.1:8443:8443/tcp -p 127.0.0.1:8443:8443/udp \
+#     -v ./data:/data:Z --device nvidia.com/gpu=all lucem-serve:nvidia
 
 # Rust toolchain of the build
 ARG RUST_VERSION=1.99
@@ -33,7 +37,20 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # What every target shares: the program, a non-root user, /data
 FROM docker.io/library/debian:${DEBIAN}-slim@${DEBIAN_DIGEST} AS base
+# ca-certificates: verified downloads over HTTPS (NVIDIA's CUDA repository below; the slim image
+# has no certificates, and apt refuses that repository without them)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/lucem /usr/local/bin/
+# The page (the threaded browser build, its loader and service worker), built before the image
+# with app/lucem-app-web/build.sh (nightly Rust; the release workflow does it): served by
+# `lucem serve --web`, it views the images under /data and the server computes for it
+COPY app/lucem-app-web/dist/index.html app/lucem-app-web/dist/loader.js app/lucem-app-web/dist/isolate-sw.js /usr/share/lucem/web/
+COPY app/lucem-app-web/dist/mt /usr/share/lucem/web/mt
+# The app's samples as files, offered to pages as samples/… (`--samples`): a page opens them,
+# never generates them
+RUN lucem samples /usr/share/lucem/samples
 # Not root (uid 10001); /data holds the images and the authority of enrolled clients
 RUN useradd --create-home --uid 10001 lucem && install -d -o lucem -g lucem /data
 WORKDIR /data
@@ -43,11 +60,18 @@ ENV XDG_CACHE_HOME=/home/lucem/.cache XDG_RUNTIME_DIR=/tmp
 RUN install -d -o lucem -g lucem /home/lucem/.cache
 VOLUME /home/lucem/.cache
 EXPOSE 50051/udp
+# The page: HTTP on TCP 8443 and WebTransport on UDP 8443 (its own 14-day certificate, checked by
+# the page by its hash). Plain HTTP because the container's address is not loopback
+# (--web-plain-http): publish it only to this computer (-p 127.0.0.1:8443:8443/tcp and /udp) and
+# open http://localhost:8443 (a browser counts localhost as secure); for other computers a
+# proxy with a certificate in front, or --certificate/--private-key (deploy/README.md, Routes)
+EXPOSE 8443/tcp 8443/udp
 ENTRYPOINT ["lucem"]
 ENV LUCEM_SERVE_AUTH_DIR=/data/.lucem-auth
 ENV LUCEM_SERVE_DATA=/data
-# Listen on every interface of the container; only enrolled clients get in
-CMD ["serve", "--bind", "0.0.0.0:50051"]
+# Listen on every interface of the container; only enrolled clients and paired pages get in.
+# --pair prints a one-time pairing code at start (`podman logs`), for a browser or a computer
+CMD ["serve", "--bind", "0.0.0.0:50051", "--pair", "--web", "/usr/share/lucem/web", "--web-bind", "0.0.0.0:8443", "--web-plain-http", "--samples", "/usr/share/lucem/samples"]
 
 # NVIDIA: CUDA and Vulkan. The host's driver is passed in by the NVIDIA Container Toolkit (CDI); the
 # image brings what the driver does not: NVRTC, the Vulkan loader, and libX11 / libXext.

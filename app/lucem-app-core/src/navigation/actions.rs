@@ -12,9 +12,20 @@ actions!(
     ]
 );
 
-/// Binds the canvas' own keys.
+/// The canvas' commands and their default keys: the `[canvas]` section of `keybindings.toml`.
+pub const CANVAS_KEYS: &[(&str, &[&str])] = &[("toggle_sidebar", &["tab"])];
+
+/// Reads `keybindings.toml` (once, at start) and binds the canvas' own keys: the defaults, or
+/// what the file says in `[canvas]`. The commands' keys are bound with the frame (`[commands]`).
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("tab", ToggleSidebar, Some("ImageCanvas"))]);
+    if let Some(path) = crate::data::prefs::Prefs::keybindings_path() {
+        kitchen_shell::keys::load_keybindings(&path);
+    }
+    let context = gpui_kit::KeyBindingContextPredicate::parse("ImageCanvas").ok().map(std::rc::Rc::new);
+    let load = |key: &str, cx: &App| KeyBinding::load(key, Box::new(ToggleSidebar), context.clone(), false, None, cx);
+    let resolved = kitchen_shell::keys::resolve("canvas", CANVAS_KEYS, |key| load(key, cx).is_ok());
+    let bindings: Vec<KeyBinding> = resolved.iter().flat_map(|(_, keys)| keys.iter().filter_map(|key| load(key, cx).ok())).collect();
+    cx.bind_keys(bindings);
 }
 
 /// Every binding as (keys, what it does), for the Keyboard & mouse dialog.

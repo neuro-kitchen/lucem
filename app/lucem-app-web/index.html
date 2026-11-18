@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lucem</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232b7f86'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='white' stroke-width='2.6'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='white'/%3E%3C/svg%3E" />
+    <style>
+      :root { color-scheme: dark light; --bg: #1e1e1e; --fg: #e6e6e6; --muted: #a0a0a0; --accent: #2b7f86; }
+      @media (prefers-color-scheme: light) { :root { --bg: #fafafa; --fg: #1e1e1e; --muted: #5a5a5a; } }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; font: 15px/1.5 system-ui, sans-serif; }
+      #note { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; }
+      #note > div { max-width: 560px; }
+      #note h1 { font-size: 20px; margin: 0 0 8px; }
+      #note p, #note li { color: var(--muted); }
+      #note code { color: var(--fg); }
+      #note a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div id="note"><div><p>Checking this browser…</p></div></div>
+    <script type="module" src="./loader.js"></script>
+  </body>
+</html>

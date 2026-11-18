@@ -5,25 +5,19 @@
 //! reachable); levels, channels and tiles are checked by the reader; every connection is limited
 //! in its concurrent requests (see [`crate::tls`]) and the server in its connections.
 
-use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
-
-use lucem_io::Pyramid;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::auth::{Authority, Peer};
 use crate::error::{StreamError, StreamResult};
-use crate::protocol::{read_message, write_message, ImageInfo, Request, Response};
+use crate::engine::Images;
+use crate::protocol::{read_message, write_message, Request, Response};
 
 /// Closing code for a client whose certificate is not enrolled or is revoked.
 pub const REFUSED_CLIENT: u32 = 1;
 /// Clients at once by default.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 32;
-/// Images kept open.
-const OPEN_IMAGES: usize = 64;
-/// How deep the listing looks under the data folder.
-const LIST_DEPTH: usize = 4;
 
 /// What a server serves.
 #[derive(Debug, Clone)]
@@ -41,12 +35,14 @@ pub struct Server {
     anonymous: bool,
     /// The names in the server's certificate, given to a computer that pairs.
     names: Vec<String>,
+    /// Its plugins ([`crate::plugin`]).
+    plugins: Vec<Arc<dyn crate::plugin::ServerPlugin>>,
 }
 
 impl Server {
     /// Listens on `addr` (UDP).
     pub fn bind(addr: SocketAddr, config: quinn::ServerConfig) -> StreamResult<Self> {
-        Ok(Self { endpoint: quinn::Endpoint::server(config, addr)?, max_connections: DEFAULT_MAX_CONNECTIONS, authority: None, anonymous: false, names: Vec::new() })
+        Ok(Self { endpoint: quinn::Endpoint::server(config, addr)?, max_connections: DEFAULT_MAX_CONNECTIONS, authority: None, anonymous: false, names: Vec::new(), plugins: Vec::new() })
     }
 
     /// Checks every client's certificate against `authority`'s registry after the handshake.
@@ -69,6 +65,12 @@ impl Server {
     }
 
     /// At most `n` clients at once (at least one).
+    /// Answers calls to `plugins` (domain services: histology, models), by their ids.
+    pub fn with_plugins(mut self, plugins: Vec<Arc<dyn crate::plugin::ServerPlugin>>) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
     pub fn with_max_connections(mut self, n: usize) -> Self {
         self.max_connections = n.max(1);
         self
@@ -129,18 +131,19 @@ impl Server {
     /// Serves until the endpoint is closed.
     pub async fn run(self, options: ServeOptions) -> StreamResult<()> {
         let root = options.data.canonicalize()?;
-        let images = Arc::new(Images { root, open: Mutex::new((HashMap::new(), VecDeque::new())) });
+        let images = Arc::new(Images::new(root));
         let names = Arc::new(self.names.clone());
+        let plugins = Arc::new(self.plugins.clone());
         while let Some((connection, peer)) = self.accept().await {
             tracing::info!("client {:?} connected from {}", peer.name, connection.remote_address());
             let images = images.clone();
-            let (authority, names, peer) = (self.authority.clone(), names.clone(), Arc::new(peer));
+            let (authority, names, peer, plugins) = (self.authority.clone(), names.clone(), Arc::new(peer), plugins.clone());
             tokio::spawn(async move {
                 loop {
                     let Ok((send, recv)) = connection.accept_bi().await else { break };
-                    let (images, authority, names, peer) = (images.clone(), authority.clone(), names.clone(), peer.clone());
+                    let (images, authority, names, peer, plugins) = (images.clone(), authority.clone(), names.clone(), peer.clone(), plugins.clone());
                     tokio::spawn(async move {
-                        if let Err(e) = answer(send, recv, images, authority.as_deref(), &names, &peer).await {
+                        if let Err(e) = answer(send, recv, images, authority.as_deref(), &names, &peer, plugins).await {
                             tracing::debug!("request failed: {e}");
                         }
                     });
@@ -151,92 +154,15 @@ impl Server {
     }
 }
 
-type OpenImages = (HashMap<PathBuf, Arc<Pyramid>>, VecDeque<PathBuf>);
-
-struct Images {
-    root: PathBuf,
-    open: Mutex<OpenImages>,
-}
-
-/// Whether the path names an image the server may open.
-fn is_image_name(path: &Path) -> bool {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
-    name.ends_with(".zarr") || name.ends_with(".tif") || name.ends_with(".tiff")
-}
-
-impl Images {
-    /// `relative`, checked: inside the data folder, nothing hidden, an image.
-    fn resolve(&self, relative: &str) -> Result<PathBuf, String> {
-        let path = Path::new(relative);
-        let plain = path.components().all(|c| matches!(c, Component::Normal(n) if !n.to_string_lossy().starts_with('.')));
-        if relative.is_empty() || !plain {
-            return Err("that path is not allowed".into());
-        }
-        if !is_image_name(path) {
-            return Err("that is not an image".into());
-        }
-        let full = self.root.join(path).canonicalize().map_err(|_| "no such image".to_string())?;
-        if !full.starts_with(&self.root) {
-            return Err("that path is not allowed".into());
-        }
-        Ok(full)
-    }
-
-    fn open(&self, relative: &str) -> Result<Arc<Pyramid>, String> {
-        let full = self.resolve(relative)?;
-        if let Some(p) = self.open.lock().map_err(|e| e.to_string())?.0.get(&full) {
-            return Ok(p.clone());
-        }
-        let pyramid = Arc::new(Pyramid::open(&full).map_err(|e| e.to_string())?);
-        let mut open = self.open.lock().map_err(|e| e.to_string())?;
-        if open.0.insert(full.clone(), pyramid.clone()).is_none() {
-            open.1.push_back(full);
-        }
-        while open.1.len() > OPEN_IMAGES {
-            if let Some(old) = open.1.pop_front() {
-                open.0.remove(&old);
-            }
-        }
-        Ok(pyramid)
-    }
-
-    fn list(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        walk(&self.root, &self.root, 0, &mut out);
-        out.sort();
-        out
-    }
-}
-
-fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
-        let path = e.path();
-        if e.file_name().to_string_lossy().starts_with('.') || e.file_type().map_or(true, |t| t.is_symlink()) {
-            continue;
-        }
-        if is_image_name(&path) {
-            if let Ok(r) = path.strip_prefix(root) {
-                out.push(r.to_string_lossy().into_owned());
-            }
-        } else if path.is_dir() && depth < LIST_DEPTH {
-            walk(root, &path, depth + 1, out);
-        }
-    }
-}
-
-fn describe(p: &Pyramid) -> ImageInfo {
-    ImageInfo {
-        name: p.name.clone(),
-        dtype: p.dtype.clone(),
-        channels: p.channels.iter().map(|c| c.label.clone()).collect(),
-        pixel_size_um: p.pixel_size_um,
-        z_spacing_um: p.z_spacing_um,
-        levels: p.levels.iter().map(|l| [l.depth, l.height, l.width, l.tile_d, l.tile_h, l.tile_w]).collect(),
-    }
-}
-
-async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images: Arc<Images>, authority: Option<&Authority>, names: &[String], peer: &Peer) -> StreamResult<()> {
+async fn answer(
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    images: Arc<Images>,
+    authority: Option<&Authority>,
+    names: &[String],
+    peer: &Peer,
+    plugins: Arc<Vec<Arc<dyn crate::plugin::ServerPlugin>>>,
+) -> StreamResult<()> {
     let request: Request = read_message(&mut recv).await?;
     let request = match (request, authority) {
         (Request::Pair { hello }, Some(authority)) => {
@@ -256,7 +182,8 @@ async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images
         }
         (request, _) => request,
     };
-    let result = tokio::task::spawn_blocking(move || work(&images, request)).await.map_err(StreamError::protocol)?;
+    let context = crate::plugin::PluginContext { root: images.root.clone(), peer: peer.name.clone(), may_write: peer.permission == crate::auth::Permission::Control, samples: images.samples().map(std::path::Path::to_path_buf) };
+    let result = tokio::task::spawn_blocking(move || crate::engine::work(&images, request, &plugins, &context)).await.map_err(StreamError::protocol)?;
     match result {
         Ok((response, payload)) => {
             write_message(&mut send, &response).await?;
@@ -272,25 +199,13 @@ async fn answer(mut send: quinn::SendStream, mut recv: quinn::RecvStream, images
     Ok(())
 }
 
-fn work(images: &Images, request: Request) -> Result<(Response, Option<Vec<f32>>), String> {
-    Ok(match request {
-        Request::Pair { .. } => return Err("pairing is answered before this".into()),
-        Request::List => (Response::Images { paths: images.list() }, None),
-        Request::Info { path } => (Response::Info { info: describe(images.open(&path)?.as_ref()) }, None),
-        Request::Tile { path, level, channel, z, tx, ty } => {
-            let p = images.open(&path)?;
-            if channel >= p.channels.len() {
-                return Err(format!("no channel {channel}"));
-            }
-            let t = p.read_tile_at(level, channel, z, tx, ty).map_err(|e| e.to_string())?;
-            (Response::Tile { width: t.width, height: t.height }, Some(t.data))
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    use std::path::Path;
+
+    use lucem_io::Pyramid;
 
     use super::*;
     use crate::auth::Permission;
@@ -298,7 +213,7 @@ mod tests {
     use crate::tls::{client_config_with, server_config_with_clients, ServerIdentity, ServerTrust};
 
     fn images(root: &Path) -> Images {
-        Images { root: root.canonicalize().unwrap(), open: Mutex::new((HashMap::new(), VecDeque::new())) }
+        Images::new(root.canonicalize().unwrap())
     }
 
     fn temp(name: &str) -> PathBuf {
@@ -372,6 +287,109 @@ mod tests {
             s.list().await
         };
         assert!(denied.await.is_err(), "a revoked client is refused");
+        fs::remove_dir_all(&data).unwrap();
+        fs::remove_dir_all(&auth_dir).unwrap();
+    }
+
+    /// A served image opened through [`crate::Remote`] is a pyramid like the file: same levels,
+    /// channels and display, same values; its tiles come over the connection.
+    #[test]
+    fn a_served_image_reads_as_a_pyramid() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let data = temp("remote-data");
+        let auth_dir = temp("remote-auth");
+        let image = data.join("b.ome.zarr");
+        let options = lucem_io::WriterOptions { name: "b".into(), channels: vec!["dapi".into(), "cd3".into()], shape: [2, 20, 12], chunks: [1, 8, 8], pixel_size_um: Some(0.5), z_spacing_um: Some(2.0) };
+        let w = lucem_io::ZarrWriter::create::<f32>(&image, options).unwrap();
+        // Whole chunks, each value its index in the volume (negated in the second channel)
+        for z in 0..2 {
+            for y0 in (0..20).step_by(8) {
+                for x0 in (0..12).step_by(8) {
+                    let (h, wd) = ((20 - y0).min(8), (12 - x0).min(8));
+                    let values: Vec<f32> = (0..h).flat_map(|y| (0..wd).map(move |x| ((z * 20 + y0 + y) * 12 + x0 + x) as f32)).collect();
+                    w.write(0, [z, y0, x0], [1, h, wd], &values).unwrap();
+                    w.write(1, [z, y0, x0], [1, h, wd], &values.iter().map(|v| -v).collect::<Vec<_>>()).unwrap();
+                }
+            }
+        }
+        w.finish::<f32>().unwrap();
+
+        let server_runtime = tokio::runtime::Runtime::new().unwrap();
+        let authority = Arc::new(Authority::open_or_create(&auth_dir.join("a")).unwrap());
+        let tls = server_config_with_clients(&authority, &ServerIdentity::SelfSigned { names: vec!["localhost".into()] }, false).unwrap();
+        let addr = server_runtime.block_on(async {
+            let server = Server::bind("127.0.0.1:0".parse().unwrap(), tls.config).unwrap().with_authority(authority.clone());
+            let addr = server.local_addr().unwrap();
+            tokio::spawn(server.run(ServeOptions { data: data.clone() }));
+            addr
+        });
+        let file = auth_dir.join("carol.pem");
+        authority.enroll("carol", Permission::Read).unwrap().write(&file).unwrap();
+        let paired = crate::PairedServer { addr: addr.to_string(), names: vec!["localhost".into()], identity: file };
+        let remote = crate::Remote::connect(&paired).unwrap();
+        assert_eq!(remote.list().unwrap(), vec!["b.ome.zarr".to_string()]);
+        let served = remote.open("b.ome.zarr").unwrap();
+        let local = Pyramid::open(&image).unwrap();
+        assert!(served.is_remote());
+        assert_eq!(served.path.as_deref(), Some(Path::new(&format!("lucem://{addr}/b.ome.zarr"))));
+        assert_eq!((served.levels.len(), served.depth(), served.width(), served.height()), (local.levels.len(), local.depth(), local.width(), local.height()));
+        assert_eq!(served.channels, local.channels);
+        assert_eq!((served.pixel_size_um, served.z_spacing_um), (Some(0.5), Some(2.0)));
+        for level in 0..local.levels.len() {
+            for channel in 0..2 {
+                let l = &local.levels[level];
+                let (a, b) = (local.read_region_at(level, channel, 1, 0, 0, l.width, l.height).unwrap(), served.read_region_at(level, channel, 1, 0, 0, l.width, l.height).unwrap());
+                assert_eq!(a, b, "level {level} channel {channel}");
+            }
+        }
+        // Read from many threads at once (the reader's pool)
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| served.read_block(0, 1, [0, 0, 0], [2, 20, 12]).unwrap());
+            }
+        });
+        remote.close();
+        drop(server_runtime);
+        fs::remove_dir_all(&data).unwrap();
+        fs::remove_dir_all(&auth_dir).unwrap();
+    }
+
+    /// A plugin answers its calls with what it may use of the server (who calls, whether it may
+    /// write, paths under the data folder only); an unknown plugin is refused.
+    #[tokio::test]
+    async fn plugins_answer_their_calls() {
+        struct Echo;
+        impl crate::plugin::ServerPlugin for Echo {
+            fn id(&self) -> &'static str {
+                "echo"
+            }
+            fn call(&self, method: &str, body: serde_json::Value, context: &crate::plugin::PluginContext) -> Result<serde_json::Value, String> {
+                if method == "path" {
+                    let rel = body.as_str().unwrap_or_default();
+                    return context.resolve(rel).map(|p| serde_json::json!(p.starts_with(&context.root)));
+                }
+                Ok(serde_json::json!({"method": method, "body": body, "peer": context.peer, "may_write": context.may_write}))
+            }
+        }
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let data = temp("plugin-data");
+        let auth_dir = temp("plugin-auth");
+        let authority = Arc::new(Authority::open_or_create(&auth_dir.join("a")).unwrap());
+        let tls = server_config_with_clients(&authority, &ServerIdentity::SelfSigned { names: vec!["localhost".into()] }, false).unwrap();
+        let server = Server::bind("127.0.0.1:0".parse().unwrap(), tls.config).unwrap().with_authority(authority.clone()).with_plugins(vec![Arc::new(Echo)]);
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(server.run(ServeOptions { data: data.clone() }));
+        let file = auth_dir.join("bob.pem");
+        authority.enroll("bob", Permission::Read).unwrap().write(&file).unwrap();
+        let identity = crate::auth::ClientIdentity::from_file(&file).unwrap();
+        let config = client_config_with(&ServerTrust::from_identity(&identity), Some(&identity)).unwrap();
+        let session = Session::connect(addr, "localhost", config).await.unwrap();
+        let answer = session.plugin_call("echo", "hello", serde_json::json!({"x": 1})).await.unwrap();
+        assert_eq!(answer, serde_json::json!({"method": "hello", "body": {"x": 1}, "peer": "bob", "may_write": false}));
+        assert_eq!(session.plugin_call("echo", "path", serde_json::json!("a/b.tif")).await.unwrap(), serde_json::json!(true));
+        assert!(session.plugin_call("echo", "path", serde_json::json!("../x")).await.is_err(), "outside the data folder");
+        assert!(session.plugin_call("nothing", "x", serde_json::Value::Null).await.is_err(), "no such plugin");
+        session.close();
         fs::remove_dir_all(&data).unwrap();
         fs::remove_dir_all(&auth_dir).unwrap();
     }

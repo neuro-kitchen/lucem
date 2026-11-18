@@ -5,6 +5,45 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+lucem in the browser, two ways: **the docs viewer** (neuro-kitchen.github.io/lucem/viewer/,
+nothing to install, files read in the page) and **the container's page** (`lucem serve --web`:
+the server's images, processing and histology on its GPU). The same app as the desktop's.
+
+### Added
+
+- **The docs viewer** (GitHub Pages): the app built for the browser with its engine in a worker,
+  opening OME-Zarr folders and pictures you pick, and the samples (zstd-compressed files); your
+  session is kept in the browser and reopens after a reload (picked files: pick the folder again).
+  A Viewer tab and "Try it in your browser" in the docs.
+- **`lucem serve --web`**: the page, its sign-in by link (`#pair=…`), WebTransport (a WebSocket
+  where a browser has none), protobuf tiles in their stored type, a tile cache, planes of a volume
+  in one request, `--samples`. A served page runs its views' processing and the histology steps on
+  the server (the `hist` plugin: tissue, cells, classifiers); it only draws.
+- **Server plugins** (`ServerPlugin`, as dsp-kitchen's) and **histology as a service**
+  (`lucem_hist::service`).
+- **Images on a paired server** in the desktop app (`lucem://host:port/path`).
+- **The container image serves the page** (TCP and UDP 8443), with the smoke test's page checks.
+- **`keybindings.toml`** (from kitchen 0.0.8) and **`settings.toml`** (look, compute, the Segment
+  model; edits apply while the app runs) in the configuration folder.
+- **The session reopens** after a restart (desktop: the config folder).
+- **Opening, as for a PDF**: File › **Open file…** (the file chooser: no question from the
+  browser) and **Open project…** (a project or an OME-Zarr); never "folder". What is picked
+  opens at once, and a file or an OME-Zarr dropped on the page opens with no question at all.
+- OME-Zarr with **zstd** chunks reads (desktop and page).
+- `lucem bench-codecs` (zstd, LZ4, Pcodec on an image's tiles).
+
+### Changed
+
+- dsp-kitchen's layout: `histology/`, `lucem-session`, `lucem-table`, `platform/` (desktop, web,
+  served images per target).
+- The latest dependencies; kitchen from crates.io; the Agents prototype removed.
+- The docs' accent is lucem's teal (was rose).
+
+### Fixed
+
+- A device that failed is not looked for again every frame (the 3D view spun CPU and GPU).
+- A click on a pop-up no longer reaches the button under it.
+
 ## [0.0.2] - 2026-11-13
 
 The Python packages (`lucem`, with histology, the desktop app and the model plugins as extras;

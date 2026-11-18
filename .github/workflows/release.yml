@@ -302,3 +302,83 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --verify-tag --notes-file release-notes.md
+
+  # The page (the threaded browser build), for the container image: built with the nightly that
+  # app/lucem-app-web/build.sh pins, and wasm-bindgen of Cargo.lock's version (as dsp-kitchen's).
+  web:
+    name: Web app (threaded build)
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Tools (nightly, wasm-bindgen of Cargo.lock's version, binaryen, brotli)
+        run: |
+          toolchain=$(sed -n 's/^TOOLCHAIN="${LUCEM_WEB_TOOLCHAIN:-\(nightly-[0-9-]*\)}"$/\1/p' app/lucem-app-web/build.sh)
+          rustup toolchain install "$toolchain" --profile minimal --component rust-src --target wasm32-unknown-unknown
+          bindgen=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          cargo install wasm-bindgen-cli --version "$bindgen" --locked
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends brotli
+          # binaryen from its release, pinned: Ubuntu's package is too old for the module's
+          # features (bulk memory, threads)
+          curl -sSfL -o /tmp/binaryen.tgz https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz
+          echo "0a18362361ad05465118cd8eeb72edaeec89de6894bc283576ef4e07aa3babcc  /tmp/binaryen.tgz" | sha256sum -c -
+          tar -xzf /tmp/binaryen.tgz -C /tmp && echo /tmp/binaryen-version_130/bin >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: web-mt
+      - name: Build
+        run: app/lucem-app-web/build.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web-app
+          path: app/lucem-app-web/dist
+          if-no-files-found: error
+
+  # The container image on GitHub's registry: ghcr.io/neuro-kitchen/lucem:<version> and :latest.
+  # Target `mesa` of deploy/Containerfile (wgpu on any vendor's GPU through Vulkan, or the CPU),
+  # with the page of this run. Pushed after the release exists, and only once the image ran.
+  # The package inherits nothing from the repository: make it public once in the organization's
+  # package settings.
+  image:
+    name: Container image (ghcr.io)
+    needs: [web, github-release]
+    if: ${{ !cancelled() && needs.github-release.result == 'success' && needs.web.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io/neuro-kitchen/lucem
+    env:
+      IMAGE: ghcr.io/neuro-kitchen/lucem
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-app
+          path: app/lucem-app-web/dist
+      - name: Build
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          podman build -f deploy/Containerfile --ignorefile deploy/.containerignore --target mesa \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${version}" \
+            --label "org.opencontainers.image.description=lucem: GPU histology and image analysis (command line, server, the page)" \
+            -t "${IMAGE}:${version}" -t "${IMAGE}:latest" .
+      # The image must run before it is published: the version it reports is the tag's, and the
+      # CPU runtime answers (no GPU on the runner)
+      - name: Check the image
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          podman run --rm "${IMAGE}:${version}" --version | tee /dev/stderr | grep -qF "${version}"
+          podman run --rm -e LUCEM_RUNTIME=cpu "${IMAGE}:${version}" doctor
+          podman run --rm --entrypoint ls "${IMAGE}:${version}" /usr/share/lucem/web/mt | grep -q lucem_app_web_bg.wasm
+      - name: Push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "${GITHUB_TOKEN}" | podman login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          podman push "${IMAGE}:${version}"
+          podman push "${IMAGE}:latest"

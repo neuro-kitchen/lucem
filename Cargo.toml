@@ -7,8 +7,11 @@ members = [
     "crates/lucem-io",
     "crates/lucem-ops",
     "crates/lucem-ml",
-    # Histology workflows (stains, tissue, cells, classifiers, densities, export)
-    "crates/lucem-hist",
+    # Tables (Polars data frames) for every crate: the one place that depends on Polars
+    "crates/lucem-table",
+    # Histology, the domain (stains, tissue, cells, classifiers, densities, export), with its
+    # services: what the app computes, called alike in the app and by a server for its pages
+    "histology/lucem-hist",
     # Verified downloads of published artifacts (model weights); all network access of the models
     "hub/lucem-hub",
     # Models, one crate per upstream family, each under its upstream's licence (as dsp-kitchen's
@@ -18,6 +21,9 @@ members = [
     "models/instanseg",
     # Pipeline engine
     "engine/lucem-pipeline",
+    # The project document (images, graph, annotations, commands): what the app, the command
+    # line and an agent read and change
+    "engine/lucem-session",
     # Serving
     "serve/lucem-view",
     "serve/lucem-stream",
@@ -27,6 +33,10 @@ members = [
     "app/lucem-mcp",
     "app/lucem-app-core",
     "app/lucem-app",
+    # The app in a browser tab (a client of `lucem serve --web`)
+    "app/lucem-app-web",
+    # The engine in a browser worker, for a page that runs alone (the docs viewer)
+    "engine/lucem-engine-web",
     # Plugins: ml/ programs the app and the command line run (one per model family, never
     # linked, so ONNX Runtime and model licences stay out of lucem itself)
     "plugins/ml/lucem-ml-sam",
@@ -52,7 +62,9 @@ lucem-core = { path = "crates/lucem-core", version = "0.0.2", default-features =
 lucem-io = { path = "crates/lucem-io", version = "0.0.2" }
 lucem-ops = { path = "crates/lucem-ops", version = "0.0.2", default-features = false }
 lucem-ml = { path = "crates/lucem-ml", version = "0.0.2" }
-lucem-hist = { path = "crates/lucem-hist", version = "0.0.2", default-features = false }
+lucem-hist = { path = "histology/lucem-hist", version = "0.0.2", default-features = false }
+lucem-session = { path = "engine/lucem-session", version = "0.0.2" }
+lucem-table = { path = "crates/lucem-table", version = "0.0.2", default-features = false }
 lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.0.2" }
 lucem-view = { path = "serve/lucem-view", version = "0.0.2" }
 lucem-stream = { path = "serve/lucem-stream", version = "0.0.2" }
@@ -72,19 +84,16 @@ burn = { version = "0.22.1", default-features = false }
 pyo3 = { version = "0.30.1" }
 numpy = "0.30.0"
 # UI: GPUI through gpui-kit (re-exports gpui, gpui-base, gpui-component)
-gpui-kit = "0.9.1"
+gpui-kit = "0.10.0"
 # The neuro-kitchen apps' shared UI (github.com/neuro-kitchen/kitchen): kitchen-ui (tokens,
 # widgets, the parameter editor, icon bundling) and kitchen-shell (the frame, the command
-# registry, menus, search, jobs). Both from the same git revision: kitchen-shell depends on
-# kitchen-ui by path inside that repository, so a kitchen-ui from crates.io would be a second
-# copy (a second `Theme` global). Working on both: a git-ignored .cargo/config.toml with
-# [patch."https://github.com/neuro-kitchen/kitchen"]
+# registry, menus, search, jobs, people). Both from crates.io, at the same version (one
+# `Theme` global). Working on kitchen itself: a git-ignored .cargo/config.toml with
+# [patch.crates-io]
 # kitchen-ui = { path = "../kitchen/crates/kitchen-ui" }
 # kitchen-shell = { path = "../kitchen/crates/kitchen-shell" }
-kitchen-ui = { git = "https://github.com/neuro-kitchen/kitchen", tag = "v0.0.4" }
-kitchen-shell = { git = "https://github.com/neuro-kitchen/kitchen", tag = "v0.0.4" }
-# The agent workspace (chat over ACP) and the MCP host inside the app
-kitchen-agent = { git = "https://github.com/neuro-kitchen/kitchen", tag = "v0.0.4" }
+kitchen-ui = "0.0.8"
+kitchen-shell = "0.0.8"
 # The status bar's CPU and memory meters
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 # Analytics & columnar data (Arrow + Polars)
@@ -97,6 +106,8 @@ tiff = "0.11.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
+# settings.toml, read and written with its comments kept
+toml_edit = "0.25.19"
 num-traits = "0.2.19"
 smallvec = "1.16.5"
 # Serving: QUIC and TLS, as in dsp-kitchen
@@ -109,6 +120,27 @@ getrandom = "0.4.3"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1.16.0"
 sha2 = "0.11.1"
+# Pages: WebTransport (HTTP/3 over QUIC, on quinn) first, a WebSocket where UDP does not get
+# through; the page's files over HTTP(S); protobuf on the wire (versions as dsp-kitchen's)
+wtransport = "0.7.2"
+prost = "0.14.6"
+prost-build = "0.14.6"
+protox = "0.10.0"
+hyper = { version = "1.12.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+http-body-util = "0.1.5"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std", "async-await", "async-await-macro"] }
+futures-channel = { version = "0.3.31", features = ["sink"] }
+# The page (WebAssembly)
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+wasm_thread = { version = "0.3.3", features = ["es_modules"] }
+web-time = "1.1.0"
+log = "0.4"
 # Machine learning plugins: ONNX Runtime loaded at run time (no download at build, nothing in the
 # app); HTTP for verified weight downloads (lucem-hub)
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std", "api-31", "cuda"] }
@@ -122,7 +154,7 @@ lucem-model-instanseg = { path = "models/instanseg", version = "0.0.2", default-
 # InstanSeg's published models: a bioimage.io zip holding a TorchScript archive (also a zip)
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 # Keras weights (HDF5) read without the C library, written as safetensors
-hdf5-reader = "0.12.1"
+hdf5-reader = "0.13.0"
 # Parallel loops over host data (objects, chunks): work stealing
 rayon = "1.12.0"
 # Boolean operations on shapes (add, subtract, intersect, xor)
@@ -133,6 +165,14 @@ tokio = { version = "1.54.1", features = ["full"] }
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-io"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+# Profiling: the app's and the server's spans in Tracy (`--features tracy`)
+tracing-tracy = "0.12.0"
+# Codecs measured on lucem's own data (`lucem bench-codecs`): zstd (C) and ruzstd (its pure-Rust
+# decoder, what a page would use), LZ4, Pcodec (numeric sequences)
+zstd = "0.14.4"
+ruzstd = "0.9.1"
+lz4_flex = "0.14.2"
+pco = "1.1.0"
 # Background results into the UI; JSON Schema of the project document (for agents / MCP)
 async-channel = "2.5.0"
 schemars = "1.2.3"

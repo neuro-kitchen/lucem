@@ -536,6 +536,11 @@ impl Store {
     /// as `lucem session run` and an agent), in the background as one job; the results come
     /// back into the project and each step done is recorded in the session.
     pub fn hist_run(&mut self, actions: Vec<Action>, what: &str, cx: &mut Context<Self>) {
+        // The page a container serves: the steps run on the server's GPU (its `hist` plugin)
+        #[cfg(target_family = "wasm")]
+        if self.device.is_none() && super::remote::page_link().is_some() && !super::remote::runs_alone() {
+            return self.hist_run_on_server(actions, what, cx);
+        }
         let z = self.hist_selected_regions().first().map_or(0, |r| r.1);
         let Some((image, p, device, job)) = self.hist_job(what, cx) else { return };
         self.hist.started = Some(job.id);
@@ -579,6 +584,72 @@ impl Store {
             // What an agent waiting on the job reads: each step's outcome, the shapes made
             job.finish(result.unwrap_or_else(|e| Err(e.to_string())));
             drop(job);
+        })
+        .detach();
+    }
+
+    /// [`Self::hist_run`] in the page a container serves: each step runs in the server's `hist`
+    /// plugin (the page's tissue regions sent with the first, as people edited them); the
+    /// regions and objects come back into the project as a local run's do. Pixel-class and
+    /// density maps stay on the server for now (their summaries are reported).
+    #[cfg(target_family = "wasm")]
+    fn hist_run_on_server(&mut self, actions: Vec<Action>, what: &str, cx: &mut Context<Self>) {
+        let z = self.hist_selected_regions().first().map_or(0, |r| r.1);
+        let Some(image) = self.doc.active_image.clone() else { return };
+        let Some(link) = super::remote::page_link() else { return };
+        let served = self.pyramids.get(&image).and_then(|p| p.path.as_ref()).map(|p| p.to_string_lossy().into_owned()).and_then(|p| lucem_stream::split_remote(&p).map(|(_, s)| s.to_string()));
+        let Some(path) = served else {
+            return self.hist_report(false, "Histology in the page runs on the server's images: open one from the server", cx);
+        };
+        let job = match super::jobs::start(HIST_JOB, what, false) {
+            Ok(j) => j,
+            Err(e) => return self.hist_report(false, format!("Wait: {e}"), cx),
+        };
+        self.hist.started = Some(job.id);
+        self.hist.outcome = None;
+        let mut a = self.hist_analysis(&image);
+        let what = what.to_string();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (mut outcomes, mut error) = (Vec::new(), None);
+            for (i, action) in actions.iter().enumerate() {
+                if job.cancelled() {
+                    error = Some("cancelled".to_string());
+                    break;
+                }
+                job.set(&format!("{what} on the server ({}/{})", i + 1, actions.len()), None);
+                let _ = this.update(cx, |_, cx| cx.notify());
+                let mut body = serde_json::json!({ "path": path, "z": z, "action": action });
+                if i == 0 {
+                    body["tissue"] = serde_json::json!(a.tissue);
+                }
+                let answer = link.plugin_call(lucem_hist::service::PLUGIN, "apply", &body).await.map_err(|e| e.to_string());
+                match answer.and_then(|r| serde_json::from_value::<Outcome>(r["outcome"].clone()).map(|o| (o, r)).map_err(|e| e.to_string())) {
+                    Ok((o, r)) => {
+                        if let Ok(regions) = serde_json::from_value(r["regions"].clone()) {
+                            a.tissue = regions;
+                        }
+                        outcomes.push(o);
+                    }
+                    Err(e) => {
+                        error = Some(e);
+                        break;
+                    }
+                }
+            }
+            if !outcomes.is_empty() {
+                job.set(&format!("{what}: fetching the objects"), None);
+                for (kind, list) in [("cells", &mut a.cells), ("tiles", &mut a.tiles)] {
+                    match server_objects(&link, &path, kind).await {
+                        Ok(found) => *list = found,
+                        Err(e) => {
+                            error.get_or_insert(e);
+                        }
+                    }
+                }
+            }
+            let result = this.update(cx, |s, cx| s.hist_take(image, a, &actions[..outcomes.len()], &outcomes, error, cx));
+            job.finish(result.unwrap_or_else(|e| Err(e.to_string())));
         })
         .detach();
     }
@@ -832,6 +903,14 @@ impl Store {
     /// `lucem/shapes.parquet` (GeoParquet), `lucem/provenance.json` (the session, the pipeline,
     /// the version).
     pub fn hist_export(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_family = "wasm")]
+        return self.hist_report(false, "Exporting is done by the desktop app or the server for now", cx);
+        #[cfg(not(target_family = "wasm"))]
+        self.hist_export_native(cx);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn hist_export_native(&mut self, cx: &mut Context<Self>) {
         let Some(img) = self.doc.active().cloned() else { return };
         let Some(p) = self.pyramids.get(&img.id).cloned() else { return };
         let Some(um) = p.pixel_size_um else { return self.hist_report(false, "Export needs the image's pixel size (µm)", cx) };
@@ -1128,4 +1207,23 @@ mod tests {
         assert!(!st.auto_threshold);
         assert_eq!(st.pixel_um, 4.0);
     }
+}
+
+/// Every object of `kind` (`cells`, `tiles`) the server's analysis of `path` holds, page by page.
+#[cfg(target_family = "wasm")]
+async fn server_objects(link: &lucem_stream::web_client::PageLink, path: &str, kind: &str) -> Result<Vec<HistObject>, String> {
+    let mut out: Vec<HistObject> = Vec::new();
+    loop {
+        let answer = link.plugin_call(lucem_hist::service::PLUGIN, "objects", &serde_json::json!({ "path": path, "kind": kind, "offset": out.len() })).await.map_err(|e| e.to_string())?;
+        let total = answer["total"].as_u64().unwrap_or(0) as usize;
+        let page: Vec<HistObject> = serde_json::from_value(answer["objects"].clone()).map_err(|e| e.to_string())?;
+        if page.is_empty() {
+            break;
+        }
+        out.extend(page);
+        if out.len() >= total {
+            break;
+        }
+    }
+    Ok(out)
 }

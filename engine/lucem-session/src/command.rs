@@ -591,7 +591,7 @@ fn check_kind(doc: &ProjectDoc, kind: &NodeKind) -> Result<(), CommandError> {
         NodeKind::Op { op, .. } => op.validate().map_err(invalid),
         NodeKind::View { .. } => Ok(()),
         NodeKind::Script { path, output, .. } => {
-            if crate::data::script::Language::of(std::path::Path::new(path)).is_none() {
+            if !matches!(std::path::Path::new(path).extension().and_then(|e| e.to_str()), Some("py" | "rs")) {
                 return Err(invalid(format!("{path}: a script is a .py or .rs file")));
             }
             if *output == lucem_pipeline::PortType::Table {
@@ -639,7 +639,7 @@ fn base_id(kind: &NodeKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::annotation::Shape;
+    use crate::annotation::Shape;
 
     fn opened() -> ProjectDoc {
         let mut d = ProjectDoc::default();

@@ -1,6 +1,6 @@
 [package]
 name = "lucem-stream"
-description = "Serving lucem images over QUIC and TLS, to enrolled clients only"
+description = "Serving lucem images: QUIC and TLS to enrolled computers, WebTransport or a WebSocket to paired browser pages"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,20 +8,56 @@ authors.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["native"]
+# Servers and computers: QUIC, TLS, the authority, the browser endpoint
+native = [
+    "dep:quinn", "dep:rcgen", "dep:rustls", "dep:rustls-pki-types", "dep:tokio", "dep:tracing",
+    "dep:wtransport", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:tokio-tungstenite",
+    "dep:tokio-rustls", "dep:futures-util",
+]
+# A browser page's side: its connection to the server that served it
+web = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys", "dep:futures-channel", "dep:futures-util"]
+
 [dependencies]
 lucem-core = { workspace = true, default-features = false }
 lucem-io.workspace = true
-quinn.workspace = true
-rcgen = { workspace = true, features = ["x509-parser"] }
 # Pairing: a short code instead of a file handed over (SPAKE2, HMAC-SHA-256)
 spake2.workspace = true
 hmac.workspace = true
 getrandom.workspace = true
-rustls.workspace = true
-rustls-pki-types = { workspace = true, features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
-tracing.workspace = true
+prost.workspace = true
+
+quinn = { workspace = true, optional = true }
+rcgen = { workspace = true, features = ["x509-parser"], optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, features = ["std"], optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+wtransport = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = ["Window", "WebSocket", "BinaryType", "MessageEvent", "Location", "Worker", "WorkerOptions", "WorkerType"] }
+futures-channel = { workspace = true, optional = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# Randomness in a page comes from the browser: getrandom itself, and the 0.2 that SPAKE2's
+# rand_core 0.6 uses (as dsp-kitchen)
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true

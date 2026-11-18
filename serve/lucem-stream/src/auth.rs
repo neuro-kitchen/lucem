@@ -46,24 +46,7 @@ const CA_NAME: &str = "lucem serve authority";
 const SERVER_NAME: &str = "lucem serve";
 const SECS_PER_YEAR: u64 = 31_556_952;
 
-/// What a client may do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Permission {
-    /// Recordings and views.
-    Read,
-    /// Also configure, start and stop jobs, and write.
-    Control,
-}
-
-impl std::fmt::Display for Permission {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Read => "read",
-            Self::Control => "control",
-        })
-    }
-}
+pub use crate::pair::Permission;
 
 /// The client on the other end of a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,6 +288,34 @@ impl Authority {
     /// Every client ever enrolled, revoked ones included.
     pub fn clients(&self) -> StreamResult<Vec<ClientRecord>> {
         Ok(self.registry()?.clients)
+    }
+
+    /// Enrolls `name` with a token instead of a certificate (a browser cannot hold a client
+    /// certificate it made): the registry keeps the token's SHA-256 where a certificate's
+    /// fingerprint is, so listing and revoking are the same. Returns the record and the token,
+    /// which is shown once and never stored. (As dsp-kitchen's.)
+    pub fn enroll_token(&self, name: &str, permission: Permission) -> StreamResult<(ClientRecord, String)> {
+        check_name(name)?;
+        let mut registry = self.registry()?;
+        if registry.clients.iter().any(|c| c.name == name && c.active()) {
+            return Err(StreamError::Tls(format!("{name} is already paired: revoke it on the server first, or pair under another name")));
+        }
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|e| StreamError::Tls(format!("no randomness: {e}")))?;
+        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let year = this_year();
+        let record = ClientRecord { name: name.into(), permission, fingerprint: fingerprint(token.as_bytes()), issued_unix: now_unix(), expires_year: year + CLIENT_YEARS + 1, revoked_unix: None };
+        registry.clients.push(record.clone());
+        self.save(&registry)?;
+        Ok((record, token))
+    }
+
+    /// Who presents `token`: its enrolled record, if not revoked and not past its year.
+    pub fn authorize_token(&self, token: &str) -> Option<Peer> {
+        let fp = fingerprint(token.as_bytes());
+        let registry = self.registry().map_err(|e| tracing::warn!("reading the client registry: {e}")).ok()?;
+        let year = this_year();
+        registry.clients.into_iter().find(|c| c.fingerprint == fp && c.active() && c.expires_year >= year).map(|c| Peer { name: c.name, permission: c.permission, pairing_only: false })
     }
 
     /// Who presents `certificate` (DER): an active enrolled client, else `None`.
