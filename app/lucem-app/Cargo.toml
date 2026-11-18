@@ -15,6 +15,4 @@ path = "src/main.rs"
 [dependencies]
 gpui-kit.workspace = true
 kitchen-ui.workspace = true
-# `lucem-app --mcp-bridge <socket>`: the app's own program as an agent's MCP server
-kitchen-agent.workspace = true
 lucem-app-core.workspace = true

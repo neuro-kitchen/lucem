@@ -18,8 +18,6 @@ gpui-kit.workspace = true
 kitchen-ui.workspace = true
 # The shared frame: command registry, menus, search, status bar, Settings, jobs
 kitchen-shell.workspace = true
-# The Agents workspace: the chat (an ACP agent) and lucem's commands served over MCP
-kitchen-agent.workspace = true
 sysinfo.workspace = true
 lucem-core = { workspace = true, default-features = false, features = ["compute", "wgpu", "cuda", "cpu"] }
 lucem-io.workspace = true

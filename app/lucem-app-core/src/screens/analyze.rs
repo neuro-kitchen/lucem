@@ -33,7 +33,7 @@ use gpui_kit::{
 };
 use lucem_io::Pyramid;
 use lucem_view::{bgra_image, composite_bgra, ChannelDisplay};
-use lucem_table::polars::prelude::{AnyValue, Column, DataFrame, NamedFrom as _, Series};
+use lucem_table::polars::prelude::{Column, DataFrame, NamedFrom as _, Series};
 
 use crate::data::results::centroid_l0;
 use crate::data::script::{self, Language};
