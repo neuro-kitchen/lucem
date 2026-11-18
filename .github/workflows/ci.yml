@@ -90,7 +90,8 @@ jobs:
           echo "python=$python" >> "$GITHUB_OUTPUT"
 
   rust:
-    name: Rust (check; CPU-runtime tests in the full run)
+    # This name is a required check of main's ruleset: rename both together
+    name: Rust (check, CPU-runtime tests)
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
