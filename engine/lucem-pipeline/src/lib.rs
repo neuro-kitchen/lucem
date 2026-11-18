@@ -6,6 +6,7 @@
 pub mod autotune;
 pub mod custom;
 pub mod eval;
+#[cfg(not(target_family = "wasm"))]
 pub mod executor;
 pub mod modifier;
 pub mod ops;
@@ -14,6 +15,7 @@ pub mod stitch;
 pub mod table;
 
 pub use eval::{at_downsample, evaluate, evaluate_all, halo, Plan, PlanNode};
+#[cfg(not(target_family = "wasm"))]
 pub use executor::{PipelineExecutionResult, PipelineExecutor};
 pub use modifier::{ModifierKind, ModifierNode};
 pub use custom::{measure, run_spec, segment, transform, BlockContext, RunError, RunOptions, RunSummary, Walk};

@@ -14,7 +14,7 @@ arrow.workspace = true
 lucem-core = { workspace = true, default-features = false, features = ["compute"] }
 lucem-io.workspace = true
 lucem-ops = { workspace = true, default-features = false }
-polars.workspace = true
+lucem-table.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -22,3 +22,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 lucem-core = { workspace = true, features = ["compute", "wgpu", "cuda", "cpu"] }
+
+# Polars on computers; a browser build has none (see lucem-table)
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+lucem-table = { workspace = true, features = ["polars"] }

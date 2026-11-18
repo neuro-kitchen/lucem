@@ -111,7 +111,7 @@ impl MlState {
 
 /// Runs `req` on `program`'s server (starting it if needed); `progress` sees its progress.
 pub fn request(server: &Server, program: &str, req: &Request, progress: &mut dyn FnMut(&str, Option<f32>)) -> Result<serde_json::Value, String> {
-    let mut slot = server.lock().map_err(|e| e.to_string())?;
+    let mut slot = crate::platform::lock(server);
     if !slot.as_mut().is_some_and(PluginProcess::alive) {
         *slot = Some(PluginProcess::start(program)?);
     }
@@ -299,7 +299,7 @@ mod tests {
         eprintln!("object at ({px}, {py_}) z {plane}: followed on planes {zs:?}");
         assert!(!zs.is_empty() && zs.len() < 31, "{zs:?}");
         assert!(zs.iter().all(|&z| z != plane) && zs.iter().any(|&z| z > plane) && zs.iter().any(|&z| z < plane), "{zs:?}");
-        let _ = server.lock().map(|mut s| s.take());
+        crate::platform::lock(&server).take();
     }
 
     #[test]

@@ -472,7 +472,7 @@ impl Render for ExploreView {
         if s.doc.images.is_empty() && s.opening.is_empty() {
             return v_flex()
                 .size_full()
-                .child(EmptyState::new(IconName::Microscope, "No image yet", "Open an image or an OME-Zarr container from the File menu (Ctrl+O), or drop one on the window."))
+                .child(EmptyState::new(IconName::Microscope, "No image yet", "Open a file (Ctrl+O): an OME-Zarr, a TIFF or a picture; or a project (Ctrl+Shift+O). Or drop one on the window."))
                 .into_any_element();
         }
         let toggles = overlay_toggles(&self.store, &self.canvas, cx).into_any_element();

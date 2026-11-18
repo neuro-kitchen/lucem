@@ -12,9 +12,15 @@ publish = false
 name = "lucem-app"
 path = "src/main.rs"
 
+[features]
+# The app's spans (tiles read and coloured, the canvas's plan and uploads) in Tracy: run Tracy,
+# then `cargo run -p lucem-app --profile validate --features tracy`
+tracy = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-tracy"]
+
 [dependencies]
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+tracing-tracy = { workspace = true, optional = true }
 gpui-kit.workspace = true
 kitchen-ui.workspace = true
-# `lucem-app --mcp-bridge <socket>`: the app's own program as an agent's MCP server
-kitchen-agent.workspace = true
 lucem-app-core.workspace = true

@@ -48,6 +48,8 @@ pub enum AppEvent {
     /// Select this Pipeline node and show the Pipeline (a new script node: its code opens in the
     /// Inspector's editor).
     RevealNode(String),
+    /// Show the images of the server (a browser page's "Open image…": it has no file dialog).
+    ServerImages,
 }
 
 /// What a pane of Explore shows.
@@ -195,6 +197,12 @@ pub struct Store {
     results_gen: Arc<AtomicU64>,
     pub device: Option<Arc<Device>>,
     device_pending: bool,
+    /// Why there is no compute device (it failed to start, or a browser page has none): asked
+    /// for again only when the runtime changes. Without it, every frame that wants a device would
+    /// start another discovery (a page spun its CPU and GPU so).
+    pub device_unavailable: Option<String>,
+    /// A keeping of the session is scheduled ([`Store::keep_session_soon`]).
+    pub(crate) keep_pending: bool,
     /// Bumped when the device changes: what lives on the old one (3D volumes) is dropped.
     pub device_generation: u64,
     /// Machine-learning plugins and their jobs.
@@ -253,6 +261,8 @@ impl Store {
             results_gen: Arc::new(AtomicU64::new(0)),
             device: None,
             device_pending: false,
+            keep_pending: false,
+            device_unavailable: cfg!(target_family = "wasm").then(|| "Processing runs on the server or in the desktop app: this page views and annotates".to_string()),
             device_generation: 0,
             ml: Default::default(),
             mask_radius: 2,
@@ -477,7 +487,17 @@ impl Store {
                             s.compute_histograms(&id, py, cx);
                             cx.emit(AppEvent::ImageReady(id));
                         }
-                        Err(e) => s.set_status(format!("Could not open {}: {e}", crate::domain::paths::short_path(&path)), cx),
+                        Err(e) => {
+                            // The docs viewer: a browser forgets picked files after a reload;
+                            // picking them again reopens the session's images (see `prompt`)
+                            #[cfg(target_family = "wasm")]
+                            if super::remote::runs_alone() && !path.to_string_lossy().contains("/samples/") {
+                                s.set_status(format!("Pick the folder (File › Open…) again to reopen {}: a browser forgets picked files after a reload", crate::domain::paths::short_path(&path)), cx);
+                                cx.notify();
+                                return;
+                            }
+                            s.set_status(format!("Could not open {}: {e}", crate::domain::paths::short_path(&path)), cx)
+                        }
                     }
                     cx.notify();
                 });
@@ -572,6 +592,10 @@ impl Store {
         self.save_prefs();
         self.device = None;
         self.device_pending = false;
+        // Another runtime: try again (a page still has none)
+        if cfg!(not(target_family = "wasm")) {
+            self.device_unavailable = None;
+        }
         self.device_generation += 1;
         self.results.clear();
         self.analysis = None;
@@ -649,7 +673,7 @@ impl Store {
             let n = 512usize;
             let host: Vec<f32> = (0..n * n).map(|i| ((i % n) as f32 / n as f32) * 0.8 + 0.1).collect();
             let mean_in = host.iter().sum::<f32>() / host.len() as f32;
-            let t0 = std::time::Instant::now();
+            let t0 = web_time::Instant::now();
             let a = DeviceArray::from_host(&device.client, lucem_core::Shape::new([n, n]), host).map_err(|e| e.to_string())?;
             let out = Op::GaussianBlur { sigma: 2.0 }.run(&device.client, &[lucem_pipeline::Value::Image(a)])?;
             let back = out.to_host(&device.client).ok_or("no raster came back")?;
@@ -1094,6 +1118,11 @@ impl Store {
             }
             return;
         }
+        // A page served by `lucem serve`: its server computes (a page has no compute of its own)
+        #[cfg(target_family = "wasm")]
+        if self.device.is_none() && super::remote::page_link().is_some() && !super::remote::runs_alone() {
+            return self.recompute_on_server(req, cx);
+        }
         let Some(device) = self.device.clone() else {
             self.ensure_device(cx);
             return;
@@ -1175,6 +1204,75 @@ impl Store {
                             s.device.as_ref().map_or("—", |d| d.label.as_str())
                         ),
                     };
+                    cx.emit(AppEvent::Status);
+                }
+                cx.emit(AppEvent::Results);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// [`Self::recompute`] in a page `lucem serve` served: each view's chain runs on the server,
+    /// over the tiles of the visible region; what is asked meanwhile runs next.
+    #[cfg(target_family = "wasm")]
+    /// Opens what was picked or dropped in a page that runs alone: up to [`OPEN_AT_ONCE`] images
+    /// at once (no list after the browser's chooser); more, by asking which. The session's images
+    /// that could not open after a reload (picked before it) open again too.
+    #[cfg(target_family = "wasm")]
+    pub fn open_picked(&mut self, picked: Result<Vec<String>, String>, cx: &mut Context<Self>) {
+        const OPEN_AT_ONCE: usize = 8;
+        match picked {
+            Ok(images) if images.is_empty() => {}
+            Ok(images) if images.len() <= OPEN_AT_ONCE => {
+                let n = images.len();
+                // An image already in the session is shown, not opened twice (`open_image`)
+                for name in images {
+                    self.open(PathBuf::from(name), cx);
+                }
+                self.ensure_pyramids(cx);
+                self.set_status(format!("Opened {n} image(s): read in this browser, never uploaded"), cx);
+            }
+            Ok(images) => {
+                self.ensure_pyramids(cx);
+                self.set_status(format!("{} images: pick the ones to open", images.len()), cx);
+                cx.emit(AppEvent::ServerImages);
+            }
+            Err(e) => self.set_status(e, cx),
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn recompute_on_server(&mut self, req: ResultRequest, cx: &mut Context<Self>) {
+        let Some(pyramid) = self.pyramids.get(&req.image).cloned() else { return };
+        let generation = self.results_gen.fetch_add(1, Ordering::AcqRel) + 1;
+        let latest = self.results_gen.clone();
+        let (doc, image, asked, show) = (self.doc.clone(), req.image.clone(), req.clone(), self.tool.show_results);
+        self.computing = true;
+        cx.emit(AppEvent::Results);
+        let task = cx.background_spawn(async move { (latest.load(Ordering::Acquire) == generation && show).then(|| super::results::compute_remote(&doc, &pyramid, &req)) });
+        cx.spawn(async move |this, cx| {
+            let list = task.await;
+            let _ = this.update(cx, |s, cx| {
+                s.computing = false;
+                let current = s.results_gen.load(Ordering::Acquire) == generation;
+                s.results_for = Some(asked);
+                if s.results_pending || !current {
+                    s.results_pending = false;
+                    s.results_for = None;
+                    cx.spawn(async move |this, cx| {
+                        let _ = this.update(cx, |s, cx| s.recompute(cx));
+                    })
+                    .detach();
+                }
+                if let Some(list) = list {
+                    s.results.retain(|v, r| r.image != image && s.doc.graph.contains(v));
+                    let error = list.iter().find_map(|r| r.error.clone().map(|e| format!("{}: {e}", r.view)));
+                    let ms: f64 = list.iter().map(|r| r.ms).sum();
+                    for r in list {
+                        s.results.insert(r.view.clone(), r);
+                    }
+                    s.status = error.unwrap_or_else(|| format!("Results from the server in {ms:.0} ms"));
                     cx.emit(AppEvent::Status);
                 }
                 cx.emit(AppEvent::Results);
@@ -1317,7 +1415,7 @@ impl Store {
 
     /// Starts the compute device in the background; results follow once it is up.
     pub fn ensure_device(&mut self, cx: &mut Context<Self>) {
-        if self.device.is_some() || self.device_pending {
+        if self.device.is_some() || self.device_pending || self.device_unavailable.is_some() {
             return;
         }
         self.device_pending = true;
@@ -1340,7 +1438,10 @@ impl Store {
                         s.set_status(format!("Compute device: {label}"), cx);
                         s.recompute(cx);
                     }
-                    Err(e) => s.set_status(e, cx),
+                    Err(e) => {
+                        s.device_unavailable = Some(e.clone());
+                        s.set_status(e, cx);
+                    }
                 }
             });
         })
@@ -1585,6 +1686,16 @@ impl ChannelHistogram {
 /// Opens a pyramid from a path or a `sample:<name>`.
 pub fn open_pyramid(path: &Path) -> Result<Pyramid, String> {
     let s = path.to_string_lossy();
+    // A page does not generate samples (seconds of CPU there): it opens them as files, from its
+    // server (`lucem serve --samples`) or from the site (the docs viewer)
+    #[cfg(target_family = "wasm")]
+    if let Some(id) = s.strip_prefix("sample:") {
+        let id = if id == "volume" { SAMPLE_VOLUME_ID } else { id };
+        let link = super::remote::page_link().ok_or("the page is not connected yet")?;
+        let mut py = super::remote::open(&lucem_stream::remote_name(link.host(), &format!("samples/{id}.ome.zarr")))?;
+        py.path = Some(path.to_path_buf());
+        return Ok(py);
+    }
     if s == "sample:volume" {
         let mut py = lucem_io::sample_volume(256, 128).map_err(|e| e.to_string())?;
         py.path = Some(path.to_path_buf());
@@ -1597,13 +1708,19 @@ pub fn open_pyramid(path: &Path) -> Result<Pyramid, String> {
         img.path = Some(path.to_path_buf());
         return Ok(Pyramid::from_loaded(img));
     }
+    if super::remote::is_remote(path) {
+        return super::remote::open(&s);
+    }
     Pyramid::open(path).map_err(|e| e.to_string())
 }
 
 /// The id of a sample in `sample:<name>` paths.
 pub fn sample_name(kind: PhantomKind) -> String {
-    kind.title().to_lowercase().replace([' ', '&', '/'], "-").replace("--", "-")
+    kind.id()
 }
+
+/// The sample volume's file id (`samples/sample-volume.ome.zarr`, written by `lucem samples`).
+pub const SAMPLE_VOLUME_ID: &str = "sample-volume";
 
 /// How each channel starts: the file's colour, and its window, or the 0.1–99.8 % percentiles of
 /// the coarsest level when the file gives the full range of the type.

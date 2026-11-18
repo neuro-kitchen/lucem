@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use crate::error::{IoError, IoResult};
 use crate::image_io::{load_image_file, LoadedImage};
-use crate::ome_zarr::{blosc_decompress, find_ome_zarr_root, is_safe_relative_path};
+use crate::ome_zarr::{blosc_decompress, find_ome_zarr_root, is_safe_relative_path, zstd_decompress};
 
 /// A cached chunk and when it was last used.
 type CachedChunk = (Arc<Vec<f32>>, u64);
@@ -37,7 +37,8 @@ pub const MAX_ARRAY_ELEMENTS: u128 = 1 << 48;
 /// Most bytes one decoded chunk may hold.
 pub const MAX_CHUNK_BYTES: u128 = 1 << 31;
 /// Most elements of one read.
-pub const MAX_READ_ELEMENTS: usize = 1 << 34;
+/// (A 32-bit build, a browser page, has 4 GiB in all: 2^28 elements there.)
+pub const MAX_READ_ELEMENTS: usize = if usize::BITS >= 64 { (1u64 << 34) as usize } else { 1 << 28 };
 /// Most resolution levels a file may declare.
 pub const MAX_LEVELS: usize = 32;
 /// Decoded multi-plane chunks kept for repeated plane reads (bytes).
@@ -184,12 +185,82 @@ enum Backend {
     Zarr(Vec<ZarrArray>),
     /// `planes[level][channel]`: `depth × height × width` values.
     Memory(Vec<Vec<Vec<f32>>>),
+    /// Tiles from somewhere else (a server): [`Pyramid::from_source`].
+    Source(SourceBox),
+}
+
+/// Where a pyramid's tiles come from when they are not in a file here: a server (`lucem-stream`
+/// opens a served image this way), a cache, a test. One tile of one channel of plane `z`, as
+/// `(width, height, values)`, row-major; edge tiles cut to the image. Called from many threads.
+pub trait TileSource: Send + Sync {
+    fn tile(&self, level: usize, channel: usize, z: usize, tx: usize, ty: usize) -> Result<(usize, usize, Vec<f32>), String>;
+
+    /// A whole plane in one piece, when the source can give one (a server cuts it from its
+    /// files): an XZ or YZ plane read through tiles would take a tile per z-plane and tile row.
+    /// `None`: read it through tiles.
+    fn plane(&self, _level: usize, _channel: usize, _axis: PlaneAxis, _index: usize) -> Option<Result<(usize, usize, Vec<f32>), String>> {
+        None
+    }
+}
+
+struct SourceBox(Arc<dyn TileSource>);
+
+/// Where a Zarr container's keys are read from: a folder on disk ([`DirStore`]), or what a browser
+/// page has (the files the user picked, the site's own files). A key is a path inside the
+/// container (`.zattrs`, `0/.zarray`, `0/1.2`); `None`: no such key (a missing chunk holds the
+/// fill value). Called from many threads.
+pub trait ZarrStore: Send + Sync {
+    fn get(&self, key: &str) -> std::io::Result<Option<Vec<u8>>>;
+}
+
+/// A Zarr container in a folder on disk.
+#[derive(Debug, Clone)]
+pub struct DirStore(pub PathBuf);
+
+impl ZarrStore for DirStore {
+    fn get(&self, key: &str) -> std::io::Result<Option<Vec<u8>>> {
+        match fs::read(self.0.join(key)) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// A store and the folder of one array inside it.
+#[derive(Clone)]
+struct ArrayStore {
+    store: Arc<dyn ZarrStore>,
+    prefix: String,
+}
+
+impl std::fmt::Debug for ArrayStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.prefix)
+    }
+}
+
+impl ArrayStore {
+    fn get(&self, name: &str) -> std::io::Result<Option<Vec<u8>>> {
+        let key = if self.prefix.is_empty() { name.to_string() } else { format!("{}/{name}", self.prefix) };
+        self.store.get(&key)
+    }
+}
+
+fn store_text(store: &dyn ZarrStore, key: &str) -> Option<String> {
+    store.get(key).ok().flatten().and_then(|b| String::from_utf8(b).ok())
+}
+
+impl std::fmt::Debug for SourceBox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TileSource")
+    }
 }
 
 /// One Zarr v2 array (a level).
 #[derive(Debug, Clone)]
 struct ZarrArray {
-    dir: PathBuf,
+    dir: ArrayStore,
     shape: Vec<usize>,
     chunks: Vec<usize>,
     dtype: Dtype,
@@ -207,6 +278,7 @@ struct ZarrArray {
 enum Compressor {
     None,
     Blosc,
+    Zstd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -385,9 +457,19 @@ impl Pyramid {
 
     /// Reads the container's metadata (no pixel data).
     pub fn open_zarr(root: &Path) -> IoResult<Self> {
-        let attrs: RootAttrs = match fs::read_to_string(root.join(".zattrs")) {
-            Ok(text) => serde_json::from_str(&text)?,
-            Err(_) => RootAttrs::default(),
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into());
+        let mut py = Self::open_store(&name, Arc::new(DirStore(root.to_path_buf())))?;
+        py.path = Some(root.to_path_buf());
+        Ok(py)
+    }
+
+    /// An OME-Zarr container read through `store` (a browser page's files, a site's), its
+    /// metadata now and its chunks when tiles are asked for. `name`: what to call it when its
+    /// metadata names nothing.
+    pub fn open_store(name: &str, store: Arc<dyn ZarrStore>) -> IoResult<Self> {
+        let attrs: RootAttrs = match store_text(store.as_ref(), ".zattrs") {
+            Some(text) => serde_json::from_str(&text)?,
+            None => RootAttrs::default(),
         };
         let ms = attrs.multiscales.into_iter().next().unwrap_or_default();
         let axis_names: Vec<String> = ms
@@ -409,13 +491,13 @@ impl Pyramid {
         }
         if datasets.is_empty() {
             for cand in ["0", "1", "2", "3", "4", "5", "s0", "s1", "s2", "s3", "s4", "s5"] {
-                if root.join(cand).join(".zarray").is_file() {
+                if store.get(&format!("{cand}/.zarray")).ok().flatten().is_some() {
                     datasets.push(Dataset { path: cand.into(), transforms: Vec::new() });
                 }
             }
         }
         if datasets.is_empty() {
-            return Err(IoError::OmeZarr(format!("no multiscale levels in {}", root.display())));
+            return Err(IoError::OmeZarr(format!("no multiscale levels in {name}")));
         }
 
         let mut arrays = Vec::new();
@@ -423,8 +505,8 @@ impl Pyramid {
         let mut pixel_size_um = None;
         let mut z_spacing_um = None;
         for (i, ds) in datasets.iter().enumerate() {
-            let dir = root.join(&ds.path);
-            let arr = ZarrArray::open(&dir, &axis_names)?;
+            let dir = ArrayStore { store: store.clone(), prefix: ds.path.trim_matches('/').to_string() };
+            let arr = ZarrArray::open(dir, &axis_names)?;
             let (h, w) = (arr.shape[arr.y_axis], arr.shape[arr.x_axis]);
             let (th, tw) = (arr.chunks[arr.y_axis], arr.chunks[arr.x_axis]);
             if i == 0 {
@@ -473,12 +555,12 @@ impl Pyramid {
             .collect();
 
         let mut label_groups = Vec::new();
-        if let Ok(text) = fs::read_to_string(root.join("labels").join(".zattrs"))
+        if let Some(text) = store_text(store.as_ref(), "labels/.zattrs")
             && let Ok(l) = serde_json::from_str::<LabelsAttrs>(&text) {
-                label_groups = l.labels.into_iter().filter(|g| is_safe_relative_path(g) && root.join("labels").join(g).is_dir()).collect();
+                label_groups = l.labels.into_iter().filter(|g| is_safe_relative_path(g) && store.get(&format!("labels/{g}/.zattrs")).ok().flatten().is_some()).collect();
             }
-        let name = ms.name.filter(|n| !n.is_empty()).unwrap_or_else(|| root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into()));
-        Ok(Self { name, path: Some(root.to_path_buf()), levels, channels, pixel_size_um, z_spacing_um, dtype: a0.dtype.label(), label_groups, backend: Backend::Zarr(arrays), chunks: ChunkCache::default() })
+        let name = ms.name.filter(|n| !n.is_empty()).unwrap_or_else(|| name.to_string());
+        Ok(Self { name, path: None, levels, channels, pixel_size_um, z_spacing_um, dtype: a0.dtype.label(), label_groups, backend: Backend::Zarr(arrays), chunks: ChunkCache::default() })
     }
 
     /// An in-memory pyramid of a decoded image: one channel for grey images, three (R, G, B)
@@ -555,6 +637,39 @@ impl Pyramid {
         Ok(Self { name: name.into(), path: None, levels, channels: channel_info, pixel_size_um, z_spacing_um, dtype: dtype.into(), label_groups: Vec::new(), backend: Backend::Memory(planes), chunks: ChunkCache::default() })
     }
 
+    /// A pyramid whose tiles come from `source` (a served image): its levels (finest first) and
+    /// channels as described by whoever has the image. Checked as a file's metadata would be.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_source(name: impl Into<String>, path: Option<PathBuf>, levels: Vec<LevelInfo>, channels: Vec<ChannelInfo>, pixel_size_um: Option<f64>, z_spacing_um: Option<f64>, dtype: impl Into<String>, source: Arc<dyn TileSource>) -> IoResult<Self> {
+        if levels.is_empty() || levels.len() > MAX_LEVELS {
+            return Err(IoError::OmeZarr(format!("{} levels (1 to {MAX_LEVELS})", levels.len())));
+        }
+        if channels.is_empty() {
+            return Err(IoError::OmeZarr("no channels".into()));
+        }
+        for (i, l) in levels.iter().enumerate() {
+            let elements = (l.width as u128) * (l.height as u128) * (l.depth.max(1) as u128) * channels.len() as u128;
+            if l.width == 0 || l.height == 0 || l.depth == 0 || l.tile_w == 0 || l.tile_h == 0 || elements > MAX_ARRAY_ELEMENTS {
+                return Err(IoError::OmeZarr(format!("level {i}: {} × {} × {} in tiles of {} × {}", l.width, l.height, l.depth, l.tile_w, l.tile_h)));
+            }
+            if (l.tile_w as u128) * (l.tile_h as u128) * 4 > MAX_CHUNK_BYTES {
+                return Err(IoError::OmeZarr(format!("level {i}: tiles of {} × {} are too large", l.tile_w, l.tile_h)));
+            }
+        }
+        Ok(Self { name: name.into(), path, levels, channels, pixel_size_um, z_spacing_um, dtype: dtype.into(), label_groups: Vec::new(), backend: Backend::Source(SourceBox(source)), chunks: ChunkCache::default() })
+    }
+
+    /// A plain image (PNG, TIFF, JPEG) from its bytes, as an in-memory pyramid: a file a browser
+    /// page was given.
+    pub fn from_image_bytes(name: &str, bytes: &[u8]) -> IoResult<Self> {
+        Ok(Self::from_loaded(crate::image_io::load_image_bytes(name, bytes)?))
+    }
+
+    /// Whether the tiles come from a [`TileSource`] (a server), not a file here.
+    pub fn is_remote(&self) -> bool {
+        matches!(self.backend, Backend::Source(_))
+    }
+
     /// Planes along z at level 0 (1 for a 2D image).
     pub fn depth(&self) -> usize {
         self.levels[0].depth
@@ -619,6 +734,21 @@ impl Pyramid {
                 out
             }
             Backend::Zarr(arrays) => arrays[level].read_chunk(level, &self.chunks, channel, z, ty, tx, w, h)?,
+            Backend::Source(source) => {
+                // Kept like decoded chunks: a tile asked twice (a pan back, an operator) is read once
+                let key = (level, vec![usize::MAX, channel, z, tx, ty]);
+                match self.chunks.get(&key) {
+                    Some(data) => data.as_ref().clone(),
+                    None => {
+                        let (tw, th, data) = source.0.tile(level, channel, z, tx, ty).map_err(IoError::OmeZarr)?;
+                        if (tw, th) != (w, h) || data.len() != w * h {
+                            return Err(IoError::OmeZarr(format!("tile {tx},{ty} of level {level}: {tw} × {th} with {} values, expected {w} × {h}", data.len())));
+                        }
+                        self.chunks.put(key, Arc::new(data.clone()));
+                        data
+                    }
+                }
+            }
         };
         Ok(Tile { level, channel, tx, ty, width: w, height: h, data })
     }
@@ -642,8 +772,16 @@ impl Pyramid {
         // The chunks under the region, read in parallel (each is its own file), then assembled
         let coords: Vec<(usize, usize)> = (y0 / l.tile_h..=(y1 - 1) / l.tile_h).flat_map(|ty| (x0 / l.tile_w..=(x1 - 1) / l.tile_w).map(move |tx| (tx, ty))).collect();
         let tiles: Vec<_> = {
-            use rayon::prelude::*;
-            coords.par_iter().map(|&(tx, ty)| self.read_tile_at(level, channel, z, tx, ty).map(|t| (tx, ty, t))).collect::<IoResult<Vec<_>>>()?
+            let read = |&(tx, ty): &(usize, usize)| self.read_tile_at(level, channel, z, tx, ty).map(|t| (tx, ty, t));
+            // A browser page reads in turn (rayon's pool does not start there)
+            #[cfg(not(target_family = "wasm"))]
+            let tiles = {
+                use rayon::prelude::*;
+                coords.par_iter().map(read).collect::<IoResult<Vec<_>>>()?
+            };
+            #[cfg(target_family = "wasm")]
+            let tiles = coords.iter().map(read).collect::<IoResult<Vec<_>>>()?;
+            tiles
         };
         for (tx, ty, t) in tiles {
             {
@@ -680,6 +818,16 @@ impl Pyramid {
     /// plane is `width × height`, an XZ plane `width × depth`, a YZ plane `height × depth`.
     pub fn read_plane(&self, level: usize, channel: usize, axis: PlaneAxis, index: usize) -> IoResult<Plane> {
         let l = self.levels.get(level).ok_or_else(|| IoError::OmeZarr(format!("no level {level}")))?.clone();
+        // A source that cuts planes itself (a server): one request, not one per tile
+        if let Backend::Source(source) = &self.backend
+            && let Some(answer) = source.0.plane(level, channel, axis, index)
+        {
+            let (width, height, data) = answer.map_err(IoError::OmeZarr)?;
+            if data.len() != width * height {
+                return Err(IoError::OmeZarr(format!("a plane of {width} × {height} came with {} values", data.len())));
+            }
+            return Ok(Plane { width, height, data });
+        }
         let (d, h, w) = (l.depth, l.height, l.width);
         Ok(match axis {
             PlaneAxis::Z => Plane { width: w, height: h, data: self.read_block(level, channel, [index, 0, 0], [1, h, w])? },
@@ -705,8 +853,8 @@ impl Pyramid {
 }
 
 impl ZarrArray {
-    fn open(dir: &Path, axis_names: &[String]) -> IoResult<Self> {
-        let text = fs::read_to_string(dir.join(".zarray")).map_err(|e| IoError::OmeZarr(format!("{}: {e}", dir.join(".zarray").display())))?;
+    fn open(dir: ArrayStore, axis_names: &[String]) -> IoResult<Self> {
+        let text = dir.get(".zarray").ok().flatten().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| IoError::OmeZarr(format!("{}/.zarray: not found", dir.prefix)))?;
         let meta: ZArray = serde_json::from_str(&text)?;
         if meta.order.as_deref() == Some("F") {
             return Err(IoError::OmeZarr("Fortran-ordered Zarr arrays are not supported".into()));
@@ -721,7 +869,8 @@ impl ZarrArray {
                 }
                 Compressor::Blosc
             }
-            Some(other) => return Err(IoError::OmeZarr(format!("Zarr compressor {other:?} is not supported yet (blosc-lz4 and none are)"))),
+            Some("zstd") => Compressor::Zstd,
+            Some(other) => return Err(IoError::OmeZarr(format!("Zarr compressor {other:?} is not supported yet (blosc-lz4, zstd and none are)"))),
         };
         let nd = meta.shape.len();
         if !(2..=6).contains(&nd) || meta.chunks.len() != nd {
@@ -747,7 +896,7 @@ impl ZarrArray {
         }
         let fill = meta.fill_value.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
         let sep = meta.dimension_separator.unwrap_or_else(|| ".".into());
-        Ok(Self { dir: dir.to_path_buf(), shape: meta.shape, chunks: meta.chunks, dtype, compressor, sep, fill, c_axis, z_axis, y_axis, x_axis })
+        Ok(Self { dir, shape: meta.shape, chunks: meta.chunks, dtype, compressor, sep, fill, c_axis, z_axis, y_axis, x_axis })
     }
 
     /// Chunk `(ty, tx)` of `channel` at plane `z` (other axes at 0), cut to `w × h`.
@@ -801,10 +950,9 @@ impl ZarrArray {
     /// The values of a chunk; `None` when its file does not exist (it holds the fill value).
     fn decode_chunk(&self, idx: &[usize]) -> IoResult<Option<Vec<f32>>> {
         let name = idx.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(&self.sep);
-        let raw = match fs::read(self.dir.join(name)) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let raw = match self.dir.get(&name)? {
+            Some(b) => b,
+            None => return Ok(None),
         };
         let expected = self.chunks.iter().product::<usize>() * self.dtype.size;
         let bytes = match self.compressor {
@@ -815,6 +963,13 @@ impl ZarrArray {
                     return Err(IoError::OmeZarr(format!("chunk declares {declared:?} bytes, its array needs {expected}")));
                 }
                 blosc_decompress(&raw)?
+            }
+            Compressor::Zstd => {
+                let bytes = zstd_decompress(&raw)?;
+                if bytes.len() != expected {
+                    return Err(IoError::OmeZarr(format!("a zstd chunk holds {} bytes, its array needs {expected}", bytes.len())));
+                }
+                bytes
             }
         };
         let mut values = Vec::new();
@@ -1004,6 +1159,60 @@ pub fn sample_volume(size: usize, depth: usize) -> IoResult<Pyramid> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A source that serves a plain gradient and counts its calls.
+    struct Gradient(std::sync::atomic::AtomicUsize);
+
+    impl super::TileSource for Gradient {
+        fn tile(&self, level: usize, channel: usize, z: usize, tx: usize, ty: usize) -> Result<(usize, usize, Vec<f32>), String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (w, h) = (if tx == 2 { 4 } else { 8 }, if ty == 1 { 4 } else { 8 });
+            Ok((w, h, (0..w * h).map(|i| (level * 1000 + channel * 100 + z * 10 + tx + ty) as f32 + i as f32 * 0.0).collect()))
+        }
+    }
+
+    /// A source that cuts planes itself (a server).
+    struct Planes;
+
+    impl super::TileSource for Planes {
+        fn tile(&self, _: usize, _: usize, _: usize, _: usize, _: usize) -> Result<(usize, usize, Vec<f32>), String> {
+            Err("planes only".into())
+        }
+        fn plane(&self, _level: usize, _channel: usize, axis: super::PlaneAxis, index: usize) -> Option<Result<(usize, usize, Vec<f32>), String>> {
+            Some(Ok((3, 2, vec![index as f32 + if axis == super::PlaneAxis::X { 100.0 } else { 0.0 }; 6])))
+        }
+    }
+
+    #[test]
+    fn a_source_that_cuts_planes_is_asked_once_per_plane() {
+        let level = super::LevelInfo { path: "remote".into(), width: 3, height: 3, tile_w: 1, tile_h: 1, downsample: 1.0, depth: 2, tile_d: 1, z_downsample: 1.0 };
+        let channel = super::ChannelInfo { label: "c".into(), color: [255; 3], window: (0.0, 1.0), range: (0.0, 1.0), active: true };
+        let py = super::Pyramid::from_source("p", None, vec![level], vec![channel], None, None, "float32", std::sync::Arc::new(Planes)).unwrap();
+        let yz = py.read_plane(0, 0, super::PlaneAxis::X, 2).unwrap();
+        assert_eq!((yz.width, yz.height, yz.data[0]), (3, 2, 102.0), "the source's own plane, no tile read");
+    }
+
+    #[test]
+    fn a_source_backs_a_pyramid_and_its_tiles_are_kept() {
+        let level = |w, h, ds| super::LevelInfo { path: "remote".into(), width: w, height: h, tile_w: 8, tile_h: 8, downsample: ds, depth: 2, tile_d: 1, z_downsample: 1.0 };
+        let channel = super::ChannelInfo { label: "dapi".into(), color: [0, 0, 255], window: (0.0, 10.0), range: (0.0, 65535.0), active: true };
+        let source = std::sync::Arc::new(Gradient(Default::default()));
+        let py = super::Pyramid::from_source("served", None, vec![level(20, 12, 1.0), level(10, 6, 2.0)], vec![channel], None, None, "uint16", source.clone()).unwrap();
+        assert!(py.is_remote());
+        let t = py.read_tile_at(0, 0, 1, 2, 1).unwrap();
+        assert_eq!((t.width, t.height, t.data[0]), (4, 4, 13.0));
+        py.read_tile_at(0, 0, 1, 2, 1).unwrap();
+        assert_eq!(source.0.load(std::sync::atomic::Ordering::Relaxed), 1, "read once");
+        // Regions assemble from the source's tiles as from a file's
+        let r = py.read_region_at(0, 0, 0, 6, 6, 4, 4).unwrap();
+        assert_eq!((r[0], r[15]), (0.0, 2.0));
+        // A tile of the wrong size is refused
+        let bad = super::Pyramid::from_source("bad", None, vec![level(16, 16, 1.0)], py.channels.clone(), None, None, "uint16", source).unwrap();
+        assert!(bad.read_tile_at(0, 0, 0, 0, 0).is_ok());
+        assert!(bad.read_tile_at(0, 0, 0, 0, 1).is_err(), "8 × 4 where 8 × 8 was expected");
+        assert!(super::Pyramid::from_source("none", None, vec![], py.channels.clone(), None, None, "uint16", std::sync::Arc::new(Gradient(Default::default()))).is_err());
+    }
+
     use super::*;
 
     fn sample() -> Option<PathBuf> {

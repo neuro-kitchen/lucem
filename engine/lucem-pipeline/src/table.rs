@@ -5,7 +5,8 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 
-use polars::prelude::{Column, DataFrame, NamedFrom as _, PolarsResult, Series};
+#[cfg(not(target_family = "wasm"))]
+use lucem_table::polars::prelude::{Column, DataFrame, NamedFrom as _, PolarsResult, Series};
 
 /// A table of `f64` columns (missing values are NaN).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -48,6 +49,7 @@ impl Table {
     }
 
     /// As a Polars frame, for analysis.
+    #[cfg(not(target_family = "wasm"))]
     pub fn to_frame(&self) -> PolarsResult<DataFrame> {
         let columns: Vec<Column> = self.columns.iter().map(|(n, v)| Column::from(Series::new(n.as_str().into(), v.as_slice()))).collect();
         DataFrame::new(self.rows, columns)

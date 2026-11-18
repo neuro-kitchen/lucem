@@ -94,7 +94,17 @@ pub fn load_image_file(path: impl AsRef<Path>) -> IoResult<LoadedImage> {
     let dyn_img = image::ImageReader::open(path_ref)?
         .with_guessed_format()?
         .decode()?;
+    let name = path_ref.file_name().and_then(|s| s.to_str()).unwrap_or("image").to_string();
+    loaded_from(dyn_img, name, Some(path_ref.to_path_buf()))
+}
 
+/// A plain image (PNG, TIFF, JPEG, …) from its bytes: a file a browser page was given.
+pub fn load_image_bytes(name: &str, bytes: &[u8]) -> IoResult<LoadedImage> {
+    let dyn_img = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?.decode()?;
+    loaded_from(dyn_img, name.to_string(), None)
+}
+
+fn loaded_from(dyn_img: image::DynamicImage, name: String, path: Option<std::path::PathBuf>) -> IoResult<LoadedImage> {
     let width = dyn_img.width() as usize;
     let height = dyn_img.height() as usize;
     if width == 0 || height == 0 {
@@ -136,15 +146,9 @@ pub fn load_image_file(path: impl AsRef<Path>) -> IoResult<LoadedImage> {
         rgba_f32.extend_from_slice(&[r, g, b, a]);
     }
 
-    let name = path_ref
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("image")
-        .to_string();
-
     Ok(LoadedImage {
         name,
-        path: Some(path_ref.to_path_buf()),
+        path,
         width,
         height,
         channels,

@@ -2,7 +2,7 @@
 # Smoke test of the lucem server image, end to end, with nothing on the host but Podman: the image
 # is the server and the client.
 #
-#   build → doctor → data → serve → enroll → fetch (and refusals) → run a pipeline → stop
+#   build → doctor → data → serve → enroll → fetch (and refusals) → the page → run a pipeline → stop
 #
 # Usage (from the repository root):
 #   deploy/smoke-test.sh                 # target picked from the host: nvidia (CDI), mesa (/dev/dri), cpu
@@ -66,9 +66,11 @@ step "data"
 pass "synthetic image"
 
 step "serve (hardened)"
-podman run -d --name "$NAME" -p "$PORT:50051/udp" --userns=keep-id:uid=10001,gid=10001 "${DEVICE[@]}" \
+WEB_PORT=$((PORT + 1))
+podman run -d --name "$NAME" -p "$PORT:50051/udp" -p "127.0.0.1:$WEB_PORT:8443/tcp" -p "127.0.0.1:$WEB_PORT:8443/udp" --userns=keep-id:uid=10001,gid=10001 "${DEVICE[@]}" \
     --read-only --cap-drop=all --security-opt=no-new-privileges --pids-limit=1024 \
-    -v "$WORK:/data:z" -v lucem-smoke-cache:/home/lucem/.cache "$IMAGE" serve --bind 0.0.0.0:50051 >/dev/null
+    -v "$WORK:/data:z" -v lucem-smoke-cache:/home/lucem/.cache "$IMAGE" serve --bind 0.0.0.0:50051 \
+    --web /usr/share/lucem/web --web-bind 0.0.0.0:8443 --web-plain-http >/dev/null
 sleep 3
 podman ps --filter "name=$NAME" --format '{{.Status}}' | grep -q Up || { podman logs "$NAME"; fail "the server did not start"; }
 pass "serving"
@@ -91,6 +93,27 @@ pass "the authority's key is refused"
 podman exec "$NAME" lucem clients revoke alice
 if "${FETCH[@]}" >/dev/null 2>&1; then fail "a revoked client was served"; fi
 pass "a revoked client is refused"
+
+step "the page"
+WEB="http://127.0.0.1:$WEB_PORT"
+curl -fsS "$WEB/" | grep -q "loader.js" && pass "the page is served" || fail "the page"
+headers=$(curl -fsS -D - -o /dev/null "$WEB/")
+for h in "cross-origin-opener-policy: same-origin" "cross-origin-embedder-policy: require-corp" "content-security-policy: default-src 'self'"; do
+    grep -qi "$h" <<<"$headers" && pass "header: ${h%%:*}" || fail "missing header: $h"
+done
+info=$(curl -fsS "$WEB/lucem-serve.json")
+grep -q '"webtransport_port":8443' <<<"$info" && grep -q '"certificate_sha256":\[' <<<"$info" && pass "WebTransport is offered, with its certificate's hash" || fail "lucem-serve.json: $info"
+code=$(curl -s --path-as-is -o /dev/null -w "%{http_code}" "$WEB/../.lucem-auth/ca.key.pem")
+[ "$code" = 404 ] && pass "nothing outside the page's folder" || fail "a path out of the web folder: HTTP $code"
+# Another site in the same browser may not open the page's socket
+code=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" \
+    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: https://evil.example" "$WEB/ws")
+[ "$code" = 403 ] && pass "a foreign origin is refused" || fail "a foreign origin got HTTP $code"
+# An accepted socket stays open (it waits for the page's sign-in): curl ends at --max-time
+# (exit 28) with the 101 already written
+code=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" \
+    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: $WEB" "$WEB/ws" || true)
+[ "$code" = 101 ] && pass "the page's own origin opens its socket" || fail "the page's origin got HTTP $code"
 
 step "run a pipeline"
 cat > "$WORK/spec.json" <<'SPEC'

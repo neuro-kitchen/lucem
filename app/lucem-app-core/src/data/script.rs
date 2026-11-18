@@ -483,7 +483,7 @@ pub fn run_node(path: &Path, inputs: &[(String, PortType, HostArray)], params: &
         (&p.name, p.value.to_bits()).hash(&mut h);
     }
     let key = h.finish();
-    if let Some(hit) = results_cache().lock().ok().and_then(|c| c.get(&key).cloned()) {
+    if let Some(hit) = crate::platform::lock(results_cache()).get(&key).cloned() {
         return Ok(hit);
     }
     let dir = scratch()?;
@@ -516,7 +516,8 @@ pub fn run_node(path: &Path, inputs: &[(String, PortType, HostArray)], params: &
     })();
     let _ = std::fs::remove_dir_all(&dir);
     let out = result?;
-    if let Ok(mut c) = results_cache().lock() {
+    {
+        let mut c = crate::platform::lock(results_cache());
         if c.len() > 64 {
             c.clear();
         }

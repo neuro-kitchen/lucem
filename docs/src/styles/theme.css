@@ -1,23 +1,23 @@
-/* lucem's look, from the stain itself: hematoxylin's violet ink for the dark theme's surfaces, an
-   eosin rose for the accent, and glass-slide white for the light theme. Starlight's dark theme is
+/* lucem's look, from the stain itself: hematoxylin's violet ink for the dark theme's surfaces, the
+   page's teal-green for the accent (the app's page and icon: #2b7f86), and glass-slide white for the light theme. Starlight's dark theme is
    the base (:root); light is :root[data-theme='light']. Its gray scale runs from "white" (the
    strongest text) to "black" (the page) in both themes.
 
    Checked against the designparser rules:
    - wcag-contrast: every text colour is at least 4.9:1 on the page and on panels, in both themes;
-     the accent 8.0:1 (dark) and 6.2:1 (light).
-   - dark-mode-color-adaptation: the accent keeps its hue (≈ 336°) in both themes; in the dark one
+     the accent 10.1:1 (dark) and 6.0:1 (light).
+   - dark-mode-color-adaptation: the accent keeps its hue (≈ 180°) in both themes; in the dark one
      its chroma is lower and its tone higher, so it does not glow.
-   - 60-30-10 and saturation-control: ink and slide neutrals carry the page, the rose only marks
+   - 60-30-10 and saturation-control: ink and slide neutrals carry the page, the teal only marks
      what is current or can be clicked. */
 
 :root {
   --sl-font: 'IBM Plex Sans Variable', system-ui, sans-serif;
   --sl-font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
-  --sl-color-accent-low: #3b2233;
-  --sl-color-accent: #f28ab3;
-  --sl-color-accent-high: #ffd3e4;
+  --sl-color-accent-low: #12302f;
+  --sl-color-accent: #6fd0c8;
+  --sl-color-accent-high: #c4f0ec;
   --sl-color-white: #ffffff;
   --sl-color-gray-1: #e8e5f2;
   --sl-color-gray-2: #b9b3cc;
@@ -33,9 +33,9 @@
 }
 
 :root[data-theme='light'] {
-  --sl-color-accent-low: #fbe1ec;
-  --sl-color-accent: #b0285f;
-  --sl-color-accent-high: #7d1640;
+  --sl-color-accent-low: #d6efee;
+  --sl-color-accent: #1f6b71;
+  --sl-color-accent-high: #134a4f;
   --sl-color-white: #15121f;
   --sl-color-gray-1: #241f35;
   --sl-color-gray-2: #463f5c;

@@ -23,6 +23,7 @@
 #[macro_use]
 pub mod test_support;
 
+#[cfg(not(target_family = "wasm"))]
 pub mod analytics;
 pub mod color;
 pub mod core;

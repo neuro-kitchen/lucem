@@ -14,5 +14,6 @@ pub mod commands;
 pub mod data;
 pub mod domain;
 pub mod navigation;
+pub mod platform;
 pub mod screens;
 pub mod ui;

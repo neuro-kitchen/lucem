@@ -40,6 +40,12 @@ use crate::ui::widgets::format_length;
 
 /// Most display tiles kept.
 const TILE_CAP: usize = 384;
+/// New tile textures uploaded per frame at most: a burst of tiles (a zoom, a contrast change)
+/// spreads over a few frames instead of stalling one (games' per-frame upload budget).
+const UPLOADS_PER_FRAME: usize = 24;
+/// After a display change (a window or colour being dragged), how long the canvas asks for one
+/// level coarser first, so the new look is on screen at once; the sharp level follows.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
 const MIN_ZOOM: f64 = 1.0 / 512.0;
 const MAX_ZOOM: f64 = 64.0;
 
@@ -184,6 +190,10 @@ struct Viewer {
     display_docs: Vec<ChannelDoc>,
     requested: Vec<TileKey>,
     requested_rev: u64,
+    /// When the display last changed (while it is recent, coarse tiles of the new look first).
+    display_changed: Option<web_time::Instant>,
+    /// Finished tiles not uploaded yet (at most [`UPLOADS_PER_FRAME`] a frame).
+    pending: std::collections::VecDeque<TileResult>,
     _pump: Task<()>,
 }
 
@@ -927,6 +937,8 @@ impl ImageCanvas {
                         display_docs: Vec::new(),
                         requested: Vec::new(),
                         requested_rev: u64::MAX,
+                        display_changed: None,
+                        pending: Default::default(),
                         _pump: pump,
                     });
                     self.polygon.clear();
@@ -936,6 +948,10 @@ impl ImageCanvas {
                 }
                 let v = self.viewer.as_mut().expect("just set");
                 if v.display_docs != docs {
+                    // A first display (the image just opened) is not a change being dragged
+                    if !v.display_docs.is_empty() {
+                        v.display_changed = Some(web_time::Instant::now());
+                    }
                     v.display_docs = docs.clone();
                     v.rev += 1;
                     v.displays = Arc::new(docs.iter().map(|c| ChannelDisplay { visible: c.visible, color: [c.color[0] as f32 / 255.0, c.color[1] as f32 / 255.0, c.color[2] as f32 / 255.0], min: c.min, max: c.max, gamma: c.gamma }).collect());
@@ -951,6 +967,16 @@ impl ImageCanvas {
 
     fn on_tiles(&mut self, batch: Vec<TileResult>, cx: &mut Context<Self>) {
         let Some(v) = self.viewer.as_mut() else { return };
+        v.pending.extend(batch);
+        cx.notify();
+    }
+
+    /// Uploads up to [`UPLOADS_PER_FRAME`] finished tiles; whether more wait.
+    fn take_pending(&mut self, cx: &mut Context<Self>) -> bool {
+        let _span = tracing::trace_span!("canvas.upload").entered();
+        let Some(v) = self.viewer.as_mut() else { return false };
+        let n = v.pending.len().min(UPLOADS_PER_FRAME);
+        let batch: Vec<TileResult> = v.pending.drain(..n).collect();
         for r in batch {
             match r {
                 TileResult::Ready(t) => {
@@ -971,18 +997,22 @@ impl ImageCanvas {
                 }
             }
         }
-        cx.notify();
+        !v.pending.is_empty()
     }
 
     /// Asks for the tiles in view, evicts far ones; returns what to draw (coarse first).
     fn plan_tiles(&mut self) -> Vec<(Bounds<Pixels>, Arc<RenderImage>)> {
+        let _span = tracing::trace_span!("canvas.plan").entered();
         let (vw, vh) = self.view_size();
         let rect = self.visible();
         let (zoom, scale, center, z0) = (self.zoom, self.scale as f64, self.center, self.z);
         let Some(v) = self.viewer.as_mut() else { return Vec::new() };
         let py = v.pyramid.clone();
-        let target = py.level_for_zoom(zoom * scale);
         let coarsest = py.coarsest();
+        // While the display is being changed, one level coarser: the new look at once
+        let settling = v.display_changed.is_some_and(|t| t.elapsed() < SETTLE);
+        let sharp = py.level_for_zoom(zoom * scale);
+        let target = if settling { (sharp + 1).min(coarsest) } else { sharp };
         let plane = |level: usize| {
             let l = &py.levels[level];
             ((z0 as f64 / l.z_downsample) as usize).min(l.depth - 1)
@@ -1052,6 +1082,10 @@ impl ImageCanvas {
         for level in (target..=coarsest).rev() {
             for k in tiles_in(level) {
                 let Some(t) = v.tiles.get(&k) else { continue };
+                // While settling, a finer tile of the old look would cover the new coarse one
+                if settling && level < target && t.rev < v.rev {
+                    continue;
+                }
                 let l = &py.levels[level];
                 let ds = l.downsample;
                 let x0 = (k.tx * l.tile_w) as f64 * ds;
@@ -1730,7 +1764,15 @@ impl Render for ImageCanvas {
         if self.fit_pending && self.viewer.is_some() && self.view_size().0 > 10.0 {
             self.fit(cx);
         }
+        // Tiles finished since the last frame, within the upload budget; the rest next frame
+        if self.take_pending(cx) {
+            window.request_animation_frame();
+        }
         let tiles = self.plan_tiles();
+        // A display change settling: frames go on until the sharp level is asked for
+        if self.viewer.as_ref().and_then(|v| v.display_changed).is_some_and(|t| t.elapsed() < SETTLE) {
+            window.request_animation_frame();
+        }
         self.sync_threshold(cx);
         self.sync_paint(cx);
         self.sync_cells(cx);

@@ -22,6 +22,9 @@ AddDevice=nvidia.com/gpu=all
 SecurityLabelDisable=true
 ContainerName=lucem-serve
 PublishPort=50051:50051/udp
+# The page, to this computer only (http://localhost:8443; WebTransport on UDP, the same port)
+PublishPort=127.0.0.1:8443:8443/tcp
+PublishPort=127.0.0.1:8443:8443/udp
 # You on the host = the container's lucem user (uid 10001), so it can write to ~/lucem-data
 UserNS=keep-id:uid=10001,gid=10001
 # Images and the authority (.lucem-auth: CA, enrolled clients); :Z labels it for SELinux
@@ -33,7 +36,7 @@ ReadOnly=true
 DropCapability=all
 NoNewPrivileges=true
 PodmanArgs=--pids-limit=1024
-Exec=serve --bind 0.0.0.0:50051 --name %H --max-clients 8
+Exec=serve --bind 0.0.0.0:50051 --name %H --max-clients 8 --web /usr/share/lucem/web --web-bind 0.0.0.0:8443 --web-plain-http --samples /usr/share/lucem/samples
 
 [Service]
 Restart=on-failure

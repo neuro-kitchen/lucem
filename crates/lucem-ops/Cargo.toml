@@ -21,6 +21,10 @@ arrow.workspace = true
 cubecl.workspace = true
 lucem-core = { workspace = true, default-features = false, features = ["compute"] }
 num-traits.workspace = true
-polars.workspace = true
+lucem-table.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+# Polars on computers; a browser build has none (see lucem-table)
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+lucem-table = { workspace = true, features = ["polars"] }

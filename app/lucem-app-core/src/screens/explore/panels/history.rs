@@ -48,7 +48,7 @@ pub fn panel(store: &Entity<Store>, cx: &App) -> AnyElement {
         .pt(px(theme::LG))
         .child(div().text_base().font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Session"))
         .child(div().text_xs().text_color(color::text_muted()).child(if steps.is_empty() { "The analysis steps you run are recorded here.".to_string() } else { format!("{} step(s) · session.json · lucem session run session.json <images…>", steps.len()) }));
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     for st in steps.iter().rev().take(200) {
         let ago = now.saturating_sub(st.at);
         let when = if ago < 60 { "now".to_string() } else if ago < 3600 { format!("{} min ago", ago / 60) } else if ago < 86_400 { format!("{} h ago", ago / 3600) } else { format!("{} d ago", ago / 86_400) };

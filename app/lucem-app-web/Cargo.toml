@@ -1,0 +1,26 @@
+[package]
+name = "lucem-app-web"
+description = "lucem in a browser tab: the app core built for WebAssembly, a client of lucem serve --web (build.sh makes the page)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Everything is for the browser; on other targets the crate is empty (so the workspace builds)
+[target.'cfg(target_family = "wasm")'.dependencies]
+lucem-app-core.workspace = true
+lucem-stream = { workspace = true, default-features = false, features = ["web"] }
+gpui-kit.workspace = true
+kitchen-ui.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = ["Window", "Location", "Storage", "History"] }
+log.workspace = true
+futures-channel.workspace = true
+futures-util.workspace = true

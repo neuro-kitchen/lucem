@@ -22,9 +22,13 @@ USAGE
                                          model plugin, on every usable runtime
   lucem run <spec.json> <image> <output> [--block N] [--runtime NAME]
                                          Run a pipeline over a whole image
+  lucem samples <dir>                    Every sample as OME-Zarr files (pages open these: the site, --samples)
+  lucem bench-codecs <image> [--level N (0)] [--tiles N (64)]
+                                         Ratio and speed of zstd, LZ4 and Pcodec on its tiles
   lucem sample <output.ome.zarr> [--size N] [--depth N]
                                          Write a synthetic image (a volume with --depth)
   lucem serve [--data DIR] [--bind ADDR] [--name HOST]... [--max-clients N] [--allow-anonymous]
+              [--web DIST [--web-bind ADDR] [--web-plain-http] [--web-cache-mib N (512)] [--samples DIR] [--runtime wgpu|cuda|cpu]]
               [--pair] [--certificate FILE --private-key FILE]
                                          Serve the images under DIR to enrolled clients
                                          (--pair: show a pairing code on the terminal at start)
@@ -50,13 +54,17 @@ USAGE
 ";
 
 mod autotune;
+mod bench;
 mod hist;
 mod ops;
 mod session;
+mod web;
 
 fn main() -> ExitCode {
     lucem_ml::legacy::adopt();
-    let _ = tracing_subscriber::fmt().with_env_filter("warn").with_writer(std::io::stderr).try_init();
+    // RUST_LOG when set; else warnings, and who connects to a server (lucem_stream's info)
+    let filter = std::env::var("RUST_LOG").ok().filter(|f| !f.trim().is_empty()).unwrap_or_else(|| "warn,lucem_stream=info".into());
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(args) {
@@ -134,6 +142,8 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "autotune" => autotune::autotune(args),
         "run" => run_pipeline(args),
         "sample" => sample(args),
+        "samples" => samples(args),
+        "bench-codecs" => bench_codecs(args),
         "serve" => serve(args),
         "clients" => clients(args),
         "fetch" => fetch(args),
@@ -232,6 +242,24 @@ fn run_pipeline(mut args: Args) -> Result<(), String> {
     Ok(())
 }
 
+fn bench_codecs(mut args: Args) -> Result<(), String> {
+    let level = args.number("--level")?.unwrap_or(0);
+    let tiles = args.number("--tiles")?.unwrap_or(64);
+    let a = args.positional(1)?;
+    print!("{}", bench::bench_codecs(Path::new(&a[0]), level, tiles)?);
+    Ok(())
+}
+
+/// Writes every sample the app offers (the volume and the phantoms) as OME-Zarr under `dir`,
+/// with `index.json` naming them: what a page opens instead of generating them (the docs
+/// viewer's site, a container's `--samples`).
+fn samples(args: Args) -> Result<(), String> {
+    let a = args.positional(1)?;
+    let written = lucem_io::samples::write_all(Path::new(&a[0])).map_err(|e| e.to_string())?;
+    eprintln!("wrote {} sample(s) into {}", written.len(), a[0]);
+    Ok(())
+}
+
 fn sample(mut args: Args) -> Result<(), String> {
     let size = args.number("--size")?.unwrap_or(256);
     let depth = args.number("--depth")?;
@@ -280,7 +308,19 @@ fn serve(mut args: Args) -> Result<(), String> {
     let pair_now = args.take_flag("--pair");
     let certificate = args.take_value("--certificate")?;
     let key = args.take_value("--private-key")?;
+    // Browser pages: their files, WebTransport (UDP) and a WebSocket fallback on one port
+    let web_root = args.take_value("--web")?;
+    let web_bind = args.take_value("--web-bind")?.unwrap_or_else(|| "127.0.0.1:8443".into());
+    let web_plain = args.take_flag("--web-plain-http");
+    let tile_cache_mib = args.number("--web-cache-mib")?.unwrap_or(lucem_stream::web::DEFAULT_TILE_CACHE_MIB);
+    // The app's samples for pages (`lucem samples <dir>`): opened as files, never generated there
+    let samples_dir = args.take_value("--samples")?.map(PathBuf::from);
+    let runtime_name = args.take_value("--runtime")?;
     args.positional(0)?;
+    let web_files = match (&certificate, &key) {
+        (Some(c), Some(k)) => Some(ServerIdentity::Files { certificate_chain: c.into(), private_key: k.into() }),
+        _ => None,
+    };
     let pair_names = names.clone();
     let identity = match (certificate, key) {
         (Some(c), Some(k)) => ServerIdentity::Files { certificate_chain: c.into(), private_key: k.into() },
@@ -292,19 +332,68 @@ fn serve(mut args: Args) -> Result<(), String> {
     let tls = server_config_with_clients(&authority, &identity, anonymous).map_err(|e| e.to_string())?;
     // No pairing code unless asked for: a code is a secret, and one made at every start would be
     // a live secret nobody asked for. `--pair` shows one on the terminal (never in a log).
-    let terminal = if pair_now { Some(Terminal::open().map_err(|e| format!("--pair: {e}"))?) } else { None };
+    // A pairing code is a secret: shown on the terminal when there is one; in the log only when
+    // asked for (--pair: a container's log, as dsp-kitchen's image does)
+    let terminal = Terminal::open().ok();
     runtime()?.block_on(async move {
-        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority.clone()).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max);
-        eprintln!("serving {data} on {addr} to paired computers");
-        match terminal {
-            Some(mut t) => {
-                let code = authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?;
-                t.show(&format!("pair a computer (read only, {} minutes, once): {addr}  code {}\n  in lucem: the server button › Pair with a lucem server…   or: lucem pair {addr} {}", lucem_stream::pairing::CODE_MINUTES, code.display(), code.display()))?;
+        let plugins: Vec<Arc<dyn lucem_stream::plugin::ServerPlugin>> = vec![Arc::new(HistPlugin::default()), Arc::new(web::PipelinePlugin::default())];
+        let web = match web_root.as_deref().map(PathBuf::from) {
+            None => None,
+            Some(root) => {
+                let web_addr: std::net::SocketAddr = web_bind.parse().map_err(|e| format!("--web-bind {web_bind}: {e}"))?;
+                // Pipelines on the tiles pages ask for, on this server's device (pages only draw)
+                let target = lucem_mcp::work::target(runtime_name.as_deref())?;
+                let (processor, runtime) = match web::PipelineTiles::open(target) {
+                    Ok(p) => (Some(p.clone() as Arc<dyn lucem_stream::engine::TileProcessor>), p.runtime().to_string()),
+                    Err(e) => {
+                        eprintln!("pages: no processing on this server ({e})");
+                        (None, String::new())
+                    }
+                };
+                let tls = match (web_files, web_plain) {
+                    (Some(identity), _) => lucem_stream::WebTls::Files(identity),
+                    (None, true) => lucem_stream::WebTls::PlainOffLoopback,
+                    (None, false) if web_addr.ip().is_loopback() => lucem_stream::WebTls::Plain,
+                    (None, false) => lucem_stream::WebTls::Authority,
+                };
+                let options = lucem_stream::WebOptions { bind: web_addr, web_root: Some(root), tls, names: pair_names.clone(), server_name: computer_name(), runtime, samples: samples_dir, tile_cache_mib };
+                let server = lucem_stream::WebServer::bind(options, authority.clone(), Path::new(&data), plugins.clone(), processor).await.map_err(|e| format!("--web: {e}"))?;
+                let scheme = if server.is_tls() { "https" } else { "http" };
+                let at = server.local_addr().map_err(|e| e.to_string())?;
+                eprintln!("pages: {scheme}://{at}/ (WebTransport on UDP {}, a WebSocket where UDP is blocked)", at.port());
+                Some(server)
             }
-            None => eprintln!("pair a computer: `lucem clients pair` (in a container: podman exec -it <container> lucem clients pair)"),
+        };
+        let server = Server::bind(addr, tls.config).map_err(|e| e.to_string())?.with_authority(authority.clone()).with_anonymous(anonymous).with_names(pair_names).with_max_connections(max).with_plugins(plugins);
+        eprintln!("serving {data} on {addr} to paired computers");
+        // The page's link carries a one-time code after `#` (never sent to the server, so never in
+        // a log of it): opening it signs the browser in, nothing to type. Made when there is a
+        // terminal to show it on, or when asked for (--pair)
+        let page_link = web.as_ref().and_then(|w| w.local_addr().ok().map(|a| (w.is_tls(), a)));
+        if pair_now || (terminal.is_some() && page_link.is_some()) {
+            let code = authority.new_pairing_code(Permission::Read).map_err(|e| e.to_string())?;
+            let minutes = lucem_stream::pairing::CODE_MINUTES;
+            let mut text = format!("pair a computer (read only, {minutes} minutes, once): {addr}  code {}\n  or: lucem pair {addr} {}", code.display(), code.display());
+            if let Some((tls, at)) = page_link {
+                let host = if at.ip().is_loopback() || at.ip().is_unspecified() { format!("localhost:{}", at.port()) } else { at.to_string() };
+                text.push_str(&format!("\nopen the page (signs this browser in, once, {minutes} minutes): {}://{host}/#pair={}", if tls { "https" } else { "http" }, code.display()));
+            }
+            match terminal {
+                Some(mut t) => t.show(&text)?,
+                None => eprintln!("{text}"),
+            }
+        } else {
+            eprintln!("pair a computer or a browser: `lucem clients pair` (in a container: podman exec -it <container> lucem clients pair)");
         }
+        let pages = async move {
+            match web {
+                Some(w) => w.run().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             r = server.run(ServeOptions { data: PathBuf::from(&data) }) => r.map_err(|e| e.to_string()),
+            _ = pages => Ok(()),
             _ = shutdown() => { Ok(()) }
         }
     })
@@ -437,6 +526,8 @@ fn pair(mut args: Args) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     lucem_stream::pairing::save_identity(&out, &paired.identity_pem).map_err(|e| e.to_string())?;
+    // The address and names beside it: the app lists the paired servers from these
+    lucem_stream::PairedServer { addr: a[0].clone(), names: paired.names.clone(), identity: out.clone() }.save().map_err(|e| e.to_string())?;
     eprintln!("paired as {name} ({}); identity in {}", paired.permission, out.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()));
     eprintln!("connect with: lucem fetch {} --identity <that file> --server-name {}", a[0], paired.names.first().map_or("localhost", String::as_str));
     Ok(())
@@ -444,14 +535,20 @@ fn pair(mut args: Args) -> Result<(), String> {
 
 /// This computer's name (for the server's list of paired computers).
 fn computer_name() -> String {
-    let raw = std::fs::read_to_string("/etc/hostname").ok().or_else(|| std::env::var("COMPUTERNAME").ok()).or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_else(|| "computer".into());
+    // /etc/hostname is not on every system (Fedora Silverblue, containers): the kernel's name too
+    let raw = ["/etc/hostname", "/proc/sys/kernel/hostname"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "computer".into());
     let clean: String = raw.trim().chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
     if clean.is_empty() { "computer".into() } else { clean }
 }
 
 /// Where paired servers' identities live: `~/.config/lucem/servers` (each file mode 0600).
 fn servers_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))).unwrap_or_else(std::env::temp_dir).join("lucem").join("servers")
+    lucem_stream::remote::servers_dir()
 }
 
 fn fetch(mut args: Args) -> Result<(), String> {
@@ -481,4 +578,20 @@ fn fetch(mut args: Args) -> Result<(), String> {
         session.close();
         Ok(())
     })
+}
+
+/// Histology computed by the server for its clients (pages): `lucem_hist::service` as the
+/// server's `hist` plugin.
+#[derive(Default)]
+struct HistPlugin(lucem_hist::service::Service);
+
+impl lucem_stream::plugin::ServerPlugin for HistPlugin {
+    fn id(&self) -> &'static str {
+        lucem_hist::service::PLUGIN
+    }
+
+    fn call(&self, method: &str, body: serde_json::Value, context: &lucem_stream::plugin::PluginContext) -> Result<serde_json::Value, String> {
+        let caller = lucem_hist::service::Caller { name: &context.peer, may_write: context.may_write };
+        self.0.call(method, body, &|p| context.resolve(p), caller)
+    }
 }

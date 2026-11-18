@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 use gpui_kit::RenderImage;
 use lucem_core::cubecl::prelude::Client;
@@ -468,33 +468,110 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
         for y in cy0..cy0 + ch {
             crop.extend_from_slice(&host[y * w + cx0..y * w + cx0 + cw]);
         }
-        // The processing of a channel: drawn as that channel, in its colour and window
-        if let Some(c) = processed.iter().find(|(_, v)| **v == view).map(|(c, _)| *c)
-            && port == PortType::Image
-            && let Some(chan) = doc.image(&req.image).and_then(|i| i.channels.get(c))
-        {
-            let top = pyramid.channels.get(c).map_or(1.0, |i| i.range.1.max(1e-6));
-            let scale = if top > 1.0 { 1.0 / top } else { 1.0 };
-            let image = channel_layer(&crop, cw, chan.min * scale, chan.max * scale, chan.gamma, chan.color);
-            out.push(LayerResult { rect: [vx0 as f64 * ds, vy0 as f64 * ds, cw as f64 * ds, ch as f64 * ds], layer: Some(image), port: Some(port), level, ms: t0.elapsed().as_secs_f64() * 1000.0, ..base });
+        let rect = [vx0 as f64 * ds, vy0 as f64 * ds, cw as f64 * ds, ch as f64 * ds];
+        out.push(drawn(doc, pyramid, req, &processed, &style, base, port, &crop, (cw, ch), rect, level, t0));
+    }
+    out
+}
+
+/// A view's values over its region (`crop`, `cw × ch`) drawn as its layer: a channel's
+/// processing in that channel's colour and window, else by the view's style.
+#[allow(clippy::too_many_arguments)]
+fn drawn(doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest, processed: &HashMap<usize, String>, style: &ViewStyle, base: LayerResult, port: PortType, crop: &[f32], (cw, ch): (usize, usize), rect: [f64; 4], level: usize, t0: Instant) -> LayerResult {
+    if let Some(c) = processed.iter().find(|(_, v)| **v == base.view).map(|(c, _)| *c)
+        && port == PortType::Image
+        && let Some(chan) = doc.image(&req.image).and_then(|i| i.channels.get(c))
+    {
+        let top = pyramid.channels.get(c).map_or(1.0, |i| i.range.1.max(1e-6));
+        let scale = if top > 1.0 { 1.0 / top } else { 1.0 };
+        let image = channel_layer(crop, cw, chan.min * scale, chan.max * scale, chan.gamma, chan.color);
+        return LayerResult { rect, layer: Some(image), port: Some(port), level, ms: t0.elapsed().as_secs_f64() * 1000.0, ..base };
+    }
+    let layer_style = match port {
+        PortType::Image => {
+            let (lo, hi) = percentiles(crop, 0.01, 0.99);
+            LayerStyle::Intensity { min: lo, max: hi, lut: lut(&style.colormap), alpha: style.opacity }
+        }
+        PortType::Mask => LayerStyle::Mask { color: style.color, alpha: style.opacity },
+        _ => LayerStyle::Labels { alpha: style.opacity },
+    };
+    LayerResult { rect, layer: Some(render_layer(crop, cw, ch, layer_style)), port: Some(port), level, ms: t0.elapsed().as_secs_f64() * 1000.0, ..base }
+}
+
+/// The pipeline that computes `target` from the channels of `image`, as data the server runs on
+/// tiles (`lucem_pipeline::PipelineSpec`): its sources are channels, its nodes the operators.
+/// Script, model and annotation nodes run in the desktop app (a server cannot run them on tiles
+/// yet): a chain that needs one says so.
+pub fn spec_for(doc: &ProjectDoc, image: &str, target: &str) -> Result<lucem_pipeline::PipelineSpec, String> {
+    let mut sources = std::collections::BTreeMap::new();
+    let mut nodes = std::collections::BTreeMap::new();
+    for n in &doc.graph.nodes {
+        match &n.kind {
+            NodeKind::Source { image: i, channel } if i == image => {
+                sources.insert(n.id.clone(), *channel);
+            }
+            NodeKind::Op { op, enabled } => {
+                let inputs = doc.graph.inputs(&n.id).into_iter().map(Option::unwrap_or_default).collect();
+                nodes.insert(n.id.clone(), lucem_pipeline::SpecNode { op: op.clone(), inputs, enabled: *enabled });
+            }
+            _ => {}
+        }
+    }
+    let spec = lucem_pipeline::PipelineSpec { sources, nodes, target: target.to_string(), level: 0, normalize: true };
+    spec.validate().map_err(|e| format!("{e} (scripts, models and annotations as inputs run in the desktop app for now)"))?;
+    Ok(spec)
+}
+
+/// Each raster view of `req.image`, computed by the page's server: the view's chain as a
+/// pipeline the server runs on the tiles of the region (their halo read there), drawn here as
+/// the desktop draws its own results. A browser page has no compute of its own.
+#[cfg(target_family = "wasm")]
+pub fn compute_remote(doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest) -> Vec<LayerResult> {
+    let mut out = Vec::new();
+    let Some(link) = crate::data::remote::page_link() else { return out };
+    let Some(path) = pyramid.path.as_ref().map(|p| p.to_string_lossy().into_owned()) else { return out };
+    let Some((_, served)) = lucem_stream::split_remote(&path).map(|(a, p)| (a.to_string(), p.to_string())) else { return out };
+    let n_channels = doc.image(&req.image).map_or(0, |i| i.channels.len());
+    let processed = doc.graph.processed_channels(&req.image, n_channels);
+    for v in doc.graph.views().filter(|v| doc.graph.images_of(&v.id).contains(&req.image)) {
+        let NodeKind::View { style, .. } = &v.kind else { continue };
+        let t0 = Instant::now();
+        let base = LayerResult { view: v.id.clone(), image: req.image.clone(), rect: [0.0; 4], layer: None, port: None, error: None, ms: 0.0, level: 0 };
+        let Some(target) = doc.graph.input(&v.id, 0).map(str::to_string) else { continue };
+        let Some(port) = doc.graph.node(&target).and_then(|n| n.kind.output()) else { continue };
+        if port == PortType::Table || !style.visible {
             continue;
         }
-        let layer_style = match port {
-            PortType::Image => {
-                let (lo, hi) = percentiles(&crop, 0.01, 0.99);
-                LayerStyle::Intensity { min: lo, max: hi, lut: lut(&style.colormap), alpha: style.opacity }
+        let spec = match spec_for(doc, &req.image, &target).and_then(|s| serde_json::to_string(&s).map_err(|e| e.to_string())) {
+            Ok(s) => s,
+            Err(e) => {
+                out.push(LayerResult { error: Some(e), ..base });
+                continue;
             }
-            PortType::Mask => LayerStyle::Mask { color: style.color, alpha: style.opacity },
-            _ => LayerStyle::Labels { alpha: style.opacity },
         };
-        out.push(LayerResult {
-            rect: [vx0 as f64 * ds, vy0 as f64 * ds, cw as f64 * ds, ch as f64 * ds],
-            layer: Some(render_layer(&crop, cw, ch, layer_style)),
-            port: Some(port),
-            level,
-            ms: t0.elapsed().as_secs_f64() * 1000.0,
-            ..base
-        });
+        let mut level = pyramid.level_for_zoom(req.zoom);
+        while level < pyramid.coarsest() && ((req.rect[2] / pyramid.levels[level].downsample) as usize).max((req.rect[3] / pyramid.levels[level].downsample) as usize) > MAX_SIDE {
+            level += 1;
+        }
+        let l = pyramid.levels[level].clone();
+        let ds = l.downsample;
+        let vx0 = (req.rect[0] / ds).floor().max(0.0) as usize;
+        let vy0 = (req.rect[1] / ds).floor().max(0.0) as usize;
+        let vx1 = (((req.rect[0] + req.rect[2]) / ds).ceil().max(0.0) as usize).min(l.width);
+        let vy1 = (((req.rect[1] + req.rect[3]) / ds).ceil().max(0.0) as usize).min(l.height);
+        if vx1 <= vx0 || vy1 <= vy0 {
+            continue;
+        }
+        let plane = ((req.z as f64 / l.z_downsample) as usize).min(l.depth - 1);
+        let (cw, ch) = (vx1 - vx0, vy1 - vy0);
+        let values = link.open(&served, Some(spec)).map_err(|e| e.to_string()).and_then(|p| p.read_region_at(level, 0, plane, vx0, vy0, cw, ch).map_err(|e| e.to_string()));
+        match values {
+            Ok(crop) => {
+                let rect = [vx0 as f64 * ds, vy0 as f64 * ds, cw as f64 * ds, ch as f64 * ds];
+                out.push(drawn(doc, pyramid, req, &processed, style, base, port, &crop, (cw, ch), rect, level, t0));
+            }
+            Err(e) => out.push(LayerResult { error: Some(e), level, ..base }),
+        }
     }
     out
 }

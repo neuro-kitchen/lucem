@@ -9,7 +9,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use polars::prelude::{Column, DataFrame, NamedFrom, Series};
+use lucem_table::polars::prelude::{Column, DataFrame, NamedFrom, Series};
 
 use crate::error::{OpsError, OpsResult};
 use crate::measure::regions::RegionFeatures;
