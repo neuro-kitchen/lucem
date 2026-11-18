@@ -242,6 +242,7 @@ fn describe(p: &Pyramid) -> ImageInfo {
         pixel_size_um: p.pixel_size_um,
         z_spacing_um: p.z_spacing_um,
         levels: p.levels.iter().map(|l| [l.depth, l.height, l.width, l.tile_d, l.tile_h, l.tile_w]).collect(),
+        display: p.channels.iter().map(|c| crate::protocol::ChannelDisplay { color: c.color, window: c.window, range: c.range, active: c.active }).collect(),
     }
 }
 
@@ -394,6 +395,69 @@ mod tests {
             s.list().await
         };
         assert!(denied.await.is_err(), "a revoked client is refused");
+        fs::remove_dir_all(&data).unwrap();
+        fs::remove_dir_all(&auth_dir).unwrap();
+    }
+
+    /// A served image opened through [`crate::Remote`] is a pyramid like the file: same levels,
+    /// channels and display, same values; its tiles come over the connection.
+    #[test]
+    fn a_served_image_reads_as_a_pyramid() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let data = temp("remote-data");
+        let auth_dir = temp("remote-auth");
+        let image = data.join("b.ome.zarr");
+        let options = lucem_io::WriterOptions { name: "b".into(), channels: vec!["dapi".into(), "cd3".into()], shape: [2, 20, 12], chunks: [1, 8, 8], pixel_size_um: Some(0.5), z_spacing_um: Some(2.0) };
+        let w = lucem_io::ZarrWriter::create::<f32>(&image, options).unwrap();
+        // Whole chunks, each value its index in the volume (negated in the second channel)
+        for z in 0..2 {
+            for y0 in (0..20).step_by(8) {
+                for x0 in (0..12).step_by(8) {
+                    let (h, wd) = ((20 - y0).min(8), (12 - x0).min(8));
+                    let values: Vec<f32> = (0..h).flat_map(|y| (0..wd).map(move |x| ((z * 20 + y0 + y) * 12 + x0 + x) as f32)).collect();
+                    w.write(0, [z, y0, x0], [1, h, wd], &values).unwrap();
+                    w.write(1, [z, y0, x0], [1, h, wd], &values.iter().map(|v| -v).collect::<Vec<_>>()).unwrap();
+                }
+            }
+        }
+        w.finish::<f32>().unwrap();
+
+        let server_runtime = tokio::runtime::Runtime::new().unwrap();
+        let authority = Arc::new(Authority::open_or_create(&auth_dir.join("a")).unwrap());
+        let tls = server_config_with_clients(&authority, &ServerIdentity::SelfSigned { names: vec!["localhost".into()] }, false).unwrap();
+        let addr = server_runtime.block_on(async {
+            let server = Server::bind("127.0.0.1:0".parse().unwrap(), tls.config).unwrap().with_authority(authority.clone());
+            let addr = server.local_addr().unwrap();
+            tokio::spawn(server.run(ServeOptions { data: data.clone() }));
+            addr
+        });
+        let file = auth_dir.join("carol.pem");
+        authority.enroll("carol", Permission::Read).unwrap().write(&file).unwrap();
+        let paired = crate::PairedServer { addr: addr.to_string(), names: vec!["localhost".into()], identity: file };
+        let remote = crate::Remote::connect(&paired).unwrap();
+        assert_eq!(remote.list().unwrap(), vec!["b.ome.zarr".to_string()]);
+        let served = remote.open("b.ome.zarr").unwrap();
+        let local = Pyramid::open(&image).unwrap();
+        assert!(served.is_remote());
+        assert_eq!(served.path.as_deref(), Some(Path::new(&format!("lucem://{addr}/b.ome.zarr"))));
+        assert_eq!((served.levels.len(), served.depth(), served.width(), served.height()), (local.levels.len(), local.depth(), local.width(), local.height()));
+        assert_eq!(served.channels, local.channels);
+        assert_eq!((served.pixel_size_um, served.z_spacing_um), (Some(0.5), Some(2.0)));
+        for level in 0..local.levels.len() {
+            for channel in 0..2 {
+                let l = &local.levels[level];
+                let (a, b) = (local.read_region_at(level, channel, 1, 0, 0, l.width, l.height).unwrap(), served.read_region_at(level, channel, 1, 0, 0, l.width, l.height).unwrap());
+                assert_eq!(a, b, "level {level} channel {channel}");
+            }
+        }
+        // Read from many threads at once (the reader's pool)
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| served.read_block(0, 1, [0, 0, 0], [2, 20, 12]).unwrap());
+            }
+        });
+        remote.close();
+        drop(server_runtime);
         fs::remove_dir_all(&data).unwrap();
         fs::remove_dir_all(&auth_dir).unwrap();
     }

@@ -184,6 +184,23 @@ enum Backend {
     Zarr(Vec<ZarrArray>),
     /// `planes[level][channel]`: `depth × height × width` values.
     Memory(Vec<Vec<Vec<f32>>>),
+    /// Tiles from somewhere else (a server): [`Pyramid::from_source`].
+    Source(SourceBox),
+}
+
+/// Where a pyramid's tiles come from when they are not in a file here: a server (`lucem-stream`
+/// opens a served image this way), a cache, a test. One tile of one channel of plane `z`, as
+/// `(width, height, values)`, row-major; edge tiles cut to the image. Called from many threads.
+pub trait TileSource: Send + Sync {
+    fn tile(&self, level: usize, channel: usize, z: usize, tx: usize, ty: usize) -> Result<(usize, usize, Vec<f32>), String>;
+}
+
+struct SourceBox(Arc<dyn TileSource>);
+
+impl std::fmt::Debug for SourceBox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TileSource")
+    }
 }
 
 /// One Zarr v2 array (a level).
@@ -555,6 +572,33 @@ impl Pyramid {
         Ok(Self { name: name.into(), path: None, levels, channels: channel_info, pixel_size_um, z_spacing_um, dtype: dtype.into(), label_groups: Vec::new(), backend: Backend::Memory(planes), chunks: ChunkCache::default() })
     }
 
+    /// A pyramid whose tiles come from `source` (a served image): its levels (finest first) and
+    /// channels as described by whoever has the image. Checked as a file's metadata would be.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_source(name: impl Into<String>, path: Option<PathBuf>, levels: Vec<LevelInfo>, channels: Vec<ChannelInfo>, pixel_size_um: Option<f64>, z_spacing_um: Option<f64>, dtype: impl Into<String>, source: Arc<dyn TileSource>) -> IoResult<Self> {
+        if levels.is_empty() || levels.len() > MAX_LEVELS {
+            return Err(IoError::OmeZarr(format!("{} levels (1 to {MAX_LEVELS})", levels.len())));
+        }
+        if channels.is_empty() {
+            return Err(IoError::OmeZarr("no channels".into()));
+        }
+        for (i, l) in levels.iter().enumerate() {
+            let elements = (l.width as u128) * (l.height as u128) * (l.depth.max(1) as u128) * channels.len() as u128;
+            if l.width == 0 || l.height == 0 || l.depth == 0 || l.tile_w == 0 || l.tile_h == 0 || elements > MAX_ARRAY_ELEMENTS {
+                return Err(IoError::OmeZarr(format!("level {i}: {} × {} × {} in tiles of {} × {}", l.width, l.height, l.depth, l.tile_w, l.tile_h)));
+            }
+            if (l.tile_w as u128) * (l.tile_h as u128) * 4 > MAX_CHUNK_BYTES {
+                return Err(IoError::OmeZarr(format!("level {i}: tiles of {} × {} are too large", l.tile_w, l.tile_h)));
+            }
+        }
+        Ok(Self { name: name.into(), path, levels, channels, pixel_size_um, z_spacing_um, dtype: dtype.into(), label_groups: Vec::new(), backend: Backend::Source(SourceBox(source)), chunks: ChunkCache::default() })
+    }
+
+    /// Whether the tiles come from a [`TileSource`] (a server), not a file here.
+    pub fn is_remote(&self) -> bool {
+        matches!(self.backend, Backend::Source(_))
+    }
+
     /// Planes along z at level 0 (1 for a 2D image).
     pub fn depth(&self) -> usize {
         self.levels[0].depth
@@ -619,6 +663,21 @@ impl Pyramid {
                 out
             }
             Backend::Zarr(arrays) => arrays[level].read_chunk(level, &self.chunks, channel, z, ty, tx, w, h)?,
+            Backend::Source(source) => {
+                // Kept like decoded chunks: a tile asked twice (a pan back, an operator) is read once
+                let key = (level, vec![usize::MAX, channel, z, tx, ty]);
+                match self.chunks.get(&key) {
+                    Some(data) => data.as_ref().clone(),
+                    None => {
+                        let (tw, th, data) = source.0.tile(level, channel, z, tx, ty).map_err(IoError::OmeZarr)?;
+                        if (tw, th) != (w, h) || data.len() != w * h {
+                            return Err(IoError::OmeZarr(format!("tile {tx},{ty} of level {level}: {tw} × {th} with {} values, expected {w} × {h}", data.len())));
+                        }
+                        self.chunks.put(key, Arc::new(data.clone()));
+                        data
+                    }
+                }
+            }
         };
         Ok(Tile { level, channel, tx, ty, width: w, height: h, data })
     }
@@ -1004,6 +1063,39 @@ pub fn sample_volume(size: usize, depth: usize) -> IoResult<Pyramid> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A source that serves a plain gradient and counts its calls.
+    struct Gradient(std::sync::atomic::AtomicUsize);
+
+    impl super::TileSource for Gradient {
+        fn tile(&self, level: usize, channel: usize, z: usize, tx: usize, ty: usize) -> Result<(usize, usize, Vec<f32>), String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (w, h) = (if tx == 2 { 4 } else { 8 }, if ty == 1 { 4 } else { 8 });
+            Ok((w, h, (0..w * h).map(|i| (level * 1000 + channel * 100 + z * 10 + tx + ty) as f32 + i as f32 * 0.0).collect()))
+        }
+    }
+
+    #[test]
+    fn a_source_backs_a_pyramid_and_its_tiles_are_kept() {
+        let level = |w, h, ds| super::LevelInfo { path: "remote".into(), width: w, height: h, tile_w: 8, tile_h: 8, downsample: ds, depth: 2, tile_d: 1, z_downsample: 1.0 };
+        let channel = super::ChannelInfo { label: "dapi".into(), color: [0, 0, 255], window: (0.0, 10.0), range: (0.0, 65535.0), active: true };
+        let source = std::sync::Arc::new(Gradient(Default::default()));
+        let py = super::Pyramid::from_source("served", None, vec![level(20, 12, 1.0), level(10, 6, 2.0)], vec![channel], None, None, "uint16", source.clone()).unwrap();
+        assert!(py.is_remote());
+        let t = py.read_tile_at(0, 0, 1, 2, 1).unwrap();
+        assert_eq!((t.width, t.height, t.data[0]), (4, 4, 13.0));
+        py.read_tile_at(0, 0, 1, 2, 1).unwrap();
+        assert_eq!(source.0.load(std::sync::atomic::Ordering::Relaxed), 1, "read once");
+        // Regions assemble from the source's tiles as from a file's
+        let r = py.read_region_at(0, 0, 0, 6, 6, 4, 4).unwrap();
+        assert_eq!((r[0], r[15]), (0.0, 2.0));
+        // A tile of the wrong size is refused
+        let bad = super::Pyramid::from_source("bad", None, vec![level(16, 16, 1.0)], py.channels.clone(), None, None, "uint16", source).unwrap();
+        assert!(bad.read_tile_at(0, 0, 0, 0, 0).is_ok());
+        assert!(bad.read_tile_at(0, 0, 0, 0, 1).is_err(), "8 × 4 where 8 × 8 was expected");
+        assert!(super::Pyramid::from_source("none", None, vec![], py.channels.clone(), None, None, "uint16", std::sync::Arc::new(Gradient(Default::default()))).is_err());
+    }
+
     use super::*;
 
     fn sample() -> Option<PathBuf> {

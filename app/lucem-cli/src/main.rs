@@ -437,6 +437,8 @@ fn pair(mut args: Args) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     lucem_stream::pairing::save_identity(&out, &paired.identity_pem).map_err(|e| e.to_string())?;
+    // The address and names beside it: the app lists the paired servers from these
+    lucem_stream::PairedServer { addr: a[0].clone(), names: paired.names.clone(), identity: out.clone() }.save().map_err(|e| e.to_string())?;
     eprintln!("paired as {name} ({}); identity in {}", paired.permission, out.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()));
     eprintln!("connect with: lucem fetch {} --identity <that file> --server-name {}", a[0], paired.names.first().map_or("localhost", String::as_str));
     Ok(())
@@ -451,7 +453,7 @@ fn computer_name() -> String {
 
 /// Where paired servers' identities live: `~/.config/lucem/servers` (each file mode 0600).
 fn servers_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))).unwrap_or_else(std::env::temp_dir).join("lucem").join("servers")
+    lucem_stream::remote::servers_dir()
 }
 
 fn fetch(mut args: Args) -> Result<(), String> {

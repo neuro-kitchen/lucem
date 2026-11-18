@@ -29,6 +29,8 @@ lucem-ml.workspace = true
 lucem-ops = { workspace = true, features = ["wgpu", "cuda", "cpu"] }
 lucem-pipeline.workspace = true
 lucem-session.workspace = true
+# Images on a paired server, read as pyramids (lucem:// paths)
+lucem-stream.workspace = true
 lucem-view.workspace = true
 lucem-table.workspace = true
 schemars.workspace = true

@@ -7265,6 +7265,7 @@ dependencies = [
  "lucem-ops",
  "lucem-pipeline",
  "lucem-session",
+ "lucem-stream",
  "lucem-table",
  "lucem-view",
  "rayon",

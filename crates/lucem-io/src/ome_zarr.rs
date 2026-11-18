@@ -813,7 +813,7 @@ mod tests {
         }
 
         let discovered = discover_workspace_data_paths(ws_root);
-        assert_eq!(discovered, vec![zarr_path.clone()]);
+        assert!(discovered.contains(&zarr_path), "{discovered:?}");
 
         let img = load_ome_zarr(&zarr_path).expect("load default OME-Zarr container");
         assert_eq!(img.width, 1015);

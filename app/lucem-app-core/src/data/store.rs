@@ -1597,6 +1597,9 @@ pub fn open_pyramid(path: &Path) -> Result<Pyramid, String> {
         img.path = Some(path.to_path_buf());
         return Ok(Pyramid::from_loaded(img));
     }
+    if super::remote::is_remote(path) {
+        return super::remote::open(&s);
+    }
     Pyramid::open(path).map_err(|e| e.to_string())
 }
 

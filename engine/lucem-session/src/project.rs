@@ -229,7 +229,8 @@ impl ProjectDoc {
 
     /// A stored path resolved against the project folder.
     pub fn resolve(path: &Path, folder: Option<&Path>) -> PathBuf {
-        if path.is_absolute() || path.to_string_lossy().starts_with("sample:") {
+        // Samples and images on a server (`lucem://`) are not under the project's folder
+        if path.is_absolute() || path.to_string_lossy().starts_with("sample:") || path.to_string_lossy().starts_with("lucem://") {
             return path.to_path_buf();
         }
         folder.map_or_else(|| path.to_path_buf(), |f| f.join(path))

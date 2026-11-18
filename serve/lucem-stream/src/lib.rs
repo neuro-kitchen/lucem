@@ -11,6 +11,7 @@ pub mod error;
 pub mod pairing;
 pub mod plugin;
 pub mod protocol;
+pub mod remote;
 pub mod server;
 pub mod tls;
 
@@ -18,6 +19,7 @@ pub use auth::{Authority, ClientIdentity, ClientRecord, Enrollment, Peer, Permis
 pub use client::Session;
 pub use error::{StreamError, StreamResult};
 pub use pairing::{pair, PairingCode, Paired};
-pub use protocol::{ImageInfo, Request, Response, TileData};
+pub use protocol::{ChannelDisplay, ImageInfo, Request, Response, TileData};
+pub use remote::{PairedServer, Remote, REMOTE_SCHEME};
 pub use server::{ServeOptions, Server, DEFAULT_MAX_CONNECTIONS, REFUSED_CLIENT};
 pub use tls::{client_config, client_config_with, server_config, server_config_with_clients, ServerIdentity, ServerTls, ServerTrust};

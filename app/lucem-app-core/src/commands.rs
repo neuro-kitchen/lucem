@@ -500,7 +500,7 @@ pub fn register(registry: &Registry, c: &Ctx) {
     ]);
 
     // Help, Settings sections, where lucem runs
-    let (h, m1) = (c.toggle_help.clone(), c.clone());
+    let (h, m1, r1) = (c.toggle_help.clone(), c.clone(), s.clone());
     list.extend([
         CommandSpec::new("help.keys", "Keyboard & mouse", IconName::Keyboard, move |w, cx| h(w, cx)).group("Help").hint("Every key and gesture").key("f1").read_only(),
         CommandSpec::new("settings.models", "Models…", IconName::Sparkles, move |window, cx| {
@@ -513,7 +513,19 @@ pub fn register(registry: &Registry, c: &Ctx) {
         .hint("Install and choose the model plugins (Settings › Models)")
         .read_only(),
         CommandSpec::new("remote.this", "This computer", IconName::Monitor, |_, _| {}).group("App").hint("lucem runs on this computer").checked(|_| true).read_only(),
-        CommandSpec::new("remote.connect", "Connect to a lucem server…", IconName::Server, |_, _| {}).group("App").hint("Images and work on a paired server").enabled(|_| Err("Pairing in the app is next: `lucem pair` pairs from the command line".into())),
+        CommandSpec::new("remote.connect", "Connect to a lucem server…", IconName::Server, move |_, cx| {
+            r1.update(cx, |s, cx| s.set_status("Asking the paired servers for their images…", cx));
+            let st = r1.clone();
+            let task = cx.background_executor().spawn(async { crate::data::remote::refresh() });
+            cx.spawn(async move |cx| {
+                let said = task.await;
+                st.update(cx, |s, cx| s.set_status(said, cx));
+            })
+            .detach();
+        })
+        .group("App")
+        .hint("List the images of the servers this computer is paired with (lucem pair); open them from the server menu")
+        .enabled(|_| if crate::data::remote::paired().is_empty() { Err("No paired servers: `lucem pair <host:port> <code>` pairs this computer with one".into()) } else { Ok(()) }),
     ]);
     registry.extend(list);
     providers(registry, s);
@@ -735,6 +747,21 @@ fn snapshot(s: &Store, max_side: usize) -> Result<Value, String> {
 /// The menu entries that follow what the project holds.
 fn providers(registry: &Registry, s: &Entity<Store>) {
     let store = s.clone();
+    registry.provide("remote.images", |_| {
+        let mut out = Vec::new();
+        for (addr, found) in crate::data::remote::last_listed() {
+            out.push(MenuItem::Separator);
+            match found {
+                Ok(images) if images.is_empty() => out.push(MenuItem::label(format!("{addr}: no images"))),
+                Ok(images) => {
+                    out.push(MenuItem::label(addr.clone()));
+                    out.extend(images.iter().take(40).map(|p| MenuItem::run(p.clone(), "file.open", json!({"path": lucem_stream::remote::remote_name(&addr, p)})).icon(IconName::Image)));
+                }
+                Err(e) => out.push(MenuItem::label(e)),
+            }
+        }
+        out
+    });
     registry.provide("file.recent", move |cx| {
         let recent = store.read(cx).prefs.recent.clone();
         if recent.is_empty() {

@@ -11,6 +11,7 @@ pub mod labels;
 pub mod ml;
 pub mod model_node;
 pub mod prefs;
+pub mod remote;
 pub mod results;
 pub mod script;
 pub mod selection;

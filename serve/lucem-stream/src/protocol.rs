@@ -38,6 +38,19 @@ pub struct ImageInfo {
     pub z_spacing_um: Option<f64>,
     /// `[depth, height, width, tile_d, tile_h, tile_w]` of each level, finest first.
     pub levels: Vec<[usize; 6]>,
+    /// How each channel is shown, as the file suggests (same order as `channels`; empty from an
+    /// older server: defaults then).
+    #[serde(default)]
+    pub display: Vec<ChannelDisplay>,
+}
+
+/// One channel's suggested display: colour (RGB), window and range (raw values), shown at first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelDisplay {
+    pub color: [u8; 3],
+    pub window: (f32, f32),
+    pub range: (f32, f32),
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
