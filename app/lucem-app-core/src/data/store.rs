@@ -23,7 +23,7 @@ use crate::navigation::route::Workspace;
 
 use super::device::Device;
 use super::prefs::Prefs;
-use super::results::{analysis_key, analyze, compute, Analysis, ResultRequest, Results};
+use super::results::{analysis_key, analyze, compute_cached, Analysis, ResultRequest, Results};
 
 /// Undo steps kept.
 pub(crate) const UNDO_DEPTH: usize = 200;
@@ -179,6 +179,9 @@ pub struct Store {
     opening_ids: HashSet<String>,
     pub tool: ToolState,
     pub results: Results,
+    /// Device-resident cache of uploaded source regions and intermediate node outputs for
+    /// incremental recompute when editing pipeline parameters.
+    eval_cache: Arc<lucem_pipeline::EvalCache>,
     /// The whole-image pass of the shown image (previews, Otsu thresholds, tables).
     pub analysis: Option<Arc<Analysis>>,
     /// Per image, per channel: the histogram of the coarsest level.
@@ -251,6 +254,7 @@ impl Store {
             opening_ids: HashSet::new(),
             tool,
             results: Results::new(),
+            eval_cache: Arc::new(lucem_pipeline::EvalCache::default()),
             analysis: None,
             histograms: HashMap::new(),
             live_base: None,
@@ -603,6 +607,47 @@ impl Store {
         self.ensure_device(cx);
     }
 
+    /// Creates a regular tile grid (QuPath-style) clipped inside every selected region annotation
+    /// of the active image, in one undoable batch.
+    pub fn create_tile_grid(&mut self, tile_px: f64, overlap: f64, clip: bool, cx: &mut Context<Self>) {
+        let Some(image) = self.doc.active_image.clone() else { return };
+        let selected: Vec<Annotation> = self
+            .doc
+            .annotations_of(&image)
+            .filter(|a| self.sel.shapes.contains(&a.id) && a.shape.is_region())
+            .cloned()
+            .collect();
+        if selected.is_empty() {
+            self.set_status("Select one or more region shapes first to create a tile grid inside them", cx);
+            return;
+        }
+        let mut commands = Vec::new();
+        for a in &selected {
+            let outline = a.shape.outline();
+            let tiles = crate::domain::boolean::tile_grid(&outline, tile_px, tile_px, overlap, clip);
+            for pts in tiles {
+                commands.push(Command::AddAnnotation {
+                    annotation: Annotation {
+                        id: String::new(),
+                        image: image.clone(),
+                        shape: crate::domain::annotation::Shape::Polygon { points: pts },
+                        class: a.class.clone(),
+                        note: format!("grid {} px", tile_px as usize),
+                        z: a.z,
+                    },
+                });
+            }
+        }
+        let n = commands.len();
+        if n == 0 {
+            self.set_status("No tiles fit inside the selected shape(s) at that tile size", cx);
+            return;
+        }
+        if self.execute(Command::Batch { commands }, cx).is_ok() {
+            self.set_status(format!("Created {n} grid tile(s) ({:.0} px) inside {} shape(s) (Ctrl+Z undoes)", tile_px, selected.len()), cx);
+        }
+    }
+
     /// Removes a processing step; a channel's last step takes its chain with it (its source and
     /// result view), so the channel is back to how it was. One undo step.
     pub fn remove_step(&mut self, id: String, cx: &mut Context<Self>) {
@@ -622,6 +667,45 @@ impl Store {
         if self.execute(cmd, cx).is_ok() {
             self.set_status("Step removed (Ctrl+Z brings it back)", cx);
         }
+    }
+
+    /// Moves a processing step up (`dir < 0`) or down (`dir > 0`) in its channel's linear chain,
+    /// rewiring the surrounding edges in one undoable batch.
+    pub fn move_step(&mut self, id: String, dir: i32, cx: &mut Context<Self>) {
+        let Some(image) = self.doc.active_image.clone() else { return };
+        let n = self.doc.image(&image).map_or(0, |i| i.channels.len());
+        let Some((c, mut steps, view)) = (0..n).find_map(|c| {
+            let (steps, view) = self.doc.graph.channel_chain(&image, c);
+            steps.contains(&id).then_some((c, steps, view))
+        }) else {
+            return;
+        };
+        let Some(pos) = steps.iter().position(|s| s == &id) else { return };
+        let target = (pos as isize + dir as isize).clamp(0, steps.len() as isize - 1) as usize;
+        if target == pos {
+            return;
+        }
+        steps.swap(pos, target);
+        let Some(source) = self.doc.graph.nodes.iter().find(|g| matches!(&g.kind, NodeKind::Source { image: i, channel: ch } if *i == image && *ch == c)).map(|g| g.id.clone()) else {
+            return;
+        };
+        // Rewire source -> steps[0] -> ... -> steps[last] -> view (disconnect first to avoid transient loops)
+        let mut commands = Vec::new();
+        for s in &steps {
+            commands.push(Command::Disconnect { to: s.clone(), port: 0 });
+        }
+        if let Some(v) = &view {
+            commands.push(Command::Disconnect { to: v.clone(), port: 0 });
+        }
+        let mut prev = source;
+        for s in &steps {
+            commands.push(Command::Connect { from: prev, to: s.clone(), port: 0 });
+            prev = s.clone();
+        }
+        if let Some(v) = view {
+            commands.push(Command::Connect { from: prev, to: v, port: 0 });
+        }
+        let _ = self.execute(Command::Batch { commands }, cx);
     }
 
     /// The object hierarchy of `image` (regions and cells), from the cache when nothing changed.
@@ -654,6 +738,7 @@ impl Store {
         self.device_pending = false;
         self.device_generation += 1;
         self.results.clear();
+        self.eval_cache.clear();
         self.results_for = None;
         self.analysis = None;
         cx.emit(AppEvent::Results);
@@ -1138,6 +1223,7 @@ impl Store {
         let show = self.tool.show_results;
         let image = req.image.clone();
         let asked = req.clone();
+        let eval_cache = self.eval_cache.clone();
         self.computing = true;
         cx.emit(AppEvent::Results);
         let task = cx.background_spawn(async move {
@@ -1151,7 +1237,7 @@ impl Store {
             if latest.load(Ordering::Acquire) != generation {
                 return Some((analysis, None));
             }
-            let layers = show.then(|| compute(&device.client, &doc, &pyramid, &req, &analysis));
+            let layers = show.then(|| compute_cached(&device.client, &doc, &pyramid, &req, &analysis, &eval_cache));
             Some((analysis, layers))
         });
         cx.spawn(async move |this, cx| {
@@ -1248,12 +1334,29 @@ impl Store {
         let generation = self.results_gen.fetch_add(1, Ordering::AcqRel) + 1;
         let latest = self.results_gen.clone();
         let (doc, image, asked, show) = (self.doc.clone(), req.image.clone(), req.clone(), self.tool.show_results);
+        let key = analysis_key(&doc, &req.image) ^ (req.z as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let cached_analysis = self.analysis.clone().filter(|a| a.key == key);
         self.computing = true;
         cx.emit(AppEvent::Results);
-        let task = cx.background_spawn(async move { (latest.load(Ordering::Acquire) == generation && show).then(|| super::results::compute_remote(&doc, &pyramid, &req)) });
+        let task = cx.background_spawn(async move {
+            if latest.load(Ordering::Acquire) != generation {
+                return None;
+            }
+            let analysis = match cached_analysis {
+                Some(a) => a,
+                None => Arc::new(super::results::analyze_remote(&doc, &pyramid, &req.image, req.z)),
+            };
+            let layers = (latest.load(Ordering::Acquire) == generation && show).then(|| super::results::compute_remote(&doc, &pyramid, &req));
+            Some((analysis, layers))
+        });
         cx.spawn(async move |this, cx| {
-            let list = task.await;
+            let out = task.await;
             let _ = this.update(cx, |s, cx| {
+                if let Some((analysis, _)) = &out
+                    && s.analysis.as_ref().is_none_or(|a| a.key != analysis.key)
+                {
+                    s.analysis = Some(analysis.clone());
+                }
                 s.computing = false;
                 let current = s.results_gen.load(Ordering::Acquire) == generation;
                 s.results_for = Some(asked);
@@ -1265,7 +1368,7 @@ impl Store {
                     })
                     .detach();
                 }
-                if let Some(list) = list {
+                if let Some((_, Some(list))) = out {
                     s.results.retain(|v, r| r.image != image && s.doc.graph.contains(v));
                     let error = list.iter().find_map(|r| r.error.clone().map(|e| format!("{}: {e}", r.view)));
                     let ms: f64 = list.iter().map(|r| r.ms).sum();

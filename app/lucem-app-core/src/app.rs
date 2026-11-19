@@ -58,7 +58,14 @@ impl Render for StatusReadings {
             self.watched = Some((canvas.entity_id(), sub));
         }
         let s = self.store.read(cx);
-        let device = s.device.as_ref().map_or("GPU idle".to_string(), |d| d.label.clone());
+        let gpu_mb = lucem_core::memory::tracked_gpu_bytes() / (1024 * 1024);
+        let device = match (&s.device, gpu_mb) {
+            (Some(d), mb) if mb > 0 => format!("{} · {mb} MB", d.label),
+            (Some(d), _) => d.label.clone(),
+            (None, mb) if mb > 0 => format!("GPU · {mb} MB"),
+            (None, _) => "GPU idle".to_string(),
+        };
+        let ram_limit_gb = lucem_core::memory::ram_memory_limit() as f64 / (1024.0 * 1024.0 * 1024.0);
         let explore = s.workspace == Workspace::Explore && !s.doc.images.is_empty();
         let st = canvas.read(cx).status(cx);
         let (c1, c2, c3) = (canvas.clone(), canvas.clone(), canvas.clone());
@@ -77,9 +84,11 @@ impl Render for StatusReadings {
                     .child(div().font_family("monospace").child(crate::ui::widgets::scrub_label("status-zoom", format!("{:.1} %", st.zoom * 100.0), move |d, _, cx| c1.update(cx, |c, cx| c.zoom_at(if d > 0.0 { 1.05 } else { 1.0 / 1.05 }, None, cx)))))
                     .child(Button::new("status-fit").ghost().xsmall().label("Fit").tooltip("Fit the image (F · Ctrl+0)").on_click(move |_, _, cx| c2.update(cx, |c, cx| c.fit(cx))))
                     .child(Button::new("status-100").ghost().xsmall().label("1:1").tooltip("Actual pixels (Ctrl+1)").on_click(move |_, _, cx| c3.update(cx, |c, cx| c.actual_size(cx))))
-                    .when(st.cached_mb > 0, |d| d.child(div().text_color(color::text_muted()).child(format!("{} MB cached", st.cached_mb))))
+                    .when(st.cached_mb > 0, |d| {
+                        d.child(meter(IconName::HardDrive, format!("{} MB / {:.1} GB", st.cached_mb, ram_limit_gb), "Decoded tile & view cache vs. RAM memory budget (Settings › Compute)"))
+                    })
             })
-            .child(meter(IconName::Gpu, device, "GPU: idle, or what runs on it"))
+            .child(meter(IconName::Gpu, device, "GPU device and active compute cache"))
     }
 }
 
@@ -101,14 +110,47 @@ impl Render for ExploreBody {
     }
 }
 
-/// The Keyboard & mouse sheet (F1), shown over the frame.
+/// The Keyboard & mouse sheet (F1), shown over the frame, with live search and keycap badges.
 pub struct HelpSheet {
     close: Rc<dyn Fn(&mut Window, &mut App)>,
+    search: Entity<gpui_kit::component::input::InputState>,
+    _sub: Subscription,
+}
+
+impl HelpSheet {
+    fn new(close: Rc<dyn Fn(&mut Window, &mut App)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        use gpui_kit::component::input::{InputEvent, InputState};
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search shortcuts, tools, or keys…"));
+        let _sub = cx.subscribe(&search, |_, _, e: &InputEvent, cx| {
+            if matches!(e, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        Self { close, search, _sub }
+    }
 }
 
 impl Render for HelpSheet {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (c1, c2) = (self.close.clone(), self.close.clone());
+        let query = self.search.read(cx).value().trim().to_ascii_lowercase();
+        let groups: Vec<(&str, Vec<(&str, &str)>)> = HELP
+            .iter()
+            .filter_map(|(group, rows)| {
+                let matched: Vec<(&str, &str)> = rows
+                    .iter()
+                    .copied()
+                    .filter(|(k, w)| {
+                        query.is_empty()
+                            || group.to_ascii_lowercase().contains(&query)
+                            || k.to_ascii_lowercase().contains(&query)
+                            || w.to_ascii_lowercase().contains(&query)
+                    })
+                    .collect();
+                (!matched.is_empty()).then_some((*group, matched))
+            })
+            .collect();
+        let total: usize = groups.iter().map(|(_, r)| r.len()).sum();
         div()
             .id("help-overlay")
             .absolute()
@@ -123,7 +165,8 @@ impl Render for HelpSheet {
             .child(
                 v_flex()
                     .id("help")
-                    .w(px(600.))
+                    .w(px(640.))
+                    .max_h(px(640.))
                     .p(px(theme::LG))
                     .gap(px(theme::MD))
                     .rounded(px(theme::RADIUS_LG))
@@ -131,13 +174,53 @@ impl Render for HelpSheet {
                     .border_color(color::border())
                     .bg(color::raised())
                     .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Keyboard & mouse"))
-                    .children(HELP.iter().map(|(group, rows)| {
-                        v_flex().gap(px(theme::XS)).child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child(group.to_uppercase())).children(
-                            rows.iter().map(|(keys, what)| h_flex().gap(px(theme::MD)).child(div().w(px(250.)).text_sm().font_family("monospace").child(*keys)).child(div().text_sm().child(*what))),
-                        )
-                    }))
-                    .child(h_flex().justify_end().child(Button::new("help-close").outline().small().label("Close").on_click(move |_, w, cx| c2(w, cx)))),
+                    .child(
+                        h_flex()
+                            .gap(px(theme::SM))
+                            .items_center()
+                            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).child("Keyboard & mouse shortcuts"))
+                            .child(div().text_xs().text_color(color::text_muted()).child(format!("{total} shortcut(s)")))
+                            .child(Button::new("help-close-x").ghost().xsmall().icon(Icon::new(IconName::Close)).on_click(move |_, w, cx| c2(w, cx))),
+                    )
+                    .child(gpui_kit::component::input::Input::new(&self.search).small())
+                    .child(
+                        v_flex()
+                            .id("help-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .max_h(px(460.))
+                            .overflow_y_scroll()
+                            .gap(px(theme::MD))
+                            .when(groups.is_empty(), |d| {
+                                d.child(div().py(px(theme::LG)).text_sm().text_color(color::text_muted()).child(format!("No shortcuts matching \"{query}\".")))
+                            })
+                            .children(groups.into_iter().map(|(group, rows)| {
+                                v_flex()
+                                    .gap(px(theme::XS))
+                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child(group.to_uppercase()))
+                                    .children(rows.into_iter().map(|(keys, what)| {
+                                        h_flex()
+                                            .gap(px(theme::MD))
+                                            .py(px(2.))
+                                            .items_center()
+                                            .child(
+                                                div().w(px(220.)).flex_none().flex().child(
+                                                    div()
+                                                        .px(px(6.))
+                                                        .py(px(2.))
+                                                        .rounded(px(4.))
+                                                        .border_1()
+                                                        .border_color(color::border())
+                                                        .bg(color::control())
+                                                        .text_xs()
+                                                        .font_family("monospace")
+                                                        .child(keys),
+                                                ),
+                                            )
+                                            .child(div().flex_1().text_sm().child(what))
+                                    }))
+                            })),
+                    ),
             )
     }
 }
@@ -157,7 +240,11 @@ pub struct LucemApp {
 
 impl LucemApp {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        theme::configure(&store.read(cx).prefs, window);
+        {
+            let prefs = &store.read(cx).prefs;
+            theme::configure(prefs, window);
+            crate::data::script::set_warm_workers_enabled(prefs.warm_python_worker);
+        }
         theme::apply(window, cx);
         let pipeline = cx.new(|cx| PipelineView::new(store.clone(), window, cx));
         // Explore can dock the same Pipeline under its views
@@ -180,7 +267,7 @@ impl LucemApp {
                     }
                 })
             };
-            let sheet = cx.new(|_| HelpSheet { close });
+            let sheet = cx.new(|cx| HelpSheet::new(close, window, cx));
             let toggle: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| {
                 if let Some(s) = cell.get().and_then(|w| w.upgrade()) {
                     s.update(cx, |s, cx| {
@@ -228,7 +315,7 @@ impl LucemApp {
         spec.app_menu = commands::app_menu();
         spec.help_menu = vec![kitchen_shell::MenuItem::command("help.keys")];
         spec.settings = sections;
-        spec.layout_toggles = vec!["view.left".into(), "view.right".into()];
+        spec.layout_toggles = vec!["view.right".into()];
         spec.remote = Some(RemoteSpec { label: crate::platform::host_label().into(), icon: IconName::Server, menu: vec![kitchen_shell::MenuItem::command("remote.this"), kitchen_shell::MenuItem::Separator, kitchen_shell::MenuItem::command("remote.connect"), kitchen_shell::MenuItem::provided("remote.images")] });
         spec.status_items = Some(Rc::new(move |_, _| readings.clone().into_any_element()));
         let shell = cx.new(|cx| Shell::new(spec, window, cx));

@@ -23,7 +23,7 @@ use lucem_core::memory::DeviceArray;
 use lucem_core::Shape;
 use lucem_io::Pyramid;
 use lucem_ops::measure::RegionFeatures;
-use lucem_pipeline::{at_downsample, evaluate, evaluate_all, halo, Op, Plan, PortType, Value};
+use lucem_pipeline::{align_region, at_downsample, crop_and_download, evaluate, evaluate_all, evaluate_cached, halo, EvalCache, EvalTimings, Op, Plan, PortType, Value};
 use lucem_view::{render_layer, ColormapLut, LayerStyle};
 
 use crate::domain::annotation::rasterize;
@@ -61,6 +61,7 @@ pub struct LayerResult {
     pub error: Option<String>,
     pub ms: f64,
     pub level: usize,
+    pub timings: EvalTimings,
 }
 
 /// A Measure result over the whole image.
@@ -301,13 +302,21 @@ pub fn analyze(client: &Client, doc: &ProjectDoc, py: &Pyramid, image: &str, z: 
             }
         }
     }
-    // Whole-image values: the threshold of each Otsu node, from its input
+    // Whole-image values: the threshold of each global threshold node, from its input
     for id in &targets {
-        if let Some(PlanNodeOp { op: Op::OtsuThreshold { bins }, input: Some(input) }) = op_of(&plan, id)
+        if let Some(PlanNodeOp { op, input: Some(input) }) = op_of(&plan, id)
             && let Some(Ok(Value::Image(a))) = values.get(&input)
-                && let Ok(t) = lucem_ops::threshold::global::otsu(client, a, bins) {
-                    out.thresholds.insert(id.clone(), t);
-                }
+        {
+            let thresh = match op {
+                Op::OtsuThreshold { bins } => lucem_ops::threshold::global::otsu(client, a, bins).ok(),
+                Op::LiThreshold { bins } => lucem_ops::threshold::global::li(client, a, bins).ok(),
+                Op::TriangleThreshold { bins } => lucem_ops::threshold::global::triangle(client, a, bins).ok(),
+                _ => None,
+            };
+            if let Some(t) = thresh {
+                out.thresholds.insert(id.clone(), t);
+            }
+        }
     }
     // Tables of the views fed by a Measure
     for v in doc.graph.views() {
@@ -346,6 +355,12 @@ fn op_of(plan: &Plan, id: &str) -> Option<PlanNodeOp> {
 fn preview(client: &Client, v: &Value) -> Option<Arc<RenderImage>> {
     let (h, w) = v.dims()?;
     let host = v.to_host(client)?;
+    Some(preview_from_host(&host, w, h, v.port()))
+}
+
+/// Downsamples a host raster (`w × h`) to at most [`PREVIEW_SIDE`] on its longer edge and renders
+/// it as a Pipeline node thumbnail. Shared by desktop [`analyze`] and browser [`analyze_remote`].
+fn preview_from_host(host: &[f32], w: usize, h: usize, port: PortType) -> Arc<RenderImage> {
     let step = (w.max(h) as f64 / PREVIEW_SIDE as f64).ceil().max(1.0) as usize;
     let (pw, ph) = (w.div_ceil(step), h.div_ceil(step));
     let mut small = Vec::with_capacity(pw * ph);
@@ -354,7 +369,7 @@ fn preview(client: &Client, v: &Value) -> Option<Arc<RenderImage>> {
             // Labels and masks: a sample (never mix ids); images: the max of the block (thin
             // structures stay visible)
             let (yy, xx) = (y * step, x * step);
-            let v = match v.port() {
+            let v = match port {
                 PortType::Image => {
                     let mut m = f32::MIN;
                     for dy in 0..step.min(h - yy) {
@@ -369,7 +384,7 @@ fn preview(client: &Client, v: &Value) -> Option<Arc<RenderImage>> {
             small.push(v);
         }
     }
-    let style = match v.port() {
+    let style = match port {
         PortType::Image => {
             let (lo, hi) = percentiles(&small, 0.01, 0.995);
             LayerStyle::Intensity { min: lo, max: hi, lut: ColormapLut::Grayscale, alpha: 1.0 }
@@ -377,7 +392,78 @@ fn preview(client: &Client, v: &Value) -> Option<Arc<RenderImage>> {
         PortType::Mask => LayerStyle::Mask { color: [0, 220, 255], alpha: 1.0 },
         _ => LayerStyle::Labels { alpha: 1.0 },
     };
-    Some(render_layer(&small, pw, ph, style))
+    render_layer(&small, pw, ph, style)
+}
+
+/// Coarse node thumbnails for the Pipeline canvas in a served browser page: reads the coarsest
+/// level ≤ `PREVIEW_SIDE * 2` for each source and op node from the server.
+#[cfg(target_family = "wasm")]
+pub fn analyze_remote(doc: &ProjectDoc, py: &Pyramid, image: &str, z: usize) -> Analysis {
+    let t0 = Instant::now();
+    let level = level_under(py, PREVIEW_SIDE * 2);
+    let l = py.levels[level].clone();
+    let ds = l.downsample;
+    let key = analysis_key(doc, image) ^ (z as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut out = Analysis { key, image: image.to_string(), level, downsample: ds, ..Analysis::default() };
+    let ids = nodes_of(doc, image);
+    if ids.is_empty() {
+        return out;
+    }
+    let plane = ((z as f64 / l.z_downsample) as usize).min(l.depth.saturating_sub(1));
+    let link = crate::data::remote::page_link();
+    let served = py.path.as_ref().map(|p| p.to_string_lossy().into_owned()).and_then(|p| lucem_stream::split_remote(&p).map(|(_, s)| s.to_string()));
+    for id in &ids {
+        let Some(node) = doc.graph.node(id) else { continue };
+        match &node.kind {
+            NodeKind::Source { image: img, channel } if img == image => {
+                match py.read_region_at(level, *channel, plane, 0, 0, l.width, l.height) {
+                    Ok(mut vals) => {
+                        let top = py.channels.get(*channel).map_or(1.0, |c| c.range.1);
+                        if top > 1.0 {
+                            let k = 1.0 / top;
+                            vals.iter_mut().for_each(|v| *v *= k);
+                        }
+                        out.previews.insert(id.clone(), preview_from_host(&vals, l.width, l.height, PortType::Image));
+                    }
+                    Err(e) => {
+                        out.errors.insert(id.clone(), e.to_string());
+                    }
+                }
+            }
+            NodeKind::Op { op, .. } => {
+                let port = op.output();
+                if port == PortType::Table {
+                    continue;
+                }
+                let (Some(link), Some(served)) = (&link, &served) else { continue };
+                let spec = match spec_for(doc, image, id).and_then(|s| serde_json::to_string(&s).map_err(|e| e.to_string())) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        out.errors.insert(id.clone(), e);
+                        continue;
+                    }
+                };
+                match link.open(served, Some(spec)).map_err(|e| e.to_string()).and_then(|p| p.read_region_at(level, 0, plane, 0, 0, l.width, l.height).map_err(|e| e.to_string())) {
+                    Ok(vals) => {
+                        out.previews.insert(id.clone(), preview_from_host(&vals, l.width, l.height, port));
+                    }
+                    Err(e) => {
+                        out.errors.insert(id.clone(), e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for v in doc.graph.views() {
+        if let Some(from) = doc.graph.input(&v.id, 0) {
+            if let Some(p) = out.previews.get(from).cloned() {
+                out.previews.insert(v.id.clone(), p);
+            }
+        }
+    }
+    out.ms = t0.elapsed().as_secs_f64() * 1000.0;
+    out
 }
 
 /// The plan for a region: sizes for `ds`, and each Otsu node fixed at its whole-image threshold.
@@ -391,8 +477,16 @@ fn region_plan(doc: &ProjectDoc, ds: f64, thresholds: &HashMap<String, f64>) -> 
     plan
 }
 
-/// Each raster view of `req.image` over the visible region.
+/// Each raster view of `req.image` over the visible region (with a fresh cache; interactive views
+/// pass a persistent [`EvalCache`] through [`compute_cached`]).
 pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest, analysis: &Analysis) -> Vec<LayerResult> {
+    let cache = EvalCache::default();
+    compute_cached(client, doc, pyramid, req, analysis, &cache)
+}
+
+/// Each raster view of `req.image` over the visible region, reusing uploaded inputs and unchanged
+/// upstream node outputs from `cache` on the device and cropping halos on the GPU before read-back.
+pub fn compute_cached(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest, analysis: &Analysis, cache: &EvalCache) -> Vec<LayerResult> {
     let views: Vec<(String, ViewStyle)> = doc
         .graph
         .views()
@@ -418,7 +512,7 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
             continue;
         }
         let t0 = Instant::now();
-        let base = LayerResult { view: view.clone(), image: req.image.clone(), rect: [0.0; 4], layer: None, port: None, error: None, ms: 0.0, level: 0 };
+        let base = LayerResult { view: view.clone(), image: req.image.clone(), rect: [0.0; 4], layer: None, port: None, error: None, ms: 0.0, level: 0, timings: EvalTimings::default() };
         let Some(target) = doc.graph.input(&view, 0).map(str::to_string) else {
             out.push(LayerResult { error: Some("Not connected: drag a result onto it in Pipeline".into()), ..base });
             continue;
@@ -449,11 +543,17 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
         if vx1 <= vx0 || vy1 <= vy0 {
             continue;
         }
-        let (x0, y0) = (vx0.saturating_sub(margin), vy0.saturating_sub(margin));
-        let (x1, y1) = ((vx1 + margin).min(l.width), (vy1 + margin).min(l.height));
-        let (w, h) = (x1 - x0, y1 - y0);
+        let (x0, y0, w, h) = align_region(
+            vx0.saturating_sub(margin),
+            vy0.saturating_sub(margin),
+            (vx1 + margin).min(l.width),
+            (vy1 + margin).min(l.height),
+            l.width,
+            l.height,
+        );
+        let region_tag = format!("{}|L{level}|Z{}|{x0},{y0},{w},{h}", req.image, req.z);
         let mut source = |id: &str| node_value(client, doc, &plan, pyramid, &req.image, id, level, req.z, (x0, y0, w, h), false);
-        let value = match evaluate(client, &plan, &target, &mut source) {
+        let (value, mut timings) = match evaluate_cached(client, &plan, &target, &region_tag, cache, &mut source) {
             Ok(v) => v,
             Err(e) => {
                 out.push(LayerResult { error: Some(e), level, ..base });
@@ -461,13 +561,13 @@ pub fn compute(client: &Client, doc: &ProjectDoc, pyramid: &Pyramid, req: &Resul
             }
         };
         let port = value.port();
-        let Some(host) = value.to_host(client) else { continue };
-        // Drop the margin: only the visible part is drawn
-        let (cx0, cy0, cw, ch) = (vx0 - x0, vy0 - y0, vx1 - vx0, vy1 - vy0);
-        let mut crop = Vec::with_capacity(cw * ch);
-        for y in cy0..cy0 + ch {
-            crop.extend_from_slice(&host[y * w + cx0..y * w + cx0 + cw]);
-        }
+        let (cw, ch) = (vx1 - vx0, vy1 - vy0);
+        let (crop, readback_ms) = match crop_and_download(client, &value, x0, y0, w, h, vx0, vy0, cw, ch) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        timings.readback_ms = readback_ms;
+        let base = LayerResult { timings, ..base };
         let rect = [vx0 as f64 * ds, vy0 as f64 * ds, cw as f64 * ds, ch as f64 * ds];
         out.push(drawn(doc, pyramid, req, &processed, &style, base, port, &crop, (cw, ch), rect, level, t0));
     }
@@ -536,7 +636,7 @@ pub fn compute_remote(doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest) 
     for v in doc.graph.views().filter(|v| doc.graph.images_of(&v.id).contains(&req.image)) {
         let NodeKind::View { style, .. } = &v.kind else { continue };
         let t0 = Instant::now();
-        let base = LayerResult { view: v.id.clone(), image: req.image.clone(), rect: [0.0; 4], layer: None, port: None, error: None, ms: 0.0, level: 0 };
+        let base = LayerResult { view: v.id.clone(), image: req.image.clone(), rect: [0.0; 4], layer: None, port: None, error: None, ms: 0.0, level: 0, timings: EvalTimings::default() };
         let Some(target) = doc.graph.input(&v.id, 0).map(str::to_string) else { continue };
         let Some(port) = doc.graph.node(&target).and_then(|n| n.kind.output()) else { continue };
         if port == PortType::Table || !style.visible {

@@ -15,12 +15,12 @@ use lucem_view::bgra_image;
 
 use super::theme::{self, color};
 
-/// Side of the wheel (px).
-const SIDE: f32 = 168.;
+/// Side of the wheel (px): compact Affinity-style donut so the Layers tree stays roomy below it.
+const SIDE: f32 = 124.;
 /// Width of the hue ring (px).
-const RING: f32 = 16.;
-/// Swatches under the wheel.
-pub const SWATCHES: [[u8; 3]; 10] = [[0, 0, 255], [0, 255, 255], [0, 255, 0], [255, 255, 0], [255, 128, 0], [255, 0, 0], [255, 0, 255], [128, 0, 255], [255, 255, 255], [64, 128, 255]];
+const RING: f32 = 13.;
+/// Single-row fluorescence preset swatches under the wheel (8 swatches fit cleanly on one row).
+pub const SWATCHES: [[u8; 3]; 8] = [[0, 0, 255], [0, 255, 255], [0, 255, 0], [255, 255, 0], [255, 128, 0], [255, 0, 0], [255, 0, 255], [255, 255, 255]];
 
 pub enum WheelEvent {
     Changing([u8; 3]),
@@ -171,7 +171,7 @@ impl Render for ColorWheel {
             let c = *c;
             div()
                 .id(("wheel-swatch", i))
-                .size(px(16.))
+                .size(px(14.))
                 .rounded(px(3.))
                 .border_1()
                 .border_color(if c == current { color::text() } else { color::border() })
@@ -184,7 +184,8 @@ impl Render for ColorWheel {
                 }))
         });
         v_flex()
-            .gap(px(theme::SM))
+            .items_center()
+            .gap(px(theme::XS))
             .child(
                 div()
                     .id("color-wheel")
@@ -195,11 +196,11 @@ impl Render for ColorWheel {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
                     .child(wheel),
             )
-            .child(h_flex().gap(px(theme::XS)).flex_wrap().w(px(SIDE)).children(swatches))
+            .child(h_flex().gap(px(3.)).children(swatches))
             .child(
                 h_flex()
-                    .gap(px(theme::SM))
-                    .child(div().size(px(16.)).rounded(px(3.)).bg(theme::rgb8(current)))
+                    .gap(px(theme::XS))
+                    .child(div().size(px(12.)).rounded(px(2.)).bg(theme::rgb8(current)))
                     .child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(format!("#{:02X}{:02X}{:02X}", current[0], current[1], current[2]))),
             )
     }

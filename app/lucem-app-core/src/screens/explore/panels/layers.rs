@@ -10,12 +10,14 @@
 //! layer through the Pipeline and leaves the originals as they were. The bar shows when masks are
 //! selected; the same commands are in the right-click menu of a mask row.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{div, img, px, AnyElement, App, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
 use lucem_pipeline::{Op, PortType};
@@ -25,6 +27,7 @@ use crate::domain::annotation::{Annotation, ClassDoc, Shape};
 use crate::domain::command::{Command, MEASUREMENT};
 use crate::domain::graph::{NodeKind, ViewStyle};
 use crate::screens::explore::canvas::ImageCanvas;
+use crate::screens::pipeline::catalog::{operations, Template};
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::group_digits;
 
@@ -190,6 +193,23 @@ fn annotation_menu(store: &Entity<Store>, a: &Annotation, s: &Store) -> MenuFn {
                 sub
             });
         }
+        {
+            let (st, ids) = (store.clone(), ids.clone());
+            m = m.submenu("Create tile grid inside shape", w, cx, move |mut sub, _, _| {
+                for size in [128.0, 256.0, 512.0, 1024.0] {
+                    let (st, ids) = (st.clone(), ids.clone());
+                    sub = sub.item(PopupMenuItem::new(format!("{size:.0} × {size:.0} px")).on_click(move |_, _, cx| {
+                        st.update(cx, |s, cx| {
+                            if !ids.iter().any(|id| s.sel.shapes.contains(id)) {
+                                s.sel.shapes = ids.iter().cloned().collect();
+                            }
+                            s.create_tile_grid(size, 0.0, true, cx);
+                        });
+                    }));
+                }
+                sub
+            });
+        }
         let (st, ids) = (store.clone(), ids.clone());
         m.separator().item(PopupMenuItem::new(if n == 1 { "Delete  Del".to_string() } else { format!("Delete {n}  Del") }).icon(Icon::new(IconName::Trash)).on_click(move |_, _, cx| {
             st.update(cx, |s, cx| {
@@ -232,6 +252,114 @@ fn combine_menu(store: &Entity<Store>, key: String, radius: usize, extra: Option
     })
 }
 
+/// A channel's right-click menu: add an operation directly on the channel, toggle Processed/Raw,
+/// solo/unsolo the channel, auto-levels, or clear its processing steps.
+fn channel_menu(store: &Entity<Store>, image: String, channel: usize, view: Option<String>, steps: Vec<String>, s: &Store) -> MenuFn {
+    let view_info = view.as_ref().and_then(|v| match s.doc.graph.node(v).map(|n| &n.kind) {
+        Some(NodeKind::View { name, style }) => Some((v.clone(), name.clone(), style.clone())),
+        _ => None,
+    });
+    let soloed = s
+        .doc
+        .image(&image)
+        .is_some_and(|img| img.channels.iter().enumerate().all(|(idx, ch)| ch.visible == (idx == channel)));
+    let store = store.clone();
+    Rc::new(move |menu: PopupMenu, w: &mut Window, cx: &mut Context<PopupMenu>| {
+        let mut m = menu;
+        {
+            let (st_add, img_add, view_add) = (store.clone(), image.clone(), view.clone());
+            m = m.submenu("Add operation", w, cx, move |mut sub_outer, w, cx| {
+                for cat in operations() {
+                    let (st, img, vw) = (st_add.clone(), img_add.clone(), view_add.clone());
+                    let items: Vec<_> = cat
+                        .items
+                        .into_iter()
+                        .filter_map(|it| match it.template {
+                            Template::Op(op) => Some((it.label, op)),
+                            _ => None,
+                        })
+                        .collect();
+                    if items.is_empty() {
+                        continue;
+                    }
+                    let icon = cat.icon;
+                    sub_outer = sub_outer.submenu(cat.name, w, cx, move |mut sub, _, _| {
+                        for (label, op) in &items {
+                            let (st, img, vw, op) = (st.clone(), img.clone(), vw.clone(), op.clone());
+                            sub = sub.item(PopupMenuItem::new(label.clone()).icon(Icon::new(icon)).on_click(move |_, _, cx| {
+                                let (op, img, vw) = (op.clone(), img.clone(), vw.clone());
+                                st.update(cx, |s, cx| {
+                                    let title = op.title();
+                                    if s.execute(Command::ApplyOp { op, view: vw, image: img, channel }, cx).is_ok() {
+                                        s.set_status(format!("{title} added to channel"), cx);
+                                    }
+                                });
+                            }));
+                        }
+                        sub
+                    });
+                }
+                sub_outer
+            });
+        }
+        if let Some((vid, vname, vstyle)) = &view_info {
+            let (st, vid, vname, vstyle) = (store.clone(), vid.clone(), vname.clone(), vstyle.clone());
+            let label = if vstyle.visible { "Show raw (bypass processing)" } else { "Show processed" };
+            m = m.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                let style = ViewStyle { visible: !vstyle.visible, ..vstyle.clone() };
+                let (id, name) = (vid.clone(), vname.clone());
+                st.update(cx, |s, cx| {
+                    let _ = s.execute(Command::SetView { id, name, style }, cx);
+                });
+            }));
+        }
+        m = m.separator();
+        {
+            let (st, img) = (store.clone(), image.clone());
+            m = m.item(PopupMenuItem::new(if soloed { "Show all channels" } else { "Solo channel" }).on_click(move |_, _, cx| {
+                let img = img.clone();
+                st.update(cx, |s, cx| {
+                    let Some(doc) = s.doc.image(&img).cloned() else { return };
+                    for (idx, mut ch) in doc.channels.into_iter().enumerate() {
+                        let want = if soloed { true } else { idx == channel };
+                        if ch.visible != want {
+                            ch.visible = want;
+                            let _ = s.execute(Command::SetChannel { image: img.clone(), channel: idx, display: ch }, cx);
+                        }
+                    }
+                });
+            }));
+        }
+        {
+            let (st, img) = (store.clone(), image.clone());
+            m = m.item(PopupMenuItem::new("Auto levels").on_click(move |_, _, cx| {
+                let img = img.clone();
+                st.update(cx, |s, cx| {
+                    let Some(py) = s.pyramids.get(&img).cloned() else { return };
+                    let Some(mut ch) = s.doc.image(&img).and_then(|d| d.channels.get(channel)).cloned() else { return };
+                    if let Ok((lo, hi)) = py.auto_window(channel, 0.001, 0.998) {
+                        ch.min = lo;
+                        ch.max = hi.max(lo + 1e-6);
+                        let _ = s.execute(Command::SetChannel { image: img, channel, display: ch }, cx);
+                    }
+                });
+            }));
+        }
+        if !steps.is_empty() {
+            let (st, steps) = (store.clone(), steps.clone());
+            m = m.separator().item(PopupMenuItem::new("Clear all steps").icon(Icon::new(IconName::Trash)).on_click(move |_, _, cx| {
+                let ids = steps.clone();
+                st.update(cx, |s, cx| {
+                    for id in ids {
+                        s.remove_step(id, cx);
+                    }
+                });
+            }));
+        }
+        m
+    })
+}
+
 pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> AnyElement {
     let s = store.read(cx);
     let Some(active) = s.doc.active().cloned() else { return div().p(px(theme::MD)).text_sm().text_color(color::text_muted()).child("No image").into_any_element() };
@@ -242,13 +370,18 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
     let radius = s.mask_radius;
 
     // Channels first: the image itself, what everything else is drawn over
+    let mut channel_views: HashSet<String> = HashSet::new();
     let key = format!("channels:{image}");
     list = list.child(row(store, Row { key: key.clone(), depth: 0, fold: Some(open(&key)), mark: icon_mark(IconName::Layers, None), name: "Channels".into(), kind: active.channels.len().to_string(), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
     if open(&key) {
         for (i, c) in active.channels.iter().enumerate().rev() {
             let (st, doc, img_id) = (store.clone(), c.clone(), image.clone());
             let ch_key = format!("channel:{i}");
-            let (steps, _) = chain_of(s, &image, i);
+            let (steps, view_id) = chain_of(s, &image, i);
+            if let Some(vid) = &view_id {
+                channel_views.insert(vid.clone());
+            }
+            let ch_menu = channel_menu(store, image.clone(), i, view_id, steps.clone(), s);
             let (st_sel, k_sel) = (store.clone(), ch_key.clone());
             list = list.child(row(
                 store,
@@ -270,31 +403,113 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
                         });
                     })),
                     on_click: Box::new(move |e, cx| select(&st_sel, &k_sel, e, cx)),
-                    menu: None,
+                    menu: Some(ch_menu),
                 },
             ));
-            // Its processing steps, in order (the editor above edits the one selected)
+            // Its processing steps, in order, nested under a subtle vertical guide line
             if !steps.is_empty() && open(&ch_key) {
-                for sid in &steps {
+                let n_steps = steps.len();
+                let mut branch = v_flex()
+                    .w_full()
+                    .ml(px(INDENT + 14.0))
+                    .pl(px(theme::SM))
+                    .pr(px(theme::XS))
+                    .gap(px(1.))
+                    .border_l_1()
+                    .border_color(color::border());
+                for (si, sid) in steps.iter().enumerate() {
                     let Some(n) = s.doc.graph.node(sid) else { continue };
-                    let (name, icon, on) = match &n.kind {
-                        NodeKind::Op { op, enabled } => (op.title().to_string(), crate::screens::pipeline::catalog::family_icon(op.family()), *enabled),
-                        NodeKind::Model { model, enabled, .. } => (model.clone(), IconName::BrainCircuit, *enabled),
-                        NodeKind::Script { path, .. } => (std::path::Path::new(path).file_name().map_or(path.clone(), |f| f.to_string_lossy().into_owned()), IconName::SquareTerminal, true),
+                    let (name, on, toggleable) = match &n.kind {
+                        NodeKind::Op { op, enabled } => (op.title().to_string(), *enabled, true),
+                        NodeKind::Model { model, enabled, .. } => (model.clone(), *enabled, true),
+                        NodeKind::Script { path, enabled, .. } => (std::path::Path::new(path).file_name().map_or(path.clone(), |f| f.to_string_lossy().into_owned()), *enabled, true),
                         _ => continue,
                     };
                     let key = format!("node:{sid}");
-                    let (st, k) = (store.clone(), key.clone());
-                    list = list.child(row(
-                        store,
-                        Row { key: key.clone(), depth: 2, fold: None, mark: icon_mark(icon, None), name, kind: if on { String::new() } else { "off".into() }, selected: s.sel.layers.contains(&key), visible: None, on_eye: None, on_click: Box::new(move |e, cx| select(&st, &k, e, cx)), menu: None },
-                    ));
+                    let selected = s.sel.layers.contains(&key);
+                    let (st_sel, k_sel) = (store.clone(), key.clone());
+                    let (st_on, id_on) = (store.clone(), sid.clone());
+                    let (st_up, id_up) = (store.clone(), sid.clone());
+                    let (st_dn, id_dn) = (store.clone(), sid.clone());
+                    let (st_del, id_del) = (store.clone(), sid.clone());
+                    branch = branch.child(
+                        h_flex()
+                            .id(SharedString::from(format!("layer-step-{sid}")))
+                            .w_full()
+                            .h(px(24.))
+                            .px(px(theme::XS))
+                            .gap(px(4.))
+                            .rounded(px(4.))
+                            .cursor_pointer()
+                            .when(selected, |d| d.bg(color::accent().opacity(0.28)))
+                            .when(!selected, |d| d.hover(|d| d.bg(color::control())))
+                            .when(toggleable, |d| {
+                                d.child(
+                                    div()
+                                        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .child(Checkbox::new(SharedString::from(format!("step-on-{sid}"))).checked(on).tooltip(if on { "Turn off (passes input through)" } else { "Turn on" }).on_click(move |checked: &bool, _, cx| {
+                                            let id = id_on.clone();
+                                            let enabled = *checked;
+                                            st_on.update(cx, |s, cx| {
+                                                let _ = s.execute(Command::EnableNode { id, enabled }, cx);
+                                            });
+                                        })),
+                                )
+                            })
+                            .child(div().flex_1().min_w_0().truncate().text_xs().when(!on, |d| d.text_color(color::text_muted())).child(name))
+                            .child(
+                                Button::new(SharedString::from(format!("step-up-{sid}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::ArrowUp))
+                                    .tooltip("Move earlier")
+                                    .disabled(si == 0)
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let id = id_up.clone();
+                                        st_up.update(cx, |s, cx| s.move_step(id, -1, cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("step-dn-{sid}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::ArrowDown))
+                                    .tooltip("Move later")
+                                    .disabled(si + 1 >= n_steps)
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let id = id_dn.clone();
+                                        st_dn.update(cx, |s, cx| s.move_step(id, 1, cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("step-del-{sid}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::Close))
+                                    .tooltip("Remove step")
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let id = id_del.clone();
+                                        st_del.update(cx, |s, cx| s.remove_step(id, cx));
+                                    }),
+                            )
+                            .on_click(move |e, _, cx| select(&st_sel, &k_sel, e, cx)),
+                    );
                 }
+                list = list.child(branch);
+            }
+        }
+    } else {
+        for i in 0..active.channels.len() {
+            if let (_, Some(vid)) = chain_of(s, &image, i) {
+                channel_views.insert(vid);
             }
         }
     }
-    // Results: on top of the image, as they are drawn
-    let views: Vec<_> = s.doc.graph.views().filter(|v| s.doc.graph.images_of(&v.id).contains(&image)).cloned().collect();
+    // Results: standalone pipeline views (excluding single-channel chains already nested above)
+    let views: Vec<_> = s.doc.graph.views().filter(|v| !channel_views.contains(&v.id) && s.doc.graph.images_of(&v.id).contains(&image)).cloned().collect();
     if !views.is_empty() {
         let key = format!("results:{image}");
         list = list.child(row(store, Row { key: key.clone(), depth: 0, fold: Some(open(&key)), mark: icon_mark(IconName::ChartColumn, None), name: "Results".into(), kind: views.len().to_string(), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));

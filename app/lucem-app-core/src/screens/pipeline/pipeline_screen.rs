@@ -9,6 +9,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -32,12 +33,42 @@ use super::catalog::{describe, operations, port_color, sources, Template};
 
 const INSPECTOR_W: f32 = 312.;
 
+/// Where the floating tool bar sits on the canvas: along the top or bottom edge (a row), or the
+/// left or right edge (a column of icons). The bottom place sits above the canvas' own bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToolbarDock {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl ToolbarDock {
+    const ALL: [ToolbarDock; 4] = [ToolbarDock::Top, ToolbarDock::Bottom, ToolbarDock::Left, ToolbarDock::Right];
+
+    fn label(self) -> &'static str {
+        match self {
+            ToolbarDock::Top => "Top",
+            ToolbarDock::Bottom => "Bottom",
+            ToolbarDock::Left => "Left",
+            ToolbarDock::Right => "Right",
+        }
+    }
+
+    fn column(self) -> bool {
+        matches!(self, ToolbarDock::Left | ToolbarDock::Right)
+    }
+}
+
 pub struct PipelineView {
     store: Entity<Store>,
     pub canvas: Entity<GraphCanvas>,
     inspector: Entity<Inspector>,
     /// The app's commands, for the bar drawn when the Pipeline is docked in Explore.
     registry: Option<Registry>,
+    /// Where the floating tool bar sits.
+    dock: ToolbarDock,
     _subs: Vec<Subscription>,
 }
 
@@ -61,6 +92,13 @@ struct ModelArgs {
     interactive: bool,
 }
 
+/// A drop-in script plugin file path.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct ScriptPathArgs {
+    /// Absolute path to a `.py` or `.rs` script op.
+    path: String,
+}
+
 impl PipelineView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let canvas = cx.new(|cx| GraphCanvas::new(store.clone(), cx));
@@ -78,7 +116,7 @@ impl PipelineView {
             }),
             cx.subscribe(&canvas, |_, _, _: &CanvasEvent, cx| cx.notify()),
         ];
-        Self { store, canvas, inspector, registry: None, _subs: subs }
+        Self { store, canvas, inspector, registry: None, dock: ToolbarDock::default(), _subs: subs }
     }
 
     fn canvas_do(canvas: &WeakEntity<GraphCanvas>, cx: &mut App, f: impl FnOnce(&mut GraphCanvas, &mut Context<GraphCanvas>)) {
@@ -136,7 +174,7 @@ impl PipelineView {
             }
         };
         let (add_source, add_view) = (add.clone(), add(Template::View));
-        let (s1, s2) = (store.clone(), store.clone());
+        let (s1, s2, s3) = (store.clone(), store.clone(), store.clone());
         vec![
             CommandSpec::new("pipeline.duplicate", "Duplicate", IconName::Copy, canvas_do(|c, cx| c.duplicate_selected(cx))).group("Pipeline").hint("The selected nodes (Ctrl+D on the canvas)").enabled(selected()),
             CommandSpec::new("pipeline.delete", "Delete, reconnecting", IconName::Trash, canvas_do(|c, cx| c.delete_selected(true, cx))).group("Pipeline").hint("The selected nodes; their neighbours are joined (Del)").enabled(selected()),
@@ -167,6 +205,29 @@ impl PipelineView {
             })
             .group("Automate")
             .hint("A Python or Rust file as a step"),
+            CommandSpec::with_args::<ScriptPathArgs>("script.from_plugin", "Add a plugin script", IconName::SquareTerminal, move |a, _, cx| {
+                s3.update(cx, |s, cx| s.add_script_file(std::path::PathBuf::from(a.path), cx));
+                Ok(serde_json::Value::Null)
+            })
+            .group("Automate")
+            .hint("Add a discovered community or user script op from plugins/ops"),
+            {
+                let this_r = this.clone();
+                CommandSpec::with_args::<ScriptPathArgs>("pipeline.apply_recipe", "Add a recipe", IconName::Package, move |a, _, cx| {
+                    let recipe = crate::data::recipes::load_recipe(std::path::Path::new(&a.path))?;
+                    if let Some(p) = this_r.upgrade() {
+                        let canvas = p.read(cx).canvas.clone();
+                        canvas.update(cx, |c, cx| {
+                            for op in recipe.steps {
+                                c.add(&Template::Op(op), None, cx);
+                            }
+                        });
+                    }
+                    Ok(serde_json::Value::Null)
+                })
+                .group("Pipeline")
+                .hint("Add every step of a .lucem-recipe.json to the graph")
+            },
             CommandSpec::with_args::<ModelArgs>("pipeline.model", "Add a model step", IconName::BrainCircuit, move |a, _, cx| {
                 s2.update(cx, |s, cx| s.add_model_node(a.id, a.interactive, cx));
                 Ok(serde_json::Value::Null)
@@ -243,6 +304,36 @@ impl PipelineView {
                 })
                 .collect()
         });
+        registry.provide("pipeline.recipes", |_| {
+            let recipes = crate::data::recipes::discover_recipes();
+            if recipes.is_empty() {
+                return vec![MenuItem::label("No recipes found (~/.config/lucem/recipes)")];
+            }
+            let items: Vec<MenuItem> = recipes
+                .into_iter()
+                .map(|(path, r)| {
+                    let label = format!("{}   {} step(s)", r.name, r.steps.len());
+                    MenuItem::run(label, "pipeline.apply_recipe", json!({"path": path.to_string_lossy()})).icon(IconName::Package)
+                })
+                .collect();
+            vec![MenuItem::submenu_with_icon("Recipes", IconName::Package, items)]
+        });
+        registry.provide("pipeline.plugin_scripts", |_| {
+            let scripts = crate::data::script::discover_plugin_ops();
+            if scripts.is_empty() {
+                return vec![MenuItem::label("No plugin scripts found (~/.config/lucem/plugins/ops)")];
+            }
+            let mut out = vec![MenuItem::label("Plugin scripts (plugins/ops)")];
+            for sc in scripts {
+                let label = if sc.description.is_empty() {
+                    format!("{} · {}", sc.name, sc.family)
+                } else {
+                    format!("{}   {}", sc.name, sc.description)
+                };
+                out.push(MenuItem::run(label, "script.from_plugin", json!({"path": sc.path.to_string_lossy()})).icon(IconName::SquareTerminal));
+            }
+            out
+        });
     }
 
     /// The Pipeline's menus: Sources, Edit, Process (Find an operation, then a submenu per
@@ -252,9 +343,9 @@ impl PipelineView {
         vec![
             MenuSpec::new("Sources", vec![MenuItem::provided("pipeline.sources")]),
             MenuSpec::new("Edit", vec![c("pipeline.duplicate"), c("pipeline.delete"), c("pipeline.delete_alone"), MenuItem::Separator, c("pipeline.select_all"), MenuItem::Separator, c("edit.undo"), c("edit.redo")]),
-            MenuSpec::new("Process", vec![c("process.find"), MenuItem::Separator, MenuItem::label("A node on the canvas"), MenuItem::provided("pipeline.families")]),
+            MenuSpec::new("Process", vec![c("process.find"), MenuItem::Separator, MenuItem::label("A node on the canvas"), MenuItem::provided("pipeline.families"), MenuItem::Separator, MenuItem::provided("pipeline.recipes")]),
             MenuSpec::new("Output", vec![c("pipeline.output")]),
-            MenuSpec::new("Script", vec![MenuItem::label("A step written as a file; edit, save, it runs again"), c("script.new_python"), c("script.new_rust"), c("script.from_file")]),
+            MenuSpec::new("Script", vec![MenuItem::label("A step written as a file; edit, save, it runs again"), c("script.new_python"), c("script.new_rust"), c("script.from_file"), MenuItem::Separator, MenuItem::provided("pipeline.plugin_scripts")]),
             MenuSpec::new("Model", vec![MenuItem::provided("pipeline.models")]),
             MenuSpec::new("View", vec![c("pipeline.fit"), c("pipeline.actual"), MenuItem::Separator, c("pipeline.grid"), c("pipeline.minimap")]),
         ]
@@ -280,54 +371,90 @@ impl PipelineView {
             .into_any_element()
     }
 
-    /// The tool bar floating at the bottom of the canvas.
+    /// Places the floating tool bar on one of the four canvas edges.
+    pub fn set_dock(&mut self, dock: ToolbarDock, cx: &mut Context<Self>) {
+        self.dock = dock;
+        cx.notify();
+    }
+
+    /// The tool bar floating on the canvas: placeable on any edge ([`ToolbarDock`]), and steps
+    /// aside (fades out, takes no pointer) while the view moves.
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let c = self.canvas.read(cx);
-        let (hand, selected) = (c.hand, !c.selected.is_empty());
+        let (hand, selected, moving) = (c.hand, !c.selected.is_empty(), c.moving());
+        let dock = self.dock;
+        let column = dock.column();
         let canvas = self.canvas.downgrade();
         let tool = |id: &'static str, icon: IconName, tip: &'static str, on: bool, f: fn(&mut GraphCanvas, &mut Context<GraphCanvas>)| {
             let canvas = canvas.clone();
             Button::new(id).ghost().small().icon(Icon::new(icon)).tooltip(tip).selected(on).on_click(move |_, _, cx| Self::canvas_do(&canvas, cx, f))
         };
+        let sep = || if column { div().h(px(1.)).w(px(20.)).my(px(theme::XS)).bg(color::border()).into_any_element() } else { divider_v().into_any_element() };
+        let me = cx.entity().downgrade();
+        let place = Button::new("tool-dock")
+            .ghost()
+            .small()
+            .icon(Icon::new(if column { IconName::GripHorizontal } else { IconName::GripVertical }))
+            .tooltip("Place the tool bar")
+            .dropdown_menu(move |m: PopupMenu, _, _| {
+                let mut m = m.label("Place the tool bar");
+                for d in ToolbarDock::ALL {
+                    let me = me.clone();
+                    m = m.item(PopupMenuItem::new(d.label()).checked(d == dock).on_click(move |_, _, cx| {
+                        let _ = me.update(cx, |p, cx| p.set_dock(d, cx));
+                    }));
+                }
+                m
+            });
         let store = self.store.clone();
-        // Only the pill takes the pointer: the strip it is centred in must not cover the canvas'
-        // own bar (zoom, fit, grid, minimap) at the bottom left
-        h_flex()
-            .id("pipeline-toolbar")
-            .absolute()
-            .bottom_4()
-            .left_0()
-            .right_0()
-            .justify_center()
-            .child(
-                h_flex()
-                    .id("pipeline-toolbar-pill")
-                    .occlude()
-                    .gap(px(2.))
-                    .p(px(theme::XS))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(color::border())
-                    .bg(color::raised())
-                    .shadow_lg()
-                    .child(tool("tool-select", IconName::MousePointer2, "Select (V)", !hand, |c, cx| {
-                        c.hand = false;
-                        cx.notify();
-                    }))
-                    .child(tool("tool-hand", IconName::Hand, "Move the canvas (H, or hold Space)", hand, |c, cx| {
-                        c.hand = true;
-                        cx.notify();
-                    }))
-                    .child(divider_v())
-                    .child(tool("tool-duplicate", IconName::Copy, "Duplicate (Ctrl+D)", false, |c, cx| c.duplicate_selected(cx)))
-                    .child({
-                        let canvas = canvas.clone();
-                        Button::new("tool-delete").ghost().small().icon(Icon::new(IconName::Trash)).tooltip("Delete, reconnecting around it (Del; Shift+Del alone)").disabled(!selected).on_click(move |_, _, cx| Self::canvas_do(&canvas, cx, |c, cx| c.delete_selected(true, cx)))
-                    })
-                    .child(divider_v())
-                    .child(tool("tool-fit", IconName::Maximize, "Fit the graph (F)", false, |c, cx| c.fit(cx)))
-                    .child(Button::new("tool-run").ghost().small().icon(Icon::new(IconName::Play)).label("Run on view").tooltip("Compute the results again over what Explore shows").on_click(move |_, _, cx| store.update(cx, |s, cx| s.recompute(cx)))),
-            )
+        let run = {
+            let btn = Button::new("tool-run").ghost().small().icon(Icon::new(IconName::Play));
+            let btn = if column { btn } else { btn.label("Run on view") };
+            btn.tooltip("Compute the results again over what Explore shows").on_click(move |_, _, cx| store.update(cx, |s, cx| s.recompute(cx)))
+        };
+        let pill = div()
+            .id("pipeline-toolbar-pill")
+            .flex()
+            .when(column, |d| d.flex_col())
+            .when(!column, |d| d.flex_row())
+            .items_center()
+            .gap(px(2.))
+            .p(px(theme::XS))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(color::border())
+            .bg(color::raised())
+            .shadow_lg()
+            .when(moving, |d| d.opacity(0.))
+            .when(!moving, |d| d.occlude())
+            .child(place)
+            .child(tool("tool-select", IconName::MousePointer2, "Select (V)", !hand, |c, cx| {
+                c.hand = false;
+                cx.notify();
+            }))
+            .child(tool("tool-hand", IconName::Hand, "Move the canvas (H, or hold Space)", hand, |c, cx| {
+                c.hand = true;
+                cx.notify();
+            }))
+            .child(sep())
+            .child(tool("tool-duplicate", IconName::Copy, "Duplicate (Ctrl+D)", false, |c, cx| c.duplicate_selected(cx)))
+            .child({
+                let canvas = canvas.clone();
+                Button::new("tool-delete").ghost().small().icon(Icon::new(IconName::Trash)).tooltip("Delete, reconnecting around it (Del; Shift+Del alone)").disabled(!selected).on_click(move |_, _, cx| Self::canvas_do(&canvas, cx, |c, cx| c.delete_selected(true, cx)))
+            })
+            .child(sep())
+            .child(tool("tool-fit", IconName::Maximize, "Fit the graph (F)", false, |c, cx| c.fit(cx)))
+            .child(run);
+        // Only the pill takes the pointer: the strip it sits in covers no control. The bottom
+        // place clears the canvas' own bar (zoom, fit, grid, minimap) under it.
+        let strip = div().id("pipeline-toolbar").absolute().flex();
+        let strip = match dock {
+            ToolbarDock::Top => strip.top_3().left_0().right_0().justify_center(),
+            ToolbarDock::Bottom => strip.bottom(px(52.)).left_0().right_0().justify_center(),
+            ToolbarDock::Left => strip.left_3().top_0().bottom_0().items_center(),
+            ToolbarDock::Right => strip.right_3().top_0().bottom_0().items_center(),
+        };
+        strip.child(pill)
     }
 }
 
@@ -498,10 +625,50 @@ impl Inspector {
                 .into_any_element();
         }
         let Some(node) = selected.iter().next().and_then(|id| g.node(id)).cloned() else {
-            return Section::new("Nothing selected")
-                .child(div().text_xs().text_color(color::text_muted()).child("Click a node to see it here; its path through the graph lights up."))
-                .child(div().text_xs().text_color(color::text_muted()).child("Handles are coloured by what they carry: image, mask, labels, table. Drag an output onto an input of the same colour."))
-                .child(div().text_xs().text_color(color::text_muted()).child("A result view draws what feeds it over the image in Explore (tables go to Analyze)."))
+            let active_name = doc.active().map_or("No image open".to_string(), |i| i.name.clone());
+            let (n_nodes, n_edges) = (g.nodes.len(), g.edges.len());
+            let canvas_add = self.canvas.downgrade();
+            let store_run = self.store.clone();
+            let add_btn = Button::new("inspector-add-op")
+                .outline()
+                .small()
+                .icon(Icon::new(IconName::Plus))
+                .label("Add operation")
+                .dropdown_menu(move |mut m: PopupMenu, w, cx| {
+                    for cat in operations() {
+                        let canvas = canvas_add.clone();
+                        let icon = cat.icon;
+                        let items: Vec<_> = cat.items.into_iter().filter(|it| matches!(it.template, Template::Op(_))).collect();
+                        if items.is_empty() {
+                            continue;
+                        }
+                        m = m.submenu(cat.name, w, cx, move |mut sub, _, _| {
+                            for it in &items {
+                                let (canvas, template) = (canvas.clone(), it.template.clone());
+                                sub = sub.item(PopupMenuItem::new(it.label.clone()).icon(Icon::new(icon)).on_click(move |_, _, cx| {
+                                    let _ = canvas.update(cx, |c, cx| c.add(&template, None, cx));
+                                }));
+                            }
+                            sub
+                        });
+                    }
+                    m
+                });
+            let run_btn = Button::new("inspector-run")
+                .primary()
+                .small()
+                .icon(Icon::new(IconName::Play))
+                .label("Run on view")
+                .on_click(move |_, _, cx| store_run.update(cx, |s, cx| s.recompute(cx)));
+            return v_flex()
+                .gap(px(theme::MD))
+                .child(
+                    Section::new("Pipeline")
+                        .child(row("Image", div().min_w_0().truncate().text_sm().child(active_name)))
+                        .child(row("Graph", div().text_sm().font_family("monospace").child(format!("{n_nodes} nodes · {n_edges} edges")))),
+                )
+                .child(h_flex().gap(px(theme::SM)).flex_wrap().child(add_btn).child(run_btn))
+                .child(div().text_xs().text_color(color::text_muted()).child("Select a node to edit its parameters, or drag an output handle onto an input."))
                 .into_any_element();
         };
         let id = node.id.clone();

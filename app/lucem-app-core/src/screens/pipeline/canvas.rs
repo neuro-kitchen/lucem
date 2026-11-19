@@ -65,8 +65,13 @@ enum Drag {
     Marquee { a: (f32, f32), b: (f32, f32), additive: bool },
 }
 
+/// How long the canvas must stay still (no pan, wheel or zoom) before floating controls show again (ms).
+const SETTLE_MS: u64 = 600;
+
 pub enum CanvasEvent {
     SelectionChanged,
+    /// The view started or stopped moving (pan, wheel, zoom): see [`GraphCanvas::moving`].
+    Moving,
 }
 
 /// Where a handle is: `None` the output, `Some(port)` an input.
@@ -86,6 +91,10 @@ pub struct GraphCanvas {
     pub show_minimap: bool,
     bounds: Rc<Cell<Bounds<Pixels>>>,
     fit_pending: bool,
+    /// The view is moving (pan, wheel, zoom), until [`SETTLE_MS`] after the last motion.
+    moving: bool,
+    /// Ends `moving` once the view stays still; replaced (cancelled) by each motion.
+    settle: Option<gpui_kit::Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -119,6 +128,8 @@ impl GraphCanvas {
             show_minimap: false,
             bounds: Rc::new(Cell::new(Bounds::default())),
             fit_pending: true,
+            moving: false,
+            settle: None,
             _subs: subs,
         }
     }
@@ -192,7 +203,35 @@ impl GraphCanvas {
     // View
     // ------------------------------------------------------------------------
 
+    /// Whether the view is moving (pan, wheel, zoom): floating controls step aside meanwhile.
+    pub fn moving(&self) -> bool {
+        self.moving
+    }
+
+    /// The view moved: `moving` until it stays still for [`SETTLE_MS`].
+    fn note_motion(&mut self, cx: &mut Context<Self>) {
+        if !self.moving {
+            self.moving = true;
+            cx.emit(CanvasEvent::Moving);
+        }
+        self.settle = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(SETTLE_MS)).await;
+            let _ = this.update(cx, |c, cx| {
+                // A pan still held (the pointer resting) keeps it moving: look again later
+                if matches!(c.drag, Some(Drag::Pan { .. })) {
+                    c.note_motion(cx);
+                    return;
+                }
+                c.moving = false;
+                c.settle = None;
+                cx.emit(CanvasEvent::Moving);
+                cx.notify();
+            });
+        }));
+    }
+
     pub fn zoom_by(&mut self, factor: f32, anchor: Option<(f32, f32)>, cx: &mut Context<Self>) {
+        self.note_motion(cx);
         let b = self.bounds.get().size;
         let anchor = anchor.unwrap_or((b.width.as_f32() / 2.0, b.height.as_f32() / 2.0));
         let w = self.world(anchor);
@@ -394,8 +433,12 @@ impl GraphCanvas {
         }
         let local = self.local(e.position);
         let zoom = self.zoom;
+        let mut panned = false;
         match &mut self.drag {
-            Some(Drag::Pan { mouse, pan }) => self.pan = (pan.0 + local.0 - mouse.0, pan.1 + local.1 - mouse.1),
+            Some(Drag::Pan { mouse, pan }) => {
+                self.pan = (pan.0 + local.0 - mouse.0, pan.1 + local.1 - mouse.1);
+                panned = true;
+            }
             Some(Drag::Nodes { mouse, origins, moved }) => {
                 let (dx, dy) = (local.0 - mouse.0, local.1 - mouse.1);
                 if !*moved && dx.hypot(dy) < DRAG_SLOP {
@@ -407,6 +450,9 @@ impl GraphCanvas {
             Some(Drag::Connect { to, .. }) => *to = local,
             Some(Drag::Marquee { b, .. }) => *b = local,
             None => return,
+        }
+        if panned {
+            self.note_motion(cx);
         }
         cx.notify();
     }
@@ -462,8 +508,10 @@ impl GraphCanvas {
             self.zoom_by((dy * 0.003).exp(), Some(self.local(e.position)), cx);
         } else if m.shift && dx == 0.0 {
             self.pan.0 += dy;
+            self.note_motion(cx);
         } else {
             self.pan = (self.pan.0 + dx, self.pan.1 + dy);
+            self.note_motion(cx);
         }
         cx.stop_propagation();
         cx.notify();
@@ -666,7 +714,8 @@ impl GraphCanvas {
             .border_color(color::border())
             .bg(color::raised())
             .shadow_md()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(self.moving, |d| d.opacity(0.))
+            .when(!self.moving, |d| d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
             .child(b("zoom-out", IconName::ZoomOut, "Zoom out (Ctrl −)", |c, cx| c.zoom_by(0.8, None, cx)))
             .child(div().w(px(48.)).text_xs().child({
                 let me = me.clone();
@@ -677,7 +726,7 @@ impl GraphCanvas {
             .child(b("zoom-in", IconName::ZoomIn, "Zoom in (Ctrl +)", |c, cx| c.zoom_by(1.25, None, cx)))
             .child(b("fit", IconName::Maximize, "Fit the graph (F)", |c, cx| c.fit(cx)))
             // Toggles show whether they are on
-            .child(b("grid", IconName::LayoutGrid, "Dot grid", |c, cx| {
+            .child(b("grid", IconName::Grip, "Dot grid", |c, cx| {
                 c.show_grid = !c.show_grid;
                 cx.notify();
             }).selected(self.show_grid))

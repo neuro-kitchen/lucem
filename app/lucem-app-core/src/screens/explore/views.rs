@@ -16,7 +16,7 @@ use web_time::Instant;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, v_flex, Icon, Selectable as _, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     canvas, div, fill, point, px, size, AppContext as _, Bounds, Context, Corners, Entity, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
@@ -25,7 +25,7 @@ use gpui_kit::{
 use lucem_core::memory::DeviceArray;
 use lucem_core::Shape;
 use lucem_io::{PlaneAxis, Pyramid};
-use lucem_view::{bgra_image, composite_bgra, project_point, render_volume_rgba, unpack_bgra, ChannelDisplay, OrbitCamera, VolumeChannel, VolumeMode, VolumeQuality};
+use lucem_view::{bgra_image, composite_bgra, project_point, ray_midpoint_frac, render_volume_rgba_clipped, unpack_bgra, ChannelDisplay, OrbitCamera, VolumeChannel, VolumeClip, VolumeMode, VolumeQuality};
 
 use crate::data::labels::{plane_overlay, volume_labels, ClassColor};
 use crate::data::store::{AppEvent, Store};
@@ -38,6 +38,7 @@ const PLANE_SIDE: usize = 1024;
 /// Longest side of the volume while it turns and when it rests.
 const VOLUME_MOVING: usize = 96;
 const VOLUME_RESTING: usize = 256;
+const VOLUME_RESTING_HI: usize = 512;
 /// Longest side of the image rendered while turning; at rest, 2 px per voxel up to the cap.
 const IMAGE_MOVING: usize = 320;
 const IMAGE_RESTING: usize = 1024;
@@ -388,13 +389,19 @@ pub struct VolumeView {
     store: Entity<Store>,
     camera: OrbitCamera,
     mode: VolumeMode,
+    /// Six-sided clipping planes (normalized `0..=1` per axis).
+    clip: VolumeClip,
+    /// Whether the X/Y/Z clipping strip is expanded.
+    show_clip: bool,
+    /// High-resolution resting cap (`512` vs `256` voxels a side) for cleared-tissue volumes.
+    high_res: bool,
     /// Annotation classes rendered as channels.
     show_labels: bool,
     volumes: Arc<Mutex<DeviceVolumes>>,
     frame: Option<Frame>,
     drops: Vec<Arc<RenderImage>>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
-    drag: Option<(f32, f32, OrbitCamera)>,
+    drag: Option<(f32, f32, OrbitCamera, bool)>,
     busy: bool,
     /// A frame to make when the current one is done (`true`: a fast one).
     queued: Option<bool>,
@@ -412,6 +419,9 @@ impl VolumeView {
             store,
             camera: OrbitCamera::default(),
             mode: VolumeMode::MaximumIntensity,
+            clip: VolumeClip::FULL,
+            show_clip: false,
+            high_res: false,
             show_labels: true,
             volumes: Arc::new(Mutex::new(DeviceVolumes::default())),
             frame: None,
@@ -461,14 +471,15 @@ impl VolumeView {
         if bw < 16 || bh < 16 {
             return;
         }
-        let level = level_under(&py, if fast { VOLUME_MOVING } else { VOLUME_RESTING });
+        let rest_cap = if self.high_res { VOLUME_RESTING_HI } else { VOLUME_RESTING };
+        let level = level_under(&py, if fast { VOLUME_MOVING } else { rest_cap });
         let l = py.levels[level].clone();
         let side = l.width.max(l.height).max(l.depth);
         // No more than 2 image px per voxel: finer only costs time
         let longest = if fast { IMAGE_MOVING } else { (2 * side).clamp(256, IMAGE_RESTING) };
         let scale = (longest as f32 / bw.max(bh) as f32).min(1.0);
         let (iw, ih) = (((bw as f32 * scale) as usize).max(2), ((bh as f32 * scale) as usize).max(2));
-        let (camera, mode, volumes) = (self.camera, self.mode, self.volumes.clone());
+        let (camera, clip, mode, volumes) = (self.camera, self.clip, self.mode, self.volumes.clone());
         let generation = s.device_generation;
         let quality = if fast { VolumeQuality::Fast } else { VolumeQuality::Fine };
         self.busy = true;
@@ -521,7 +532,7 @@ impl VolumeView {
                 return Err("No channel is visible".to_string());
             }
             let t_device = Instant::now();
-            let out = render_volume_rgba(client, &volume, labels.as_deref(), dims, spacing, camera, (iw, ih), &channels, mode, quality)?;
+            let out = render_volume_rgba_clipped(client, &volume, labels.as_deref(), dims, spacing, camera, clip, (iw, ih), &channels, mode, quality)?;
             let pixels = out.to_host(client);
             let device_ms = t_device.elapsed().as_secs_f64() * 1000.0;
             let image = bgra_image(iw, ih, unpack_bgra(&pixels));
@@ -552,7 +563,7 @@ impl VolumeView {
     }
 
     fn on_down(&mut self, e: &MouseDownEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.drag = Some((e.position.x.as_f32(), e.position.y.as_f32(), self.camera));
+        self.drag = Some((e.position.x.as_f32(), e.position.y.as_f32(), self.camera, false));
     }
 
     fn on_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -560,14 +571,37 @@ impl VolumeView {
             self.drag = None;
             return;
         }
-        let Some((x0, y0, start)) = self.drag else { return };
-        self.camera.yaw = start.yaw + (e.position.x.as_f32() - x0) * 0.01;
-        self.camera.pitch = (start.pitch + (e.position.y.as_f32() - y0) * 0.01).clamp(-1.5, 1.5);
+        let Some((x0, y0, start, moved)) = &mut self.drag else { return };
+        let (dx, dy) = (e.position.x.as_f32() - *x0, e.position.y.as_f32() - *y0);
+        if !*moved && dx.hypot(dy) < 3.0 {
+            return;
+        }
+        *moved = true;
+        self.camera.yaw = start.yaw + dx * 0.01;
+        self.camera.pitch = (start.pitch + dy * 0.01).clamp(-1.56, 1.56);
         self.moved(cx);
     }
 
-    fn on_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.drag = None;
+    fn on_up(&mut self, e: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, _, _, moved)) = self.drag.take() else { return };
+        if !moved
+            && let Some(f) = &self.frame
+        {
+            let b = self.bounds.get();
+            let px_x = (e.position.x - b.origin.x).as_f32() / b.size.width.as_f32().max(1.0) * f.size.0 as f32;
+            let px_y = (e.position.y - b.origin.y).as_f32() / b.size.height.as_f32().max(1.0) * f.size.1 as f32;
+            if let Some([fz, fy, fx]) = ray_midpoint_frac(f.dims, f.spacing, f.camera, self.clip, f.size, [px_x, px_y]) {
+                let s = self.store.read(cx);
+                if let (Some(id), Some(py)) = (s.doc.active_image.clone(), s.active_pyramid()) {
+                    let at = [
+                        ((fz * py.depth() as f32) as usize).min(py.depth().saturating_sub(1)),
+                        ((fy * py.height() as f32) as usize).min(py.height().saturating_sub(1)),
+                        ((fx * py.width() as f32) as usize).min(py.width().saturating_sub(1)),
+                    ];
+                    self.store.update(cx, |s, cx| s.set_cursor_of(&id, at, cx));
+                }
+            }
+        }
     }
 
     fn on_wheel(&mut self, e: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -691,20 +725,98 @@ impl Render for VolumeView {
             (None, Some(t)) => format!("{} voxels a side · device {:.0} ms · frame {:.0} ms", t.side, t.device_ms, t.total_ms),
             _ => "Rendering…".to_string(),
         };
-        let (reset, labels, mode, show_labels) = (me.clone(), me.clone(), self.mode, self.show_labels);
+        let (reset, labels, mode, show_labels, show_clip, high_res, clip) = (me.clone(), me.clone(), self.mode, self.show_labels, self.show_clip, self.high_res, self.clip);
+        let preset_btn = |id: &'static str, label: &'static str, cam: OrbitCamera, me: gpui_kit::WeakEntity<Self>| {
+            Button::new(id).ghost().xsmall().label(label).on_click(move |_, _, cx| {
+                let _ = me.update(cx, |v, cx| {
+                    v.camera = OrbitCamera { zoom: v.camera.zoom, ..cam };
+                    v.request(false, cx);
+                });
+            })
+        };
+        let clip_bar = show_clip.then(|| {
+            let axis_ctrl = |axis: usize, name: &'static str, col: [u8; 3], range: [f32; 2], me: gpui_kit::WeakEntity<Self>| {
+                let (m0, m1) = (me.clone(), me);
+                h_flex()
+                    .gap(px(theme::XS))
+                    .items_center()
+                    .child(div().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(theme::rgb8(col)).child(name))
+                    .child(crate::ui::widgets::scrub_label(format!("clip-{name}-min"), format!("{:.0}%", range[0] * 100.0), move |d, _, cx| {
+                        let _ = m0.update(cx, |v, cx| {
+                            let r = match axis { 0 => &mut v.clip.x, 1 => &mut v.clip.y, _ => &mut v.clip.z };
+                            r[0] = (r[0] + d * 0.02).clamp(0.0, r[1] - 0.02);
+                            v.moved(cx);
+                        });
+                    }))
+                    .child(div().text_xs().text_color(color::text_muted()).child("–"))
+                    .child(crate::ui::widgets::scrub_label(format!("clip-{name}-max"), format!("{:.0}%", range[1] * 100.0), move |d, _, cx| {
+                        let _ = m1.update(cx, |v, cx| {
+                            let r = match axis { 0 => &mut v.clip.x, 1 => &mut v.clip.y, _ => &mut v.clip.z };
+                            r[1] = (r[1] + d * 0.02).clamp(r[0] + 0.02, 1.0);
+                            v.moved(cx);
+                        });
+                    }))
+            };
+            let me_rst = me.clone();
+            h_flex()
+                .flex_none()
+                .min_h(px(28.))
+                .px(px(theme::SM))
+                .py(px(2.))
+                .flex_wrap()
+                .gap_x(px(theme::MD))
+                .gap_y(px(2.))
+                .items_center()
+                .bg(color::panel())
+                .border_b_1()
+                .border_color(color::border())
+                .child(axis_ctrl(0, "X", AXIS_X, clip.x, me.clone()))
+                .child(axis_ctrl(1, "Y", AXIS_Y, clip.y, me.clone()))
+                .child(axis_ctrl(2, "Z", AXIS_Z, clip.z, me.clone()))
+                .child(div().flex_1())
+                .child(Button::new("volume-clip-reset").ghost().xsmall().label("Reset clip").disabled(clip.is_full()).on_click(move |_, _, cx| {
+                    let _ = me_rst.update(cx, |v, cx| {
+                        v.clip = VolumeClip::FULL;
+                        v.request(false, cx);
+                    });
+                }))
+        });
+        let (me_clip, me_hi) = (me.clone(), me.clone());
         v_flex()
             .size_full()
             .child(
                 h_flex()
                     .flex_none()
-                    .h(px(28.))
+                    .min_h(px(28.))
                     .px(px(theme::SM))
+                    .py(px(2.))
+                    .flex_wrap()
                     .gap(px(theme::XS))
+                    .items_center()
                     .bg(color::chrome())
                     .border_b_1()
                     .border_color(color::border())
                     .child(mode_button("volume-mip", "Maximum", VolumeMode::MaximumIntensity, mode == VolumeMode::MaximumIntensity, me.clone()))
-                    .child(mode_button("volume-composite", "Composite", VolumeMode::Composite, mode == VolumeMode::Composite, me))
+                    .child(mode_button("volume-depth", "Depth", VolumeMode::DepthCue, mode == VolumeMode::DepthCue, me.clone()))
+                    .child(mode_button("volume-composite", "Composite", VolumeMode::Composite, mode == VolumeMode::Composite, me.clone()))
+                    .child(crate::ui::widgets::divider_v())
+                    .child(preset_btn("volume-xy", "XY", OrbitCamera::xy(), me.clone()))
+                    .child(preset_btn("volume-xz", "XZ", OrbitCamera::xz(), me.clone()))
+                    .child(preset_btn("volume-yz", "YZ", OrbitCamera::yz(), me.clone()))
+                    .child(preset_btn("volume-iso", "Iso", OrbitCamera::isometric(), me.clone()))
+                    .child(crate::ui::widgets::divider_v())
+                    .child(Button::new("volume-clip").ghost().xsmall().label("Clip").tooltip("Six-sided X/Y/Z clipping planes for cleared tissue").selected(show_clip || !clip.is_full()).on_click(move |_, _, cx| {
+                        let _ = me_clip.update(cx, |v, cx| {
+                            v.show_clip = !v.show_clip;
+                            cx.notify();
+                        });
+                    }))
+                    .child(Button::new("volume-hires").ghost().xsmall().label(if high_res { "512³" } else { "256³" }).tooltip("Resting volume resolution (512³ for fine cleared-tissue detail)").selected(high_res).on_click(move |_, _, cx| {
+                        let _ = me_hi.update(cx, |v, cx| {
+                            v.high_res = !v.high_res;
+                            v.request(false, cx);
+                        });
+                    }))
                     .child(Button::new("volume-labels").ghost().xsmall().label("Annotations").tooltip("Show the annotation classes in the volume").selected(show_labels).on_click(move |_, _, cx| {
                         let _ = labels.update(cx, |v, cx| {
                             v.show_labels = !v.show_labels;
@@ -714,12 +826,14 @@ impl Render for VolumeView {
                     .child(Button::new("volume-reset").ghost().xsmall().icon(Icon::new(IconName::RotateCcw)).tooltip("Reset the view").on_click(move |_, _, cx| {
                         let _ = reset.update(cx, |v, cx| {
                             v.camera = OrbitCamera::default();
+                            v.clip = VolumeClip::FULL;
                             v.request(false, cx);
                         });
                     }))
                     .child(div().flex_1())
                     .child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(status)),
             )
+            .children(clip_bar)
             .child(
                 div()
                     .id("volume-picture")

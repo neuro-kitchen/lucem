@@ -380,6 +380,17 @@ pub fn register(registry: &Registry, c: &Ctx) {
                 .enabled(move |cx| if sel.read(cx).sel.shapes.len() >= 2 { Ok(()) } else { Err("Select two regions or more".into()) }),
         );
     }
+    {
+        let (store, sel) = (s.clone(), s.clone());
+        list.push(
+            CommandSpec::new("shapes.tile_grid", "Create tile grid inside shape (256 px)", IconName::LayoutGrid, move |_, cx| {
+                store.update(cx, |s, cx| s.create_tile_grid(256.0, 0.0, true, cx))
+            })
+            .group("Shapes")
+            .hint("Fill the selected region(s) with a clipped 256 px tile grid (QuPath-style)")
+            .enabled(move |cx| if !sel.read(cx).sel.shapes.is_empty() { Ok(()) } else { Err("Select a region shape first".into()) }),
+        );
+    }
     let masks: [(&str, &str, usize, IconName, MaskOperation); 6] = [
         ("union", "Union", 2, IconName::SquaresUnite, MaskOperation::Union),
         ("intersect", "Intersect", 2, IconName::SquaresIntersect, MaskOperation::Intersect),
@@ -886,6 +897,7 @@ pub fn explore_menus() -> Vec<MenuSpec> {
     let mut shapes = vec![MenuItem::label("Select")];
     shapes.extend(tools(&[Tool::Select, Tool::Marquee]));
     shapes.push(MenuItem::submenu_with_icon("Combine the selected shapes", IconName::SquaresUnite, ShapeOp::ALL.iter().map(|o| c(&format!("shapes.{}", o.title().to_lowercase()))).collect()));
+    shapes.push(c("shapes.tile_grid"));
     shapes.push(MenuItem::Separator);
     shapes.push(MenuItem::label("Draw"));
     shapes.extend(tools(&[Tool::Rect, Tool::Ellipse, Tool::Polygon, Tool::Lasso, Tool::Point, Tool::Brush, Tool::Eraser, Tool::Wand, Tool::Threshold, Tool::Segment]));

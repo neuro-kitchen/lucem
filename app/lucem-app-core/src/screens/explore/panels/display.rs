@@ -21,7 +21,7 @@ use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     canvas, div, fill, point, px, size, AnyElement, AppContext as _, Bounds, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
 };
 use lucem_pipeline::PortType;
 
@@ -35,10 +35,10 @@ use crate::screens::pipeline::catalog::{family_icon, operations, summary, Templa
 use crate::ui::color_wheel::{ColorWheel, WheelEvent};
 use crate::ui::param_editor::{Commit, EditOps as _, ParamEditor};
 use crate::ui::theme::{self, color};
-use crate::ui::widgets::{row, slider, swatch};
+use crate::ui::widgets::{row, scrub_label, slider, swatch};
 
 /// Height of a histogram (px).
-const HIST_H: f32 = 64.;
+const HIST_H: f32 = 84.;
 
 /// Colours offered for a channel (the usual fluorescence and brightfield ones).
 pub const CHANNEL_COLORS: [(&str, [u8; 3]); 7] = [("Red", [255, 0, 0]), ("Green", [0, 255, 0]), ("Blue", [0, 0, 255]), ("Cyan", [0, 255, 255]), ("Magenta", [255, 0, 255]), ("Yellow", [255, 255, 0]), ("White", [255, 255, 255])];
@@ -124,6 +124,8 @@ pub struct DisplayPanel {
     params: Entity<ParamEditor>,
     /// The channel editor's page (Affinity's Colour panel: tabs on top, one page at a time).
     page: ChannelPage,
+    /// Whether the Levels histogram uses a logarithmic count scale (`true`) or linear (`false`).
+    hist_log: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -160,7 +162,7 @@ impl DisplayPanel {
                 cx.notify();
             }
         })];
-        Self { store, bounds: Vec::new(), drag: None, wheel: None, sliding: None, params: cx.new(|_| ParamEditor::new()), page: ChannelPage::Colour, _subs: subs }
+        Self { store, bounds: Vec::new(), drag: None, wheel: None, sliding: None, params: cx.new(|_| ParamEditor::new()), page: ChannelPage::Colour, hist_log: true, _subs: subs }
     }
 
     fn channel(&self, c: usize, cx: &Context<Self>) -> Option<(String, ChannelDoc)> {
@@ -267,18 +269,27 @@ impl DisplayPanel {
     fn histogram(&self, c: usize, h: Option<ChannelHistogram>, ch: &ChannelDoc, (lo, hi): (f32, f32), cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let cell = self.bounds[c].clone();
         let col = theme::rgb8(ch.color);
-        let (min, max) = (ch.min, ch.max);
+        let (min, max, gamma) = (ch.min, ch.max, ch.gamma.max(0.05));
+        let log_scale = self.hist_log;
         let plot = canvas(
             move |b, _, _| cell.set(b),
             move |b, _, window, _| {
                 let o = b.origin;
                 let (w, hh) = (b.size.width.as_f32(), b.size.height.as_f32());
+                let rail_h = 10.0;
+                let plot_h = (hh - rail_h).max(16.0);
                 window.paint_quad(fill(b, color::canvas()));
+                // Subtle horizontal reference grid lines (25%, 50%, 75%)
+                for frac in [0.25, 0.5, 0.75] {
+                    let gy = o.y + px(plot_h * frac);
+                    window.paint_quad(fill(Bounds { origin: point(o.x, gy), size: size(px(w), px(1.)) }, gpui_kit::white().opacity(0.06)));
+                }
                 let span = (hi - lo).max(1e-12);
                 let xf = |v: f32| ((v - lo) / span * w).clamp(0.0, w);
+                let (mx0, mx1) = (xf(min), xf(max));
                 if let Some(h) = &h {
-                    // Log counts: faint tails stay visible
-                    let peak = h.bins.iter().map(|&c| (c as f32 + 1.0).ln()).fold(0.0, f32::max).max(1e-6);
+                    let val = |count: u32| if log_scale { (count as f32 + 1.0).ln() } else { count as f32 };
+                    let peak = h.bins.iter().map(|&cnt| val(cnt)).fold(0.0f32, f32::max).max(1e-6);
                     let n = h.bins.len() as f32;
                     let hspan = (h.hi - h.lo).max(1e-12);
                     for (i, &count) in h.bins.iter().enumerate() {
@@ -288,16 +299,53 @@ impl DisplayPanel {
                         let v0 = h.lo + i as f32 / n * hspan;
                         let v1 = h.lo + (i as f32 + 1.0) / n * hspan;
                         let (x0, x1) = (xf(v0), xf(v1).max(xf(v0) + 1.0));
-                        let bh = (count as f32 + 1.0).ln() / peak * (hh - 4.0);
-                        window.paint_quad(fill(Bounds { origin: point(o.x + px(x0), o.y + px(hh - bh)), size: size(px(x1 - x0), px(bh)) }, col.opacity(0.75)));
+                        let bh = (val(count) / peak * (plot_h - 4.0)).max(1.0);
+                        let inside = x1 >= mx0 && x0 <= mx1;
+                        let alpha = if inside { 0.85 } else { 0.28 };
+                        window.paint_quad(fill(Bounds { origin: point(o.x + px(x0), o.y + px(plot_h - bh)), size: size(px(x1 - x0), px(bh)) }, col.opacity(alpha)));
                     }
                 }
-                // Outside the window: shaded
-                let (mx0, mx1) = (xf(min), xf(max));
-                window.paint_quad(fill(Bounds { origin: o, size: size(px(mx0), px(hh)) }, gpui_kit::black().opacity(0.45)));
-                window.paint_quad(fill(Bounds { origin: point(o.x + px(mx1), o.y), size: size(px((w - mx1).max(0.0)), px(hh)) }, gpui_kit::black().opacity(0.45)));
+                // Outside the window: subtle dark mask
+                window.paint_quad(fill(Bounds { origin: o, size: size(px(mx0), px(plot_h)) }, gpui_kit::black().opacity(0.32)));
+                window.paint_quad(fill(Bounds { origin: point(o.x + px(mx1), o.y), size: size(px((w - mx1).max(0.0)), px(plot_h)) }, gpui_kit::black().opacity(0.32)));
+                // Gamma transfer curve across [mx0..mx1]
+                let mut curve = PathBuilder::stroke(px(1.5));
+                let steps = 24;
+                for s in 0..=steps {
+                    let t = s as f32 / steps as f32;
+                    let x = mx0 + t * (mx1 - mx0);
+                    let y = (1.0 - t.powf(1.0 / gamma)) * (plot_h - 4.0) + 2.0;
+                    let pt = point(o.x + px(x), o.y + px(y));
+                    if s == 0 {
+                        curve.move_to(pt);
+                    } else {
+                        curve.line_to(pt);
+                    }
+                }
+                if let Ok(path) = curve.build() {
+                    window.paint_path(path, gpui_kit::white().opacity(0.85));
+                }
+                // Vertical window bounds + bottom rail
+                window.paint_quad(fill(Bounds { origin: point(o.x, o.y + px(plot_h)), size: size(px(w), px(rail_h)) }, color::control()));
                 for x in [mx0, mx1] {
-                    window.paint_quad(fill(Bounds { origin: point(o.x + px(x - 1.0), o.y), size: size(px(2.), px(hh)) }, gpui_kit::white()));
+                    window.paint_quad(fill(Bounds { origin: point(o.x + px(x - 0.5), o.y), size: size(px(1.5), px(plot_h)) }, gpui_kit::white().opacity(0.8)));
+                }
+                // Draggable black & white handle triangles on the bottom rail
+                for (x, is_white) in [(mx0, false), (mx1, true)] {
+                    let cx_p = x.clamp(5.0, (w - 5.0).max(5.0));
+                    let tip = point(o.x + px(cx_p), o.y + px(plot_h + 1.0));
+                    let bl = point(o.x + px(cx_p - 5.0), o.y + px(hh - 1.0));
+                    let br = point(o.x + px(cx_p + 5.0), o.y + px(hh - 1.0));
+                    let mut tri = PathBuilder::fill();
+                    tri.add_polygon(&[tip, br, bl], true);
+                    if let Ok(p) = tri.build() {
+                        window.paint_path(p, if is_white { gpui_kit::white() } else { gpui_kit::black() });
+                    }
+                    let mut outline = PathBuilder::stroke(px(1.0));
+                    outline.add_polygon(&[tip, br, bl], true);
+                    if let Ok(p) = outline.build() {
+                        window.paint_path(p, if is_white { gpui_kit::black().opacity(0.75) } else { gpui_kit::white().opacity(0.9) });
+                    }
                 }
             },
         )
@@ -353,18 +401,6 @@ impl DisplayPanel {
         }
         let range = self.range(c, cx);
         let (store, id) = (self.store.clone(), img.id.clone());
-        let set = {
-            let (store, id, ch) = (store.clone(), id.clone(), ch.clone());
-            Rc::new(move |f: &dyn Fn(&mut ChannelDoc), cx: &mut gpui_kit::App| {
-                let mut d = ch.clone();
-                f(&mut d);
-                let id = id.clone();
-                store.update(cx, |s, cx| {
-                    let _ = s.execute(Command::SetChannel { image: id, channel: c, display: d }, cx);
-                });
-            })
-        };
-        let s1 = set.clone();
         let auto = {
             let (store, id, ch, py) = (store.clone(), id.clone(), ch.clone(), py.clone());
             move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
@@ -389,26 +425,14 @@ impl DisplayPanel {
             w.update(cx, |w, cx| w.set(rgb, cx));
         }
         let page = self.page;
-        // The channel itself (shown, colour, name) above the pages
+        let hex = format!("#{:02X}{:02X}{:02X}", ch.color[0], ch.color[1], ch.color[2]);
+        // Clean channel header: colour dot + name + muted hex (visibility lives in the Layers tree)
         let head = h_flex()
-                    .gap(px(theme::SM))
-                    .child(Checkbox::new(SharedString::from(format!("ch-visible-{c}"))).checked(ch.visible).tooltip("Shown").on_click(move |on: &bool, _, cx| {
-                        let on = *on;
-                        s1(&move |d: &mut ChannelDoc| d.visible = on, cx)
-                    }))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("ch-color-{c}")))
-                            .cursor_pointer()
-                            .rounded(px(3.))
-                            .when(page == ChannelPage::Colour, |d| d.border_1().border_color(color::accent_hover()))
-                            .child(swatch(ch.color, 20.))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.page = ChannelPage::Colour;
-                                cx.notify();
-                            })),
-                    )
-                    .child(div().flex_1().min_w_0().text_sm().font_weight(FontWeight::SEMIBOLD).child(ch.label.clone()));
+            .gap(px(theme::SM))
+            .items_center()
+            .child(div().flex_none().size(px(10.)).rounded_full().bg(theme::rgb8(ch.color)))
+            .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(ch.label.clone()))
+            .child(div().flex_none().text_xs().font_family("monospace").text_color(color::text_muted()).child(hex));
         let me = cx.entity().downgrade();
         let tabs = page_tabs(
             "ch-page",
@@ -423,19 +447,56 @@ impl DisplayPanel {
         );
         // Colour: the wheel
         let colour = v_flex().gap(px(theme::SM)).children(wheel_open.map(|w| h_flex().w_full().justify_center().child(w)));
-        // Levels: the histogram with its black and white points, gamma
+        // Levels: Log/Lin toggle + Auto, upgraded histogram with gamma curve & handles, scrubbable black/white, gamma slider
+        let hist_log = self.hist_log;
+        let span = (range.1 - range.0).max(1e-6);
+        let (st_lo, id_lo, ch_lo) = (store.clone(), id.clone(), ch.clone());
+        let (st_hi, id_hi, ch_hi) = (store.clone(), id.clone(), ch.clone());
         let levels = v_flex()
             .gap(px(theme::SM))
-            .child(h_flex().child(div().flex_1()).child(Button::new(SharedString::from(format!("ch-auto-{c}"))).ghost().xsmall().label("Auto").tooltip("Black and white points from the 0.1–99.8 % percentiles").on_click(auto)))
+            .child(
+                h_flex()
+                    .gap(px(theme::XS))
+                    .items_center()
+                    .child(
+                        Button::new(SharedString::from(format!("ch-hist-scale-{c}")))
+                            .ghost()
+                            .xsmall()
+                            .label(if hist_log { "Log" } else { "Lin" })
+                            .tooltip("Toggle logarithmic / linear histogram count scale")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hist_log = !this.hist_log;
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(Button::new(SharedString::from(format!("ch-auto-{c}"))).ghost().xsmall().label("Auto").tooltip("Black and white points from the 0.1–99.8 % percentiles").on_click(auto)),
+            )
             .child(self.histogram(c, hist, &ch, range, cx))
             .child(
                 h_flex()
+                    .items_center()
                     .text_xs()
-                    .font_family("monospace")
                     .text_color(color::text_muted())
-                    .child(div().child(format!("black {}", trim(ch.min))))
+                    .child(div().pr(px(2.)).child("Black"))
+                    .child(scrub_label(format!("ch-black-{c}"), trim(ch.min), move |d, _, cx| {
+                        let mut doc = ch_lo.clone();
+                        doc.min = (doc.min + d * span * 0.01).clamp(range.0, doc.max - 1e-6);
+                        let id = id_lo.clone();
+                        st_lo.update(cx, |s, cx| {
+                            let _ = s.execute(Command::SetChannel { image: id, channel: c, display: doc }, cx);
+                        });
+                    }))
                     .child(div().flex_1())
-                    .child(div().child(format!("white {}", trim(ch.max)))),
+                    .child(div().pr(px(2.)).child("White"))
+                    .child(scrub_label(format!("ch-white-{c}"), trim(ch.max), move |d, _, cx| {
+                        let mut doc = ch_hi.clone();
+                        doc.max = (doc.max + d * span * 0.01).clamp(doc.min + 1e-6, range.1);
+                        let id = id_hi.clone();
+                        st_hi.update(cx, |s, cx| {
+                            let _ = s.execute(Command::SetChannel { image: id, channel: c, display: doc }, cx);
+                        });
+                    })),
             )
             .child(row("Gamma", {
                 let (store, id, ch) = (store.clone(), id.clone(), ch.clone());
@@ -450,104 +511,77 @@ impl DisplayPanel {
                     });
                 })
             }));
-        // Its processing (dsp-kitchen's card)
-        let mut processing = v_flex().gap(px(theme::XS)).child(
-            h_flex()
-                .gap(px(theme::SM))
-                .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child("Processing"))
-                .children(view_style.clone().zip(view.clone()).map(|((name, style), vid)| {
-                    let (a, b) = (store.clone(), store.clone());
-                    let (n1, n2, s1, s2, v1, v2) = (name.clone(), name, style.clone(), style.clone(), vid.clone(), vid);
-                    h_flex()
-                        .gap(px(2.))
-                        .p(px(2.))
-                        .rounded(px(6.))
-                        .bg(color::control())
-                        .child(Button::new("proc-processed").ghost().xsmall().label("Processed").selected(style.visible).on_click(move |_, _, cx| {
-                            let style = ViewStyle { visible: true, ..s1.clone() };
-                            let (id, name) = (v1.clone(), n1.clone());
-                            a.update(cx, |s, cx| {
-                                let _ = s.execute(Command::SetView { id, name, style }, cx);
-                            });
-                        }))
-                        .child(Button::new("proc-raw").ghost().xsmall().label("Raw").selected(!style.visible).on_click(move |_, _, cx| {
-                            let style = ViewStyle { visible: false, ..s2.clone() };
-                            let (id, name) = (v2.clone(), n2.clone());
-                            b.update(cx, |s, cx| {
-                                let _ = s.execute(Command::SetView { id, name, style }, cx);
-                            });
-                        }))
-                })),
-        );
-        if step_rows.is_empty() {
-            processing = processing.child(div().text_xs().text_color(color::text_muted()).child("Raw: no step yet."));
-        }
-        for (i, (sid, title, sub, icon, on)) in step_rows.into_iter().enumerate() {
-            let key = format!("node:{sid}");
-            let selected = selected_steps.contains(&key);
-            let (st_sel, st_on, st_del) = (store.clone(), store.clone(), store.clone());
-            let (k2, id_on, id_del) = (key.clone(), sid.clone(), sid.clone());
-            processing = processing.child(
-                h_flex()
-                    .id(SharedString::from(format!("proc-step-{i}")))
-                    .h(px(28.))
-                    .px(px(theme::XS))
-                    .gap(px(theme::SM))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(color::accent().opacity(0.3)))
-                    .when(!selected, |d| d.hover(|d| d.bg(color::control())))
-                    .child(Icon::new(icon).small().text_color(if on { color::text() } else { color::text_muted() }))
-                    .child(div().flex_1().min_w_0().truncate().text_sm().when(!on, |d| d.text_color(color::text_muted())).child(title))
-                    .child(div().flex_none().max_w(px(110.)).truncate().text_xs().text_color(color::text_muted()).child(sub))
-                    .child(Button::new(SharedString::from(format!("proc-on-{i}"))).ghost().xsmall().icon(Icon::new(if on { IconName::Eye } else { IconName::EyeOff })).tooltip(if on { "Turn off (passes its input through)" } else { "Turn on" }).on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        let id = id_on.clone();
-                        st_on.update(cx, |s, cx| {
-                            let _ = s.execute(Command::EnableNode { id, enabled: !on }, cx);
-                        });
-                    }))
-                    .child(Button::new(SharedString::from(format!("proc-del-{i}"))).ghost().xsmall().icon(Icon::new(IconName::Trash)).tooltip("Remove the step").on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        let id = id_del.clone();
-                        st_del.update(cx, |s, cx| s.remove_step(id, cx));
-                    }))
-                    .on_click(move |_, _, cx| st_sel.update(cx, |s, cx| s.select_layer(k2.clone(), false, cx))),
-            );
-        }
-        let (st_add, img_add, view_add) = (store, img.id.clone(), view);
-        processing = processing.child(Button::new("proc-add").outline().small().w_full().icon(Icon::new(IconName::Plus)).label("Add step").dropdown_menu(move |menu: PopupMenu, _, _| {
-            let mut m = menu.scrollable(true).max_h(px(480.));
+        // Compact single-line action row (Processed/Raw toggle + "+ Add op" with family submenus);
+        // the step list itself lives directly under each channel in the Layers tree below.
+        let (st_add, img_add, view_add) = (store.clone(), img.id.clone(), view.clone());
+        let add_op = Button::new("proc-add").outline().xsmall().icon(Icon::new(IconName::Plus)).label("Add op").dropdown_menu(move |menu: PopupMenu, window, cx| {
+            let mut m = menu;
             for cat in operations() {
-                m = m.label(cat.name);
-                for it in cat.items {
-                    let Template::Op(op) = it.template else { continue };
-                    let (st, image, view) = (st_add.clone(), img_add.clone(), view_add.clone());
-                    m = m.item(PopupMenuItem::new(it.label).icon(Icon::new(cat.icon)).on_click(move |_, _, cx| {
-                        let (op, image, view) = (op.clone(), image.clone(), view.clone());
-                        st.update(cx, |s, cx| {
-                            let title = op.title();
-                            if s.execute(Command::ApplyOp { op, view, image, channel: c }, cx).is_ok() {
-                                s.set_status(format!("{title} added to this channel's processing"), cx);
-                            }
-                        });
-                    }));
+                let (st, image, view) = (st_add.clone(), img_add.clone(), view_add.clone());
+                let items: Vec<_> = cat.items.into_iter().filter_map(|it| match it.template {
+                    Template::Op(op) => Some((it.label, op)),
+                    _ => None,
+                }).collect();
+                if items.is_empty() {
+                    continue;
                 }
+                let icon = cat.icon;
+                m = m.submenu(cat.name, window, cx, move |mut sub, _, _| {
+                    for (label, op) in &items {
+                        let (st, image, view, op) = (st.clone(), image.clone(), view.clone(), op.clone());
+                        sub = sub.item(PopupMenuItem::new(label.clone()).icon(Icon::new(icon)).on_click(move |_, _, cx| {
+                            let (op, image, view) = (op.clone(), image.clone(), view.clone());
+                            st.update(cx, |s, cx| {
+                                let title = op.title();
+                                if s.execute(Command::ApplyOp { op, view, image, channel: c }, cx).is_ok() {
+                                    s.set_status(format!("{title} added to this channel's processing"), cx);
+                                }
+                            });
+                        }));
+                    }
+                    sub
+                });
             }
             m
-        }));
+        });
+        let proc_bar = h_flex()
+            .gap(px(theme::XS))
+            .child(add_op)
+            .child(div().flex_1())
+            .children(view_style.clone().zip(view.clone()).map(|((name, style), vid)| {
+                let (a, b) = (store.clone(), store.clone());
+                let (n1, n2, s1, s2, v1, v2) = (name.clone(), name, style.clone(), style.clone(), vid.clone(), vid);
+                h_flex()
+                    .gap(px(2.))
+                    .p(px(2.))
+                    .rounded(px(6.))
+                    .bg(color::control())
+                    .child(Button::new("proc-processed").ghost().xsmall().label("Processed").selected(style.visible).on_click(move |_, _, cx| {
+                        let style = ViewStyle { visible: true, ..s1.clone() };
+                        let (id, name) = (v1.clone(), n1.clone());
+                        a.update(cx, |s, cx| {
+                            let _ = s.execute(Command::SetView { id, name, style }, cx);
+                        });
+                    }))
+                    .child(Button::new("proc-raw").ghost().xsmall().label("Raw").selected(!style.visible).on_click(move |_, _, cx| {
+                        let style = ViewStyle { visible: false, ..s2.clone() };
+                        let (id, name) = (v2.clone(), n2.clone());
+                        b.update(cx, |s, cx| {
+                            let _ = s.execute(Command::SetView { id, name, style }, cx);
+                        });
+                    }))
+            }));
+        let _ = (&step_rows, &selected_steps);
         let body = match page {
             ChannelPage::Colour => colour.into_any_element(),
             ChannelPage::Levels => levels.into_any_element(),
         };
-        // Processing is always there (first-class, not a tab), under the display pages
         v_flex()
-            .gap(px(theme::MD))
+            .gap(px(theme::SM))
             .child(head)
             .child(tabs)
             .child(body)
-            .child(div().h(px(1.)).w_full().bg(color::border()))
-            .child(processing)
+            .child(proc_bar)
             .into_any_element()
     }
 

@@ -135,7 +135,12 @@ pub fn summary(op: &Op) -> String {
     if let Some(m) = v.as_object() {
         for (k, x) in m {
             if k != "op" {
-                parts.push(format!("{} {}", k.replace('_', " "), crate::ui::param_editor::trim_number(x.as_f64().unwrap_or(0.0))));
+                let val = match x {
+                    serde_json::Value::Bool(b) => if *b { "on".to_string() } else { "off".to_string() },
+                    serde_json::Value::String(s) => s.clone(),
+                    other => crate::ui::param_editor::trim_number(other.as_f64().unwrap_or(0.0)),
+                };
+                parts.push(format!("{} {val}", k.replace('_', " ")));
             }
         }
     }

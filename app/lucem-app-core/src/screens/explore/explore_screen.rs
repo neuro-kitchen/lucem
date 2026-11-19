@@ -69,12 +69,14 @@ pub struct ExploreView {
     side: Option<Tab>,
     last_side: Tab,
     side_w: f32,
+    /// Shared click-to-type / drag-to-scrub editing state for numeric pills in the options bar.
+    scrub: Entity<crate::ui::scrub_input::ScrubState>,
     _subs: Vec<Subscription>,
 }
 
 /// The right rail's panels, top to bottom (dsp-kitchen's rail: one icon per panel), and where a
 /// divider goes (after the first three: what is used most).
-const RAIL: [Tab; 6] = [Tab::Layers, Tab::Histology, Tab::Metadata, Tab::Selection, Tab::Notes, Tab::History];
+const RAIL: [Tab; 6] = [Tab::Layers, Tab::Histology, Tab::Selection, Tab::Notes, Tab::Metadata, Tab::History];
 const RAIL_SPLIT: usize = 3;
 /// The Navigator's height at the bottom of the Layers panel (open).
 const NAVIGATOR_H: f32 = 170.;
@@ -111,7 +113,9 @@ impl ExploreView {
         dock.update(cx, |d, cx| {
             d.set_center(DockLayout::tabs().panel_view(panel_handle(first.clone()), cx), window, cx);
         });
+        let scrub = cx.new(|cx| crate::ui::scrub_input::ScrubState::new(window, cx));
         let subs = vec![
+            cx.observe(&scrub, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, |this: &mut Self, _, e: &AppEvent, window, cx| {
             if let AppEvent::View(req) = e {
                 this.on_request(*req, window, cx);
@@ -145,6 +149,7 @@ impl ExploreView {
             side: prefs.right_open.then(|| prefs.right_tab.as_deref().and_then(Tab::from_key).filter(|t| RAIL.contains(t)).unwrap_or(Tab::Layers)),
             last_side: prefs.right_tab.as_deref().and_then(Tab::from_key).filter(|t| RAIL.contains(t)).unwrap_or(Tab::Layers),
             side_w: RIGHT_W,
+            scrub,
             _subs: subs,
         };
         if prefs.pipeline_dock {
@@ -521,7 +526,7 @@ impl Render for ExploreView {
         v_flex()
             .size_full()
             .relative()
-            .child(options_bar(&self.store, &self.canvas, toggles, cx))
+            .child(options_bar(&self.store, &self.canvas, &self.scrub, toggles, cx))
             .child(
                 h_flex()
                     .flex_1()

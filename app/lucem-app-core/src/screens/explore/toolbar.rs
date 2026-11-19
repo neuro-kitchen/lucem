@@ -4,15 +4,17 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{div, px, App, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _};
+use gpui_kit::{div, px, App, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _};
 
 use crate::data::store::Store;
 use crate::domain::tool::Tool;
 use crate::screens::explore::canvas::ImageCanvas;
+use crate::ui::scrub_input::{scrub_number, ScrubState};
 use crate::ui::theme::{self, color};
-use crate::ui::widgets::{divider_v, format_area, format_length, stepper, swatch, MenuSelect};
+use crate::ui::widgets::{divider_v, format_area, format_length, swatch, MenuSelect};
 
 /// The tool column at the left edge of Explore.
 pub fn tool_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> impl IntoElement + use<> {
@@ -59,7 +61,7 @@ fn hint(text: impl Into<SharedString>) -> impl IntoElement {
 }
 
 /// The options bar of the active tool.
-pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing: gpui_kit::AnyElement, cx: &App) -> impl IntoElement + use<> {
+pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, scrub: &Entity<ScrubState>, trailing: gpui_kit::AnyElement, cx: &App) -> impl IntoElement + use<> {
     let s = store.read(cx);
     let t = s.tool.clone();
     let classes: Vec<String> = s.doc.classes.iter().filter(|c| c.name != "Measurement").map(|c| c.name.clone()).collect();
@@ -70,8 +72,33 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
     let zoom = canvas.read(cx).zoom;
     let img = s.doc.active().cloned();
     let hist = img.as_ref().and_then(|i| s.histograms.get(&i.id)).and_then(|h| h.get(t.threshold_channel).cloned());
-    let mut bar = h_flex().id("options-bar").flex_none().h(px(theme::OPTIONS_BAR_H)).px(px(theme::MD)).gap(px(theme::SM)).items_center().bg(color::panel()).border_b_1().border_color(color::border());
-    bar = bar.child(Icon::new(t.tool.icon()).small().text_color(color::text_muted())).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t.tool.name())).child(divider_v());
+    let mut bar = h_flex()
+        .id("options-bar")
+        .flex_none()
+        .w_full()
+        .min_h(px(theme::OPTIONS_BAR_H))
+        .px(px(theme::MD))
+        .py(px(theme::XS))
+        .flex_wrap()
+        .gap_x(px(theme::SM))
+        .gap_y(px(theme::XS))
+        .items_center()
+        .bg(color::panel())
+        .border_b_1()
+        .border_color(color::border());
+    let tool_tip = t.tool.hint();
+    bar = bar
+        .child(
+            h_flex()
+                .id("options-tool-badge")
+                .flex_none()
+                .gap(px(theme::XS))
+                .items_center()
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tool_tip).build(w, cx))
+                .child(Icon::new(t.tool.icon()).small().text_color(color::text_muted()))
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t.tool.name())),
+        )
+        .child(divider_v());
     // Combine (Affinity's context toolbar): only while masks or classes are selected in Layers
     let masks = s.selected_masks().len();
     if masks > 0 {
@@ -91,8 +118,29 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
             .child(op("ctx-shrink", IconName::Shrink, format!("Shrink the first by {r} px"), 1, MaskOperation::Op(lucem_pipeline::Op::Erode { radius: r })))
             .child(divider_v());
     }
-    // Shapes (Affinity's Add, Subtract, Intersect, Xor): while two or more regions are selected
+    // Shapes (Affinity's Add, Subtract, Intersect, Xor) + QuPath-style Tile Grid inside shape
     let regions = s.doc.active_image.as_ref().map_or(0, |img| s.doc.annotations_of(img).filter(|a| s.sel.shapes.contains(&a.id) && a.shape.is_region()).count());
+    if regions >= 1 {
+        let st_grid = store.clone();
+        bar = bar.child(
+            Button::new("ctx-shape-grid")
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(IconName::LayoutGrid))
+                .label("Grid")
+                .tooltip("Create a clipped tile grid inside the selected shape(s)")
+                .dropdown_menu(move |mut menu: PopupMenu, _, _| {
+                    menu = menu.label("Tile size inside shape");
+                    for size in [128.0, 256.0, 512.0, 1024.0] {
+                        let st = st_grid.clone();
+                        menu = menu.item(PopupMenuItem::new(format!("{size:.0} × {size:.0} px")).on_click(move |_, _, cx| {
+                            st.update(cx, |s, cx| s.create_tile_grid(size, 0.0, true, cx));
+                        }));
+                    }
+                    menu
+                }),
+        );
+    }
     if regions >= 2 {
         use crate::domain::boolean::ShapeOp;
         bar = bar.child(label("Shapes"));
@@ -107,6 +155,8 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
             bar = bar.child(Button::new(SharedString::from(format!("ctx-shape-{}", op.title().to_lowercase()))).ghost().xsmall().icon(Icon::new(icon)).tooltip(op.hint()).on_click(move |_, _, cx| st.update(cx, |s, cx| s.combine_shapes(op, cx))));
         }
         bar = bar.child(divider_v());
+    } else if regions >= 1 {
+        bar = bar.child(divider_v());
     }
 
     let class_picker = || {
@@ -118,11 +168,32 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
         })))
     };
     let brush_size = || {
-        let size = if t.brush_in_image { format_length(t.brush_image_px * 2.0, um) } else { format!("{:.0} px", t.brush_px * 2.0) };
-        let st = store.clone();
-        h_flex().gap(px(theme::XS)).child(label("Size")).child(stepper("brush-size", size, move |d, _, cx| {
-            st.update(cx, |s, cx| s.update_tool(|t| t.resize_brush(d), cx))
-        }))
+        let size_label = if t.brush_in_image { format_length(t.brush_image_px * 2.0, um) } else { format!("{:.0} px", t.brush_px * 2.0) };
+        let edit_val = if t.brush_in_image { format!("{:.1}", t.brush_image_px * 2.0) } else { format!("{:.0}", t.brush_px * 2.0) };
+        let (st_step, st_set, in_img) = (store.clone(), store.clone(), t.brush_in_image);
+        h_flex().gap(px(theme::XS)).child(label("Size")).child(scrub_number(
+            scrub,
+            "brush-size",
+            size_label,
+            edit_val,
+            "Drag to scrub · Click to type · [ ] or Ctrl+/- resize",
+            move |d, _, cx| st_step.update(cx, |s, cx| s.update_tool(|t| t.resize_brush(d), cx)),
+            move |v, _, cx| {
+                st_set.update(cx, |s, cx| {
+                    s.update_tool(
+                        |t| {
+                            if in_img {
+                                t.brush_image_px = (v * 0.5).clamp(1.0, 2000.0);
+                            } else {
+                                t.brush_px = (v as f32 * 0.5).clamp(2.0, 200.0);
+                            }
+                        },
+                        cx,
+                    )
+                })
+            },
+            cx,
+        ))
     };
     match t.tool {
         Tool::Brush | Tool::Eraser | Tool::Wand => {
@@ -142,32 +213,35 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
                 });
             }));
             if t.tool == Tool::Wand {
+                let (st_step, st_set) = (store.clone(), store.clone());
+                bar = bar.child(divider_v()).child(label("Tolerance")).child(scrub_number(
+                    scrub,
+                    "wand-tol",
+                    format!("{:.0} %", t.wand_tolerance * 100.0),
+                    format!("{:.0}", t.wand_tolerance * 100.0),
+                    "Drag to scrub · Click to type (%) · Fills pixels like the centre",
+                    move |d, _, cx| st_step.update(cx, |s, cx| s.update_tool(|t| t.wand_tolerance = (t.wand_tolerance + d * 0.05).clamp(0.01, 1.0), cx)),
+                    move |v, _, cx| st_set.update(cx, |s, cx| s.update_tool(|t| t.wand_tolerance = (v as f32 / 100.0).clamp(0.01, 1.0), cx)),
+                    cx,
+                ));
+            } else if t.tool == Tool::Brush {
                 let st = store.clone();
-                bar = bar.child(divider_v()).child(label("Tolerance")).child(stepper("wand-tol", format!("{:.0} %", t.wand_tolerance * 100.0), move |d, _, cx| {
-                    st.update(cx, |s, cx| s.update_tool(|t| t.wand_tolerance = (t.wand_tolerance + d * 0.05).clamp(0.01, 1.0), cx))
+                bar = bar.child(Checkbox::new("brush-fill").checked(t.brush_fill).label("Fill when closed").on_click(move |on: &bool, _, cx| {
+                    let on = *on;
+                    st.update(cx, |s, cx| s.update_tool(|t| t.brush_fill = on, cx));
                 }));
-                bar = bar.child(hint("Fills pixels like the one under the centre (visible channels)"));
-            } else {
-                if t.tool == Tool::Brush {
-                    let st = store.clone();
-                    bar = bar.child(Checkbox::new("brush-fill").checked(t.brush_fill).label("Fill when closed").on_click(move |on: &bool, _, cx| {
-                        let on = *on;
-                        st.update(cx, |s, cx| s.update_tool(|t| t.brush_fill = on, cx));
-                    }));
-                }
-                bar = bar.child(hint("[ ] resize · Shift: straight line"));
             }
         }
         Tool::Threshold => {
             let names: Vec<SharedString> = img.as_ref().map(|i| i.channels.iter().map(|c| SharedString::from(c.label.clone())).collect()).unwrap_or_default();
             let span = hist.as_ref().map_or(1.0, |h| (h.hi - h.lo).max(1e-6));
             let st_c = store.clone();
-            let st_v = store.clone();
+            let (st_v, st_v2) = (store.clone(), store.clone());
             let otsu = hist.as_ref().map(|h| h.otsu());
             let st_o = store.clone();
             let st_a = store.clone();
-            let st_s = store.clone();
-            let st_m = store.clone();
+            let (st_s, st_s2) = (store.clone(), store.clone());
+            let (st_m, st_m2) = (store.clone(), store.clone());
             let (st_make, st_pipe) = (store.clone(), store.clone());
             bar = bar
                 .child(label("Channel"))
@@ -186,16 +260,43 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
                     })
                 })))
                 .child(label("Value"))
-                .child(stepper("thr-value", trim(t.threshold_value), move |d, _, cx| st_v.update(cx, |s, cx| s.update_tool(|t| t.threshold_value += d * span * 0.01, cx))))
+                .child(scrub_number(
+                    scrub,
+                    "thr-value",
+                    trim(t.threshold_value),
+                    trim(t.threshold_value),
+                    "Drag to scrub · Click to type exact threshold",
+                    move |d, _, cx| st_v.update(cx, |s, cx| s.update_tool(|t| t.threshold_value += d * span * 0.01, cx)),
+                    move |v, _, cx| st_v2.update(cx, |s, cx| s.update_tool(|t| t.threshold_value = v as f32, cx)),
+                    cx,
+                ))
                 .children(otsu.map(|o| {
                     Button::new("thr-otsu").ghost().xsmall().label("Otsu").tooltip("The Otsu threshold of the whole image (coarsest level)").on_click(move |_, _, cx| st_o.update(cx, |s, cx| s.update_tool(|t| t.threshold_value = o, cx)))
                 }))
                 .child(Button::new("thr-above").ghost().xsmall().label(if t.threshold_above { "Above" } else { "Below" }).tooltip("Keep pixels above (bright objects) or below the value").on_click(move |_, _, cx| st_a.update(cx, |s, cx| s.update_tool(|t| t.threshold_above = !t.threshold_above, cx))))
                 .child(divider_v())
                 .child(label("Smooth"))
-                .child(stepper("thr-sigma", format_length(t.threshold_sigma, um), move |d, _, cx| st_s.update(cx, |s, cx| s.update_tool(|t| t.threshold_sigma = (t.threshold_sigma * if d > 0.0 { 1.5 } else { 1.0 / 1.5 }).clamp(0.0, 200.0).max(if d > 0.0 { 0.5 } else { 0.0 }), cx))))
+                .child(scrub_number(
+                    scrub,
+                    "thr-sigma",
+                    format_length(t.threshold_sigma, um),
+                    format!("{:.2}", t.threshold_sigma),
+                    "Drag to scrub · Click to type (px) · [ ] or Ctrl+/-",
+                    move |d, _, cx| st_s.update(cx, |s, cx| s.update_tool(|t| t.threshold_sigma = (t.threshold_sigma * if d > 0.0 { 1.2 } else { 1.0 / 1.2 }).clamp(0.0, 200.0).max(if d > 0.0 { 0.5 } else { 0.0 }), cx)),
+                    move |v, _, cx| st_s2.update(cx, |s, cx| s.update_tool(|t| t.threshold_sigma = v.clamp(0.0, 200.0), cx)),
+                    cx,
+                ))
                 .child(label("Min"))
-                .child(stepper("thr-min", format_area(t.threshold_min_area, um), move |d, _, cx| st_m.update(cx, |s, cx| s.update_tool(|t| t.threshold_min_area = (t.threshold_min_area * if d > 0.0 { 1.5 } else { 1.0 / 1.5 }).clamp(1.0, 1.0e9), cx))))
+                .child(scrub_number(
+                    scrub,
+                    "thr-min",
+                    format_area(t.threshold_min_area, um),
+                    format!("{:.0}", t.threshold_min_area),
+                    "Drag to scrub · Click to type minimum area (px²)",
+                    move |d, _, cx| st_m.update(cx, |s, cx| s.update_tool(|t| t.threshold_min_area = (t.threshold_min_area * if d > 0.0 { 1.2 } else { 1.0 / 1.2 }).clamp(1.0, 1.0e9), cx)),
+                    move |v, _, cx| st_m2.update(cx, |s, cx| s.update_tool(|t| t.threshold_min_area = v.clamp(1.0, 1.0e9), cx)),
+                    cx,
+                ))
                 .child(divider_v())
                 .child(class_picker())
                 .child(Button::new("thr-make").primary().small().icon(Icon::new(IconName::Shapes)).label("Create annotations").tooltip("Segment the whole image with these settings").on_click(move |_, _, cx| st_make.update(cx, |s, cx| s.threshold_to_annotations(cx))))
@@ -224,26 +325,24 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, trailing
                     st.update(cx, |s, cx| s.update_tool(|t| t.sam_through_z = on, cx));
                 }));
             }
-            bar = bar.child(hint(if volume && t.sam_through_z { "Click an object: it is followed plane by plane while the model is sure of it" } else { "Click an object · Alt+click: not this · drag a box" }));
         }
-        Tool::Rect | Tool::Ellipse | Tool::Lasso | Tool::Point => bar = bar.child(class_picker()),
-        Tool::Polygon => bar = bar.child(class_picker()).child(hint("Click corners · Enter or double-click closes · Esc cancels")),
-        Tool::Ruler => bar = bar.child(hint(if um.is_some() { "Drag to measure (µm from the image's pixel size)" } else { "Drag to measure (px: the image has no pixel size)" })),
+        Tool::Rect | Tool::Ellipse | Tool::Lasso | Tool::Point | Tool::Polygon => bar = bar.child(class_picker()),
+        Tool::Ruler | Tool::Zoom | Tool::Hand | Tool::Probe => {}
         Tool::Select => {
             let st = store.clone();
-            bar = bar.child(hint(if selected == 0 { "Click an annotation; Shift adds".to_string() } else { format!("{selected} selected") })).when(selected > 0, |b| {
-                b.child(Button::new("options-delete").ghost().small().icon(Icon::new(IconName::Trash)).label("Delete").on_click(move |_, _, cx| st.update(cx, |s, cx| s.delete_selection(cx))))
+            bar = bar.when(selected > 0, |b| {
+                b.child(hint(format!("{selected} selected")))
+                    .child(Button::new("options-delete").ghost().small().icon(Icon::new(IconName::Trash)).label("Delete").on_click(move |_, _, cx| st.update(cx, |s, cx| s.delete_selection(cx))))
             });
         }
         Tool::Marquee => {
             let objects = s.sel.objects.len();
             let st = store.clone();
-            bar = bar.child(hint(if selected + objects == 0 { "Drag a box around shapes or cells; Shift adds".to_string() } else { format!("{selected} shape(s), {objects} object(s) selected") })).when(selected > 0, |b| {
-                b.child(Button::new("options-delete").ghost().small().icon(Icon::new(IconName::Trash)).label("Delete").on_click(move |_, _, cx| st.update(cx, |s, cx| s.delete_selection(cx))))
+            bar = bar.when(selected + objects > 0, |b| {
+                b.child(hint(format!("{selected} shape(s), {objects} object(s)")))
+                    .when(selected > 0, |b| b.child(Button::new("options-delete").ghost().small().icon(Icon::new(IconName::Trash)).label("Delete").on_click(move |_, _, cx| st.update(cx, |s, cx| s.delete_selection(cx)))))
             });
         }
-        Tool::Zoom => bar = bar.child(hint("Click to zoom in · Alt+click to zoom out")),
-        Tool::Hand | Tool::Probe => bar = bar.child(hint(t.tool.hint())),
     }
     let (c1, c2) = (canvas.clone(), canvas.clone());
     let (st_r, st_v) = (store.clone(), store.clone());
@@ -286,7 +385,9 @@ pub fn overlay_toggles(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: 
     });
     h_flex()
         .flex_none()
-        .gap(px(1.))
+        .flex_wrap()
+        .gap_x(px(2.))
+        .gap_y(px(theme::XS))
         .items_center()
         .child(scope)
         .child(divider_v())
@@ -297,9 +398,8 @@ pub fn overlay_toggles(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: 
         .child(toggle("ov-crosshair", IconName::Crosshair, "Crosshair (3D cursor)", o.crosshair, |o| o.crosshair = !o.crosshair))
         .child(toggle("ov-rulers", IconName::Ruler, "Rulers (Ctrl+R)", o.rulers, |o| o.rulers = !o.rulers))
         .child(divider_v())
-        .child(div().flex_none().text_xs().text_color(color::text_muted()).pl(px(theme::XS)).pr(px(theme::SM)).child("Opacity"))
-        // One line, fixed width: never wraps
-        .child(div().flex_none().w(px(150.)).child(opacity))
+        .child(div().flex_none().text_xs().text_color(color::text_muted()).pl(px(theme::XS)).pr(px(theme::XS)).child("Opacity"))
+        .child(div().flex_none().w(px(124.)).child(opacity))
 }
 
 fn trim(v: f32) -> String {
