@@ -78,10 +78,11 @@ pub fn operations() -> Vec<Category> {
         .collect()
 }
 
-/// The sources the project offers: each channel of each image, and each image's annotations.
+/// The sources the active image offers: each of its channels and its annotations.
 pub fn sources(doc: &ProjectDoc) -> Category {
     let mut items = Vec::new();
-    for img in &doc.images {
+    let active: Vec<_> = doc.active().into_iter().collect();
+    for img in active {
         for (c, ch) in img.channels.iter().enumerate() {
             items.push(Item { label: format!("{} · {}", img.name, ch.label), hint: "image".into(), template: Template::Source { image: img.id.clone(), channel: c } });
         }

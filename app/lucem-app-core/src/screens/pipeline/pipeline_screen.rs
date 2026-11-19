@@ -394,7 +394,7 @@ impl PipelineView {
         let place = Button::new("tool-dock")
             .ghost()
             .small()
-            .icon(Icon::new(if column { IconName::GripHorizontal } else { IconName::GripVertical }))
+            .icon(Icon::new(IconName::Grip))
             .tooltip("Place the tool bar")
             .dropdown_menu(move |m: PopupMenu, _, _| {
                 let mut m = m.label("Place the tool bar");
@@ -709,11 +709,59 @@ impl Inspector {
                 };
                 self.params.update(cx, |p, cx| p.set_op(&id, op, commit, window, cx));
                 let (store, id2, on) = (self.store.clone(), id.clone(), *enabled);
+                let docs_url = op.docs_url();
+                let desc = op.description();
+                let canvas_next = self.canvas.downgrade();
+                let next_chips: Vec<AnyElement> = op
+                    .next_steps()
+                    .iter()
+                    .filter_map(|tag| lucem_pipeline::Op::by_tag(tag))
+                    .take(3)
+                    .map(|next_op| {
+                        let canvas = canvas_next.clone();
+                        let title = next_op.title();
+                        let tip = next_op.description();
+                        Button::new(SharedString::from(format!("insp-next-{}", next_op.tag())))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Plus))
+                            .label(title)
+                            .tooltip(tip)
+                            .on_click(move |_, _, cx| {
+                                let template = Template::Op(next_op.clone());
+                                let _ = canvas.update(cx, |c, cx| c.add(&template, None, cx));
+                            })
+                            .into_any_element()
+                    })
+                    .collect();
                 v_flex()
                     .gap(px(theme::MD))
+                    .child(div().text_xs().text_color(color::text_muted()).child(desc))
                     .child(Checkbox::new("inspector-enabled").checked(on).label("On (off: passes its input through)").on_click(move |v: &bool, _, cx| Self::exec(&store, Command::EnableNode { id: id2.clone(), enabled: *v }, cx)))
                     .child(Section::new("Parameters").child(self.params.clone()))
-                    .child(div().text_xs().text_color(color::text_muted()).child(format!("{} · margin {} px", super::catalog::signature(op), op.halo())))
+                    .when(!next_chips.is_empty(), |d| {
+                        d.child(
+                            v_flex()
+                                .gap(px(theme::XS))
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child("NEXT STEP"))
+                                .child(h_flex().flex_wrap().gap(px(4.)).children(next_chips)),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(theme::SM))
+                            .child(div().flex_1().text_xs().text_color(color::text_muted()).child(format!("{} · margin {} px", super::catalog::signature(op), op.halo())))
+                            .child(
+                                Button::new("inspector-docs")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::ExternalLink))
+                                    .label("Docs")
+                                    .tooltip(format!("Open GPU kernel source ({})", op.source_rel_path()))
+                                    .on_click(move |_, _, cx| cx.open_url(&docs_url)),
+                            ),
+                    )
                     .into_any_element()
             }
             NodeKind::Source { image, channel } => {

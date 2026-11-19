@@ -633,7 +633,18 @@ pub fn compute_remote(doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest) 
     let Some((_, served)) = lucem_stream::split_remote(&path).map(|(a, p)| (a.to_string(), p.to_string())) else { return out };
     let n_channels = doc.image(&req.image).map_or(0, |i| i.channels.len());
     let processed = doc.graph.processed_channels(&req.image, n_channels);
+    // Skip channel views whose steps are all off (or hidden channel), so disabling an op shows
+    // the clean original channel view instead of drawing a cyan overlay on top.
+    let channel_visible = |c: usize| doc.image(&req.image).and_then(|i| i.channels.get(c)).is_none_or(|d| d.visible);
+    let raw_views: std::collections::HashSet<String> = (0..n_channels)
+        .filter_map(|c| doc.graph.channel_chain(&req.image, c).1.map(|v| (c, v)))
+        .filter(|(c, v)| !processed.values().any(|p| p == v) || !channel_visible(*c))
+        .map(|(_, v)| v)
+        .collect();
     for v in doc.graph.views().filter(|v| doc.graph.images_of(&v.id).contains(&req.image)) {
+        if raw_views.contains(&v.id) {
+            continue;
+        }
         let NodeKind::View { style, .. } = &v.kind else { continue };
         let t0 = Instant::now();
         let base = LayerResult { view: v.id.clone(), image: req.image.clone(), rect: [0.0; 4], layer: None, port: None, error: None, ms: 0.0, level: 0, timings: EvalTimings::default() };

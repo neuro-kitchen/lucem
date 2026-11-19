@@ -414,6 +414,7 @@ pub fn register(registry: &Registry, c: &Ctx) {
         for it in cat.items {
             let Template::Op(op) = it.template.clone() else { continue };
             let (store, pipeline, template) = (s.clone(), pipeline.clone(), it.template.clone());
+            let op_hint = format!("{} · {} [{}]", op.description(), it.hint, op.keywords());
             list.push(
                 CommandSpec::with_args::<OpArgs>(op_id(&it.label), it.label.clone(), cat.icon, move |a, _, cx| {
                     let on_canvas = a.node || store.read(cx).workspace == Workspace::Pipeline;
@@ -425,7 +426,7 @@ pub fn register(registry: &Registry, c: &Ctx) {
                     Ok(Value::Null)
                 })
                 .group(cat.name)
-                .hint(format!("{} · a step on the shown channel, or a node in the Pipeline", it.hint)),
+                .hint(op_hint),
             );
         }
     }

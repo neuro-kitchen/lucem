@@ -126,6 +126,8 @@ pub struct DisplayPanel {
     page: ChannelPage,
     /// Whether the Levels histogram uses a logarithmic count scale (`true`) or linear (`false`).
     hist_log: bool,
+    /// User dismissed the goal-first starter cards on the empty Layers editor.
+    starters_dismissed: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -162,7 +164,7 @@ impl DisplayPanel {
                 cx.notify();
             }
         })];
-        Self { store, bounds: Vec::new(), drag: None, wheel: None, sliding: None, params: cx.new(|_| ParamEditor::new()), page: ChannelPage::Colour, hist_log: true, _subs: subs }
+        Self { store, bounds: Vec::new(), drag: None, wheel: None, sliding: None, params: cx.new(|_| ParamEditor::new()), page: ChannelPage::Colour, hist_log: true, starters_dismissed: false, _subs: subs }
     }
 
     fn channel(&self, c: usize, cx: &Context<Self>) -> Option<(String, ChannelDoc)> {
@@ -571,6 +573,51 @@ impl DisplayPanel {
                         });
                     }))
             }));
+        // Smart next-step chips: predicted biological follow-ups from the last step (or starter ops)
+        let last_op = {
+            let s = self.store.read(cx);
+            steps.last().and_then(|sid| match s.doc.graph.node(sid).map(|n| &n.kind) {
+                Some(NodeKind::Op { op, .. }) => Some(op.clone()),
+                _ => None,
+            })
+        };
+        let suggested_tags: &[&str] = match &last_op {
+            Some(op) => op.next_steps(),
+            None => &["rolling_ball", "gaussian_blur", "li_threshold"],
+        };
+        let next_chips: Vec<AnyElement> = suggested_tags
+            .iter()
+            .filter_map(|tag| lucem_pipeline::Op::by_tag(tag))
+            .take(3)
+            .map(|op| {
+                let (st, img_id, vw) = (store.clone(), img.id.clone(), view.clone());
+                let title = op.title();
+                let desc = op.description();
+                Button::new(SharedString::from(format!("next-chip-{}", op.tag())))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(IconName::Plus))
+                    .label(title)
+                    .tooltip(desc)
+                    .on_click(move |_, _, cx| {
+                        let (op, image, view) = (op.clone(), img_id.clone(), vw.clone());
+                        st.update(cx, |s, cx| {
+                            if s.execute(Command::ApplyOp { op, view, image, channel: c }, cx).is_ok() {
+                                s.set_status(format!("{title} added"), cx);
+                            }
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        let next_row = (!next_chips.is_empty()).then(|| {
+            h_flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .items_center()
+                .child(div().text_xs().text_color(color::text_muted()).child("Next:"))
+                .children(next_chips)
+        });
         let _ = (&step_rows, &selected_steps);
         let body = match page {
             ChannelPage::Colour => colour.into_any_element(),
@@ -582,6 +629,7 @@ impl DisplayPanel {
             .child(tabs)
             .child(body)
             .child(proc_bar)
+            .children(next_row)
             .into_any_element()
     }
 
@@ -765,9 +813,27 @@ impl DisplayPanel {
                 };
                 self.params.update(cx, |p, cx| p.set_op(id, op, commit, window, cx));
                 let (st, id2, on) = (store, id.to_string(), *enabled);
+                let docs_url = op.docs_url();
+                let desc = op.description();
                 v_flex()
-                    .gap(px(theme::MD))
-                    .child(h_flex().gap(px(theme::SM)).child(Icon::new(family_icon(op.family())).small()).child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(op.title())))
+                    .gap(px(theme::SM))
+                    .child(
+                        h_flex()
+                            .gap(px(theme::SM))
+                            .items_center()
+                            .child(Icon::new(family_icon(op.family())).small())
+                            .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).child(op.title()))
+                            .child(
+                                Button::new("step-docs")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::ExternalLink))
+                                    .label("Docs")
+                                    .tooltip(format!("Open GPU kernel source ({})", op.source_rel_path()))
+                                    .on_click(move |_, _, cx| cx.open_url(&docs_url)),
+                            ),
+                    )
+                    .child(div().text_xs().text_color(color::text_muted()).child(desc))
                     .child(Checkbox::new("step-on").checked(on).label("On (off: passes its input through)").on_click(move |v: &bool, _, cx| {
                         let (id, enabled) = (id2.clone(), *v);
                         st.update(cx, |s, cx| {
@@ -786,6 +852,86 @@ impl DisplayPanel {
                     .into_any_element()
             }
         }
+    }
+    /// Goal-first contextual quick actions when an image is open and no layer is selected yet.
+    fn starter_cards(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.starters_dismissed {
+            return hint("Select a channel, shape class, result, or step below to edit it here.");
+        }
+        let s = self.store.read(cx);
+        let Some(img) = s.doc.active().cloned() else {
+            return hint("Open an image to start.");
+        };
+        let is_volume = s.active_pyramid().is_some_and(|p| p.is_volume());
+        let store = self.store.clone();
+        let img_id = img.id.clone();
+        let apply = |id: &'static str, icon: IconName, title: &'static str, sub: &'static str, op: lucem_pipeline::Op| {
+            let (st, img_id) = (store.clone(), img_id.clone());
+            Button::new(id)
+                .ghost()
+                .small()
+                .w_full()
+                .justify_start()
+                .icon(Icon::new(icon))
+                .label(title)
+                .tooltip(sub)
+                .on_click(move |_, _, cx| {
+                    let (op, image) = (op.clone(), img_id.clone());
+                    st.update(cx, |s, cx| {
+                        let (_, view) = s.doc.graph.channel_chain(&image, 0);
+                        let name = op.title();
+                        if s.execute(Command::ApplyOp { op, view, image, channel: 0 }, cx).is_ok() {
+                            s.select_layer("channel:0".into(), false, cx);
+                            s.set_status(format!("{name} applied to channel 0"), cx);
+                        }
+                    });
+                })
+                .into_any_element()
+        };
+        let mut actions: Vec<AnyElement> = Vec::new();
+        if is_volume {
+            let st_vol = store.clone();
+            actions.push(
+                Button::new("starter-3d")
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .justify_start()
+                    .icon(Icon::new(IconName::Box))
+                    .label("Open 3D Volume View")
+                    .tooltip("Inspect this 3D stack with clipping planes and depth-cued MIP")
+                    .on_click(move |_, _, cx| {
+                        st_vol.update(cx, |s, cx| s.request_view(crate::data::store::ViewRequest::Add(crate::data::store::ViewKind::Volume), cx));
+                    })
+                    .into_any_element(),
+            );
+            actions.push(apply("starter-frangi", IconName::SlidersHorizontal, "Enhance vessels / neurites", "Frangi multi-scale ridge filter on channel 0", lucem_pipeline::Op::Frangi { sigma_min: 1.0, sigma_max: 5.0, black_ridges: false }));
+        } else {
+            actions.push(apply("starter-bg", IconName::Sparkles, "Subtract background", "Rolling ball illumination correction on channel 0", lucem_pipeline::Op::RollingBall { radius: 25.0 }));
+            actions.push(apply("starter-li", IconName::Contrast, "Auto-threshold nuclei", "Li minimum cross-entropy segmentation on channel 0", lucem_pipeline::Op::LiThreshold { bins: 256 }));
+        }
+        actions.push(apply("starter-blur", IconName::SlidersHorizontal, "Denoise & smooth", "Gaussian blur (sigma 2) on channel 0", lucem_pipeline::Op::GaussianBlur { sigma: 2.0 }));
+        v_flex()
+            .gap(px(theme::XS))
+            .child(
+                h_flex()
+                    .items_center()
+                    .child(div().flex_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child("QUICK START"))
+                    .child(
+                        Button::new("starter-dismiss")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Close))
+                            .tooltip("Dismiss quick start")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.starters_dismissed = true;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .children(actions)
+            .child(div().pt(px(2.)).text_xs().text_color(color::text_muted()).child("Or pick a channel below, or press F3 to search 52 GPU ops."))
+            .into_any_element()
     }
 }
 
@@ -826,7 +972,7 @@ impl Render for DisplayPanel {
             Target::Class(n) => self.class_editor(&n, cx),
             Target::View(id) => self.view_editor(&id, cx),
             Target::Step(id) => self.step_editor(&id, window, cx),
-            Target::Nothing => hint("Select a channel, a shape class, a result or a step below to edit it here."),
+            Target::Nothing => self.starter_cards(cx),
         };
         div()
             .id("layer-editor")
