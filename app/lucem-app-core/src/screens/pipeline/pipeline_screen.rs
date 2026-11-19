@@ -660,6 +660,43 @@ impl Inspector {
                 .icon(Icon::new(IconName::Play))
                 .label("Run on view")
                 .on_click(move |_, _, cx| store_run.update(cx, |s, cx| s.recompute(cx)));
+            let quick_ops: Vec<AnyElement> = ["rolling_ball", "gaussian_blur", "clahe", "otsu_threshold", "li_threshold", "canny"]
+                .iter()
+                .filter_map(|tag| lucem_pipeline::Op::by_tag(tag))
+                .map(|op| {
+                    let canvas = self.canvas.downgrade();
+                    let st_hov = self.store.clone();
+                    let st_clear = self.store.clone();
+                    let title = op.title();
+                    let op_hov = op.clone();
+                    h_flex()
+                        .id(SharedString::from(format!("pipe-quick-{}", op.tag())))
+                        .px(px(10.))
+                        .h(px(26.))
+                        .gap(px(5.))
+                        .items_center()
+                        .rounded(px(999.))
+                        .border_1()
+                        .border_color(color::border())
+                        .bg(color::panel())
+                        .hover(|d| d.border_color(color::accent_mark()).bg(color::raised()))
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(color::text())
+                        .child(Icon::new(IconName::Plus).xsmall().text_color(color::accent_mark()))
+                        .child(title)
+                        .on_hover(move |enter, _, cx| {
+                            let op = (*enter).then(|| op_hov.clone());
+                            st_hov.update(cx, |s, cx| s.set_hovered_op(op, cx));
+                        })
+                        .on_click(move |_, _, cx| {
+                            st_clear.update(cx, |s, cx| s.set_hovered_op(None, cx));
+                            let template = Template::Op(op.clone());
+                            let _ = canvas.update(cx, |c, cx| c.add(&template, None, cx));
+                        })
+                        .into_any_element()
+                })
+                .collect();
             return v_flex()
                 .gap(px(theme::MD))
                 .child(
@@ -668,6 +705,21 @@ impl Inspector {
                         .child(row("Graph", div().text_sm().font_family("monospace").child(format!("{n_nodes} nodes · {n_edges} edges")))),
                 )
                 .child(h_flex().gap(px(theme::SM)).flex_wrap().child(add_btn).child(run_btn))
+                .child(
+                    v_flex()
+                        .p(px(theme::SM))
+                        .gap(px(theme::SM))
+                        .rounded(px(12.))
+                        .bg(color::control())
+                        .child(
+                            h_flex()
+                                .gap(px(6.))
+                                .items_center()
+                                .child(Icon::new(IconName::Sparkles).xsmall().text_color(color::accent_mark()))
+                                .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(color::text()).child("Quick ops — hover to preview")),
+                        )
+                        .child(h_flex().flex_wrap().gap(px(6.)).children(quick_ops)),
+                )
                 .child(div().text_xs().text_color(color::text_muted()).child("Select a node to edit its parameters, or drag an output handle onto an input."))
                 .into_any_element();
         };
@@ -712,6 +764,7 @@ impl Inspector {
                 let docs_url = op.docs_url();
                 let desc = op.description();
                 let canvas_next = self.canvas.downgrade();
+                let next_prompt = op.next_step_prompt();
                 let next_chips: Vec<AnyElement> = op
                     .next_steps()
                     .iter()
@@ -719,15 +772,32 @@ impl Inspector {
                     .take(3)
                     .map(|next_op| {
                         let canvas = canvas_next.clone();
+                        let st_hov = self.store.clone();
+                        let st_clear = self.store.clone();
                         let title = next_op.title();
-                        let tip = next_op.description();
-                        Button::new(SharedString::from(format!("insp-next-{}", next_op.tag())))
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::new(IconName::Plus))
-                            .label(title)
-                            .tooltip(tip)
+                        let op_hov = next_op.clone();
+                        h_flex()
+                            .id(SharedString::from(format!("insp-next-{}", next_op.tag())))
+                            .px(px(10.))
+                            .h(px(26.))
+                            .gap(px(5.))
+                            .items_center()
+                            .rounded(px(999.))
+                            .border_1()
+                            .border_color(color::border())
+                            .bg(color::panel())
+                            .hover(|d| d.border_color(color::accent_mark()).bg(color::raised()))
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(color::text())
+                            .child(Icon::new(IconName::Plus).xsmall().text_color(color::accent_mark()))
+                            .child(title)
+                            .on_hover(move |enter, _, cx| {
+                                let op = (*enter).then(|| op_hov.clone());
+                                st_hov.update(cx, |s, cx| s.set_hovered_op(op, cx));
+                            })
                             .on_click(move |_, _, cx| {
+                                st_clear.update(cx, |s, cx| s.set_hovered_op(None, cx));
                                 let template = Template::Op(next_op.clone());
                                 let _ = canvas.update(cx, |c, cx| c.add(&template, None, cx));
                             })
@@ -742,9 +812,19 @@ impl Inspector {
                     .when(!next_chips.is_empty(), |d| {
                         d.child(
                             v_flex()
-                                .gap(px(theme::XS))
-                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child("NEXT STEP"))
-                                .child(h_flex().flex_wrap().gap(px(4.)).children(next_chips)),
+                                .p(px(theme::SM))
+                                .gap(px(theme::SM))
+                                .rounded(px(12.))
+                                .bg(color::control())
+                                .child(
+                                    h_flex()
+                                        .gap(px(6.))
+                                        .items_center()
+                                        .child(Icon::new(IconName::Sparkles).xsmall().text_color(color::accent_mark()))
+                                        .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(color::text()).child(next_prompt)),
+                                )
+                                .child(h_flex().flex_wrap().gap(px(6.)).children(next_chips))
+                                .child(div().text_size(px(10.)).text_color(color::text_muted()).child("Hover any chip to preview Before ↔ After")),
                         )
                     })
                     .child(

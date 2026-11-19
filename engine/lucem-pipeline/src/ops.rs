@@ -621,6 +621,25 @@ impl Op {
         }
     }
 
+    /// Conversational question prompting the next biological step for M3 Expressive "What's next?" cards.
+    pub fn next_step_prompt(&self) -> &'static str {
+        match self {
+            Op::RollingBall { .. } | Op::WhiteTophat { .. } | Op::BlackTophat { .. } => "Ready to smooth or separate objects?",
+            Op::GaussianBlur { .. } | Op::Median { .. } | Op::Bilateral { .. } | Op::TvDenoise { .. } | Op::Clahe { .. } => "Ready to separate objects?",
+            Op::Frangi { .. } | Op::Sato { .. } => "Ready to threshold these ridges?",
+            Op::OtsuThreshold { .. }
+            | Op::LiThreshold { .. }
+            | Op::TriangleThreshold { .. }
+            | Op::SauvolaThreshold { .. }
+            | Op::NiblackThreshold { .. }
+            | Op::HysteresisThreshold { .. }
+            | Op::Threshold { .. } => "Clean up or label this mask?",
+            Op::FillHoles {} | Op::RemoveSmallHoles { .. } | Op::Open { .. } | Op::Close { .. } | Op::RemoveSmall { .. } => "Ready to label or split objects?",
+            Op::Label {} | Op::ExpandLabels { .. } | Op::ClearBorder { .. } | Op::Watershed { .. } => "Ready to measure regions?",
+            _ => "What's next?",
+        }
+    }
+
     /// Direct documentation URL for this op (shown in the Inspector / Explain popover).
     pub fn docs_url(&self) -> String {
         format!("https://github.com/neuro-kitchen/lucem/blob/main/crates/lucem-ops/src/{}", self.source_rel_path())

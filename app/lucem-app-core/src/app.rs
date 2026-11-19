@@ -248,6 +248,7 @@ pub struct LucemApp {
     pub pipeline: Entity<PipelineView>,
     #[cfg(not(target_family = "wasm"))]
     pub analyze: Entity<AnalyzeView>,
+    op_hover_preview: Entity<crate::ui::op_gallery::OpHoverPreview>,
     last_toast_id: u64,
     toast_timer: Option<gpui_kit::Task<()>>,
     _subs: Vec<Subscription>,
@@ -439,14 +440,13 @@ impl LucemApp {
                     this.shell.update(cx, |s, cx| s.set_overlay(Some(list.into()), window, cx));
                 }
                 AppEvent::OpenOpGallery => {
-                    let shell = this.shell.downgrade();
-                    let close: crate::ui::op_gallery::CloseGallery = Rc::new(move |window, cx| {
-                        if let Some(s) = shell.upgrade() {
-                            s.update(cx, |s, cx| s.set_overlay(None, window, cx));
+                    this.store.update(cx, |s, cx| {
+                        let open = !s.visual_strip_open;
+                        s.set_visual_strip(open, cx);
+                        if open && s.workspace != Workspace::Explore {
+                            s.set_workspace(Workspace::Explore, cx);
                         }
                     });
-                    let gallery = cx.new(|cx| crate::ui::op_gallery::OpGallery::new(this.store.clone(), close, cx));
-                    this.shell.update(cx, |s, cx| s.set_overlay(Some(gallery.into()), window, cx));
                 }
                 _ => {}
             }),
@@ -476,6 +476,7 @@ impl LucemApp {
                 }
             }),
         ];
+        let op_hover_preview = cx.new(|cx| crate::ui::op_gallery::OpHoverPreview::new(store.clone(), cx));
         let this = Self {
             store,
             shell,
@@ -484,6 +485,7 @@ impl LucemApp {
             pipeline,
             #[cfg(not(target_family = "wasm"))]
             analyze,
+            op_hover_preview,
             last_toast_id: 0,
             toast_timer: None,
             _subs: subs,
@@ -544,6 +546,8 @@ impl Render for LucemApp {
                 }
             }))
             .child(self.shell.clone())
+            // Floating Before <-> After animated hover preview card for any hovered op
+            .child(self.op_hover_preview.clone())
             // Notification popover anchored above the bottom-bar Bell icon
             .when(notifications_open, |d| {
                 d.child(

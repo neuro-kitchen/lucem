@@ -6,11 +6,13 @@ use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+#[cfg(not(target_family = "wasm"))]
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::{div, px, AnyElement, App, Context, Entity, Subscription, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Window};
 
 use crate::data::prefs::Prefs;
+#[cfg(not(target_family = "wasm"))]
 use crate::data::tools::{self, Found, Tool, ToolPaths};
 use crate::data::store::Store;
 use crate::ui::theme::{self, color, PASTEBOARDS};
@@ -62,17 +64,32 @@ type Run = Rc<dyn Fn(&mut Window, &mut App)>;
 pub struct SettingsView {
     store: Entity<Store>,
     /// Each tool's `--version` (Tools), and the paths it was read for.
+    #[cfg(not(target_family = "wasm"))]
     versions: Vec<(Tool, Result<String, String>)>,
+    #[cfg(not(target_family = "wasm"))]
     versions_for: Option<ToolPaths>,
     /// What the last environment action said (sync, pin), and whether one runs.
+    #[cfg(not(target_family = "wasm"))]
     env_note: Option<Result<String, String>>,
+    #[cfg(not(target_family = "wasm"))]
     env_busy: bool,
     _subs: Vec<Subscription>,
 }
 
 impl SettingsView {
     pub fn new(store: Entity<Store>) -> Self {
-        Self { store, versions: Vec::new(), versions_for: None, env_note: None, env_busy: false, _subs: Vec::new() }
+        Self {
+            store,
+            #[cfg(not(target_family = "wasm"))]
+            versions: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            versions_for: None,
+            #[cfg(not(target_family = "wasm"))]
+            env_note: None,
+            #[cfg(not(target_family = "wasm"))]
+            env_busy: false,
+            _subs: Vec::new(),
+        }
     }
 
     /// The settings of `section`.

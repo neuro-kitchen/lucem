@@ -71,6 +71,10 @@ pub struct ExploreView {
     side_w: f32,
     /// Shared click-to-type / drag-to-scrub editing state for numeric pills in the options bar.
     scrub: Entity<crate::ui::scrub_input::ScrubState>,
+    /// Instagram Edits-style non-blocking bottom Visual Effect Strip.
+    visual_strip: Entity<crate::ui::op_gallery::OpGallery>,
+    /// True while the user is holding the "Hold for original" compare pill.
+    comparing_raw: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -114,6 +118,7 @@ impl ExploreView {
             d.set_center(DockLayout::tabs().panel_view(panel_handle(first.clone()), cx), window, cx);
         });
         let scrub = cx.new(|cx| crate::ui::scrub_input::ScrubState::new(window, cx));
+        let visual_strip = cx.new(|cx| crate::ui::op_gallery::OpGallery::new(store.clone(), cx));
         let subs = vec![
             cx.observe(&scrub, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, |this: &mut Self, _, e: &AppEvent, window, cx| {
@@ -150,6 +155,8 @@ impl ExploreView {
             last_side: prefs.right_tab.as_deref().and_then(Tab::from_key).filter(|t| RAIL.contains(t)).unwrap_or(Tab::Layers),
             side_w: RIGHT_W,
             scrub,
+            visual_strip,
+            comparing_raw: false,
             _subs: subs,
         };
         if prefs.pipeline_dock {
@@ -523,10 +530,33 @@ impl Render for ExploreView {
                         .on_drag(SideResize, |_, _, _, cx| cx.new(|_| SideResize)),
                 )
         });
-        let walkthrough = if s.walkthrough_active {
-            let step1 = s.walkthrough_channel_edited;
-            let step2 = s.doc.graph.nodes.iter().any(|n| matches!(n.kind, crate::domain::graph::NodeKind::Op { .. }));
-            let step3 = s.walkthrough_explored_views || self.panels.iter().any(|p| p.read(cx).kind == ViewKind::Volume);
+        let visual_strip_open = s.visual_strip_open;
+        let has_ops = s.doc.graph.nodes.iter().any(|n| matches!(n.kind, crate::domain::graph::NodeKind::Op { .. }));
+        let comparing_raw = self.comparing_raw;
+        let walkthrough = if s.walkthrough_active && !visual_strip_open {
+            let kind = s.walkthrough_kind;
+            let has_shapes = !s.doc.annotations.is_empty();
+            let has_vol = self.panels.iter().any(|p| p.read(cx).kind == ViewKind::Volume);
+            let (title, s1_label, s2_label, s3_label, step1, step2, step3) = match kind {
+                crate::data::store::WalkthroughKind::TwoD => (
+                    "2D walkthrough",
+                    "Adjust a channel's colour or levels in Layers",
+                    "Preview & apply an op (Visual strip or F3)",
+                    "Open Pipeline or draw a shape on the image",
+                    s.walkthrough_channel_edited,
+                    has_ops,
+                    s.walkthrough_explored_views || has_shapes,
+                ),
+                crate::data::store::WalkthroughKind::ThreeD => (
+                    "3D walkthrough",
+                    "Adjust a channel or scrub Z-planes",
+                    "Switch to 3D Volume View & orbit or Clip",
+                    "Add a processing op or open Pipeline",
+                    s.walkthrough_channel_edited,
+                    s.walkthrough_explored_views || has_vol,
+                    has_ops || s.walkthrough_explored_views,
+                ),
+            };
             let all_done = step1 && step2 && step3;
             let done_count = usize::from(step1) + usize::from(step2) + usize::from(step3);
             let st_dismiss = self.store.clone();
@@ -537,8 +567,8 @@ impl Render for ExploreView {
                     .items_center()
                     .child(
                         div()
-                            .size(px(16.))
-                            .rounded(px(8.))
+                            .size(px(18.))
+                            .rounded(px(999.))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -558,10 +588,10 @@ impl Render for ExploreView {
                     .absolute()
                     .bottom(px(16.))
                     .left(px(56.))
-                    .w(px(292.))
+                    .w(px(304.))
                     .p(px(theme::MD))
                     .gap(px(theme::SM))
-                    .rounded(px(theme::RADIUS_LG))
+                    .rounded(px(18.))
                     .border_1()
                     .border_color(color::border())
                     .bg(color::raised())
@@ -569,8 +599,8 @@ impl Render for ExploreView {
                         h_flex()
                             .items_center()
                             .gap(px(theme::XS))
-                            .child(Icon::new(IconName::Sparkles).small().text_color(color::accent_mark()))
-                            .child(div().flex_1().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(color::text()).child("60-second walkthrough"))
+                            .child(Icon::new(if kind == crate::data::store::WalkthroughKind::ThreeD { IconName::Box } else { IconName::Sparkles }).small().text_color(color::accent_mark()))
+                            .child(div().flex_1().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(color::text()).child(title))
                             .child(div().text_xs().text_color(color::text_muted()).child(format!("{done_count}/3")))
                             .child(
                                 Button::new("walkthrough-dismiss")
@@ -581,9 +611,22 @@ impl Render for ExploreView {
                                     .on_click(move |_, _, cx| st_dismiss.update(cx, |s, cx| s.finish_walkthrough(cx))),
                             ),
                     )
-                    .child(step_row(step1, "Adjust a channel's colour or levels in Layers"))
-                    .child(step_row(step2, "Add a processing op (+ Add op or F3)"))
-                    .child(step_row(step3, "Open 3D Volume View or Pipeline"))
+                    // M3 Expressive 3-segment pill progress bar
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap(px(4.))
+                            .children([step1, step2, step3].into_iter().map(|done| {
+                                div()
+                                    .flex_1()
+                                    .h(px(4.))
+                                    .rounded(px(999.))
+                                    .bg(if done { color::accent_mark() } else { color::control() })
+                            })),
+                    )
+                    .child(step_row(step1, s1_label))
+                    .child(step_row(step2, s2_label))
+                    .child(step_row(step3, s3_label))
                     .when(all_done, |v| {
                         v.child(
                             h_flex()
@@ -605,6 +648,48 @@ impl Render for ExploreView {
         } else {
             None
         };
+        // Instagram Edits-style Hold-to-Compare floating pill over the canvas when ops exist
+        let compare_pill = (has_ops && !visual_strip_open).then(|| {
+            h_flex()
+                .id("hold-compare-pill")
+                .occlude()
+                .absolute()
+                .bottom(px(14.))
+                .right(px(14.))
+                .px(px(12.))
+                .h(px(28.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(999.))
+                .border_1()
+                .border_color(if comparing_raw { color::accent_mark() } else { color::border() })
+                .bg(if comparing_raw { color::accent_mark() } else { color::raised() })
+                .text_xs()
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .text_color(if comparing_raw { color::canvas() } else { color::text() })
+                .cursor_pointer()
+                .child(Icon::new(IconName::GitCompare).xsmall())
+                .child(if comparing_raw { "Original" } else { "Hold to compare" })
+                .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.comparing_raw = true;
+                    this.store.update(cx, |s, cx| s.update_tool(|t| t.show_results = false, cx));
+                    cx.notify();
+                }))
+                .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    if this.comparing_raw {
+                        this.comparing_raw = false;
+                        this.store.update(cx, |s, cx| s.update_tool(|t| t.show_results = true, cx));
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_up_out(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    if this.comparing_raw {
+                        this.comparing_raw = false;
+                        this.store.update(cx, |s, cx| s.update_tool(|t| t.show_results = true, cx));
+                        cx.notify();
+                    }
+                }))
+        });
         v_flex()
             .size_full()
             .relative()
@@ -632,11 +717,12 @@ impl Render for ExploreView {
                             .rounded(px(theme::RADIUS_LG))
                             .overflow_hidden()
                             .bg(color::panel())
-                            .child(div().relative().flex_1().min_h_0().w_full().child(self.dock.clone()).children(self.dialog.as_ref().map(|(d, _)| d.clone()))),
+                            .child(div().relative().flex_1().min_h_0().w_full().child(self.dock.clone()).children(self.dialog.as_ref().map(|(d, _)| d.clone())).children(compare_pill)),
                     )
                     .children(side_panel)
                     .child(rail),
             )
+            .when(visual_strip_open, |d| d.child(self.visual_strip.clone()))
             .children(walkthrough)
             .into_any_element()
     }

@@ -513,10 +513,10 @@ impl DisplayPanel {
                     });
                 })
             }));
-        // Compact single-line action row (Processed/Raw toggle + "+ Add op" with family submenus);
-        // the step list itself lives directly under each channel in the Layers tree below.
+        // M3 Expressive Split Button: left half opens the non-blocking Visual Strip in 1 click,
+        // right chevron opens the categorized op menu for power users.
         let (st_add, img_add, view_add) = (store.clone(), img.id.clone(), view.clone());
-        let add_op = Button::new("proc-add").outline().xsmall().icon(Icon::new(IconName::Plus)).label("Add op").dropdown_menu(move |menu: PopupMenu, window, cx| {
+        let menu_chevron = Button::new("proc-add").ghost().xsmall().icon(Icon::new(IconName::ChevronDown)).tooltip("Browse all operations by category").dropdown_menu(move |menu: PopupMenu, window, cx| {
             let mut m = menu;
             for cat in operations() {
                 let (st, image, view) = (st_add.clone(), img_add.clone(), view_add.clone());
@@ -547,17 +547,27 @@ impl DisplayPanel {
             m
         });
         let st_gal = store.clone();
-        let gallery_btn = Button::new("proc-gallery")
-            .ghost()
-            .xsmall()
-            .icon(Icon::new(IconName::LayoutGrid))
-            .label("Gallery")
-            .tooltip("Visual op gallery — live 128 × 128 Before ↔ After previews on this channel")
-            .on_click(move |_, _, cx| st_gal.update(cx, |_, cx| cx.emit(crate::data::store::AppEvent::OpenOpGallery)));
+        let split_add = h_flex()
+            .items_center()
+            .rounded(px(999.))
+            .border_1()
+            .border_color(color::border())
+            .bg(color::control())
+            .overflow_hidden()
+            .child(
+                Button::new("proc-gallery")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(IconName::Sparkles))
+                    .label("Visual strip")
+                    .tooltip("Open the live non-blocking Visual Effect Strip over the canvas")
+                    .on_click(move |_, _, cx| st_gal.update(cx, |_, cx| cx.emit(crate::data::store::AppEvent::OpenOpGallery))),
+            )
+            .child(div().w(px(1.)).h(px(14.)).bg(color::border()))
+            .child(menu_chevron);
         let proc_bar = h_flex()
             .gap(px(theme::XS))
-            .child(add_op)
-            .child(gallery_btn)
+            .child(split_add)
             .child(div().flex_1())
             .children(view_style.clone().zip(view.clone()).map(|((name, style), vid)| {
                 let (a, b) = (store.clone(), store.clone());
@@ -582,13 +592,17 @@ impl DisplayPanel {
                         });
                     }))
             }));
-        // Smart next-step chips: predicted biological follow-ups from the last step (or starter ops)
+        // M3 Expressive "What's next?" tonal card with hover Before <-> After live preview
         let last_op = {
             let s = self.store.read(cx);
             steps.last().and_then(|sid| match s.doc.graph.node(sid).map(|n| &n.kind) {
                 Some(NodeKind::Op { op, .. }) => Some(op.clone()),
                 _ => None,
             })
+        };
+        let prompt = match &last_op {
+            Some(op) => op.next_step_prompt(),
+            None => "Start enhancing this channel?",
         };
         let suggested_tags: &[&str] = match &last_op {
             Some(op) => op.next_steps(),
@@ -599,18 +613,34 @@ impl DisplayPanel {
             .filter_map(|tag| lucem_pipeline::Op::by_tag(tag))
             .take(3)
             .map(|op| {
-                let (st, img_id, vw) = (store.clone(), img.id.clone(), view.clone());
+                let (st, st_hov, img_id, vw) = (store.clone(), store.clone(), img.id.clone(), view.clone());
                 let title = op.title();
-                let desc = op.description();
-                Button::new(SharedString::from(format!("next-chip-{}", op.tag())))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(IconName::Plus))
-                    .label(title)
-                    .tooltip(desc)
+                let op_hov = op.clone();
+                let op_click = op.clone();
+                h_flex()
+                    .id(SharedString::from(format!("next-chip-{}", op.tag())))
+                    .px(px(10.))
+                    .h(px(24.))
+                    .gap(px(4.))
+                    .items_center()
+                    .rounded(px(999.))
+                    .border_1()
+                    .border_color(color::border())
+                    .bg(color::panel())
+                    .hover(|d| d.border_color(color::accent_mark()).bg(color::raised()))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(color::text())
+                    .child(Icon::new(IconName::Plus).xsmall().text_color(color::accent_mark()))
+                    .child(title)
+                    .on_hover(move |enter, _, cx| {
+                        let op = (*enter).then(|| op_hov.clone());
+                        st_hov.update(cx, |s, cx| s.set_hovered_op(op, cx));
+                    })
                     .on_click(move |_, _, cx| {
-                        let (op, image, view) = (op.clone(), img_id.clone(), vw.clone());
+                        let (op, image, view) = (op_click.clone(), img_id.clone(), vw.clone());
                         st.update(cx, |s, cx| {
+                            s.set_hovered_op(None, cx);
                             if s.execute(Command::ApplyOp { op, view, image, channel: c }, cx).is_ok() {
                                 s.set_status(format!("{title} added"), cx);
                             }
@@ -620,12 +650,19 @@ impl DisplayPanel {
             })
             .collect();
         let next_row = (!next_chips.is_empty()).then(|| {
-            h_flex()
-                .flex_wrap()
-                .gap(px(4.))
-                .items_center()
-                .child(div().text_xs().text_color(color::text_muted()).child("Next:"))
-                .children(next_chips)
+            v_flex()
+                .p(px(theme::SM))
+                .gap(px(6.))
+                .rounded(px(12.))
+                .bg(color::control())
+                .child(
+                    h_flex()
+                        .gap(px(6.))
+                        .items_center()
+                        .child(Icon::new(IconName::Sparkles).xsmall().text_color(color::accent_mark()))
+                        .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(color::text()).child(prompt)),
+                )
+                .child(h_flex().flex_wrap().gap(px(6.)).children(next_chips))
         });
         let _ = (&step_rows, &selected_steps);
         let body = match page {

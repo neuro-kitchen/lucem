@@ -75,15 +75,39 @@ pub fn home(store: &Entity<Store>, open_file: impl Fn(&mut Window, &mut App) + '
             h_flex()
                 .gap(px(theme::SM))
                 .child(Button::new("home-open").primary().icon(IconName::FolderOpen).label("Open image or OME-Zarr…").on_click(move |_, w, cx| open_file(w, cx)))
-                .child(Button::new("home-project").outline().icon(IconName::Folder).label("Open project…").on_click(move |_, w, cx| open_project(w, cx)))
+                .child(Button::new("home-project").outline().icon(IconName::Folder).label("Open project…").on_click(move |_, w, cx| open_project(w, cx))),
+        )
+        .child(
+            h_flex()
+                .gap(px(theme::SM))
+                .px(px(theme::SM))
+                .py(px(6.))
+                .rounded(px(999.))
+                .border_1()
+                .border_color(color::border())
+                .bg(color::panel())
+                .items_center()
+                .child(div().pl(px(6.)).text_xs().text_color(color::text_muted()).child("60s guided walkthrough:"))
                 .child({
                     let st = store.clone();
                     let done = s.prefs.walkthrough_done;
-                    let b = Button::new("home-walkthrough")
+                    let b = Button::new("home-walkthrough-2d")
+                        .xsmall()
                         .icon(IconName::Sparkles)
-                        .label("60s walkthrough")
-                        .tooltip("Open the 3D sample volume with a quick 3-step interactive guide")
-                        .on_click(move |_, _, cx| st.update(cx, |s, cx| s.start_walkthrough(cx)));
+                        .label("2D fluorescence")
+                        .tooltip("Denoise, segment & inspect a 2D fluorescence sample")
+                        .on_click(move |_, _, cx| st.update(cx, |s, cx| s.start_walkthrough(crate::data::store::WalkthroughKind::TwoD, cx)));
+                    if done { b.ghost() } else { b.outline() }
+                })
+                .child({
+                    let st = store.clone();
+                    let done = s.prefs.walkthrough_done;
+                    let b = Button::new("home-walkthrough-3d")
+                        .xsmall()
+                        .icon(IconName::Box)
+                        .label("3D volume")
+                        .tooltip("Explore a 3D light-sheet sample with 3D Volume View & Clip")
+                        .on_click(move |_, _, cx| st.update(cx, |s, cx| s.start_walkthrough(crate::data::store::WalkthroughKind::ThreeD, cx)));
                     if done { b.ghost() } else { b.outline() }
                 }),
         )

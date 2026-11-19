@@ -172,6 +172,13 @@ pub struct Notification {
     pub is_error: bool,
 }
 
+/// Which guided 60-second walkthrough is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkthroughKind {
+    TwoD,
+    ThreeD,
+}
+
 pub struct Store {
     pub doc: ProjectDoc,
     /// The project file (`<folder>/project.lucem.json`); `None` until saved somewhere.
@@ -190,8 +197,14 @@ pub struct Store {
     next_notification_id: u64,
     /// 60-second guided walkthrough state (launched from Home, auto-checked in Explore).
     pub walkthrough_active: bool,
+    pub walkthrough_kind: WalkthroughKind,
     pub walkthrough_channel_edited: bool,
     pub walkthrough_explored_views: bool,
+    /// Operation currently hovered in a menu or "What's next?" chip — drives the floating
+    /// Before ↔ After animated preview card.
+    pub hovered_op: Option<Op>,
+    /// Whether the Instagram Edits-style non-blocking bottom Visual Effect Strip is open.
+    pub visual_strip_open: bool,
     /// Names of images being opened.
     pub opening: Vec<String>,
     /// Images open for tile reads, by image id.
@@ -275,8 +288,11 @@ impl Store {
             notifications_open: false,
             next_notification_id: 1,
             walkthrough_active: false,
+            walkthrough_kind: WalkthroughKind::ThreeD,
             walkthrough_channel_edited: false,
             walkthrough_explored_views: false,
+            hovered_op: None,
+            visual_strip_open: false,
             opening: Vec::new(),
             pyramids: HashMap::new(),
             opening_ids: HashSet::new(),
@@ -384,18 +400,39 @@ impl Store {
         cx.notify();
     }
 
-    /// Starts the 60-second guided walkthrough on the built-in 3D sample volume.
-    pub fn start_walkthrough(&mut self, cx: &mut Context<Self>) {
+    /// Starts a 60-second guided walkthrough (2D fluorescence/histology or 3D volume).
+    pub fn start_walkthrough(&mut self, kind: WalkthroughKind, cx: &mut Context<Self>) {
         self.walkthrough_active = true;
+        self.walkthrough_kind = kind;
         self.walkthrough_channel_edited = false;
         self.walkthrough_explored_views = false;
-        self.open(std::path::PathBuf::from("sample:volume"), cx);
+        let path = match kind {
+            WalkthroughKind::TwoD => PathBuf::from(format!("sample:{}", sample_name(PhantomKind::ALL[0]))),
+            WalkthroughKind::ThreeD => PathBuf::from("sample:volume"),
+        };
+        self.open(path, cx);
     }
 
     /// Marks the 60-second guided walkthrough complete/dismissed and persists the choice.
     pub fn finish_walkthrough(&mut self, cx: &mut Context<Self>) {
         self.walkthrough_active = false;
         self.update_prefs(|p| p.walkthrough_done = true, cx);
+    }
+
+    /// Sets or clears the hovered operation for the floating live Before ↔ After preview card.
+    pub fn set_hovered_op(&mut self, op: Option<Op>, cx: &mut Context<Self>) {
+        if self.hovered_op != op {
+            self.hovered_op = op;
+            cx.notify();
+        }
+    }
+
+    /// Opens or closes the non-blocking bottom Visual Effect Strip.
+    pub fn set_visual_strip(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.visual_strip_open != open {
+            self.visual_strip_open = open;
+            cx.notify();
+        }
     }
 
     pub fn set_workspace(&mut self, w: Workspace, cx: &mut Context<Self>) {
