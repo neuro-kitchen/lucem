@@ -1,31 +1,48 @@
 //! What `lucem serve --web` adds for browser pages: pipelines run on the tiles a page asks for
 //! (the server has the GPU; the page only draws), with the operators' halo read around each tile.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use lucem_core::cubecl::prelude::Client;
 use lucem_core::memory::DeviceArray;
 use lucem_core::{ComputeTarget, Shape};
 use lucem_io::Pyramid;
-use lucem_pipeline::{at_downsample, evaluate, halo, PipelineSpec, Value};
+use lucem_pipeline::{align_region, at_downsample, crop_and_download, evaluate_cached, halo, EvalCache, EvalTimings, PipelineSpec, Value};
 use lucem_stream::engine::TileProcessor;
 
 /// Pipelines on tiles, on one compute device of the server's.
+///
+/// Keeps an LRU device cache ([`EvalCache`]) of uploaded source tiles and intermediate node
+/// outputs so parameter edits or op toggles reuse the prefix directly on the GPU, and crops
+/// halo margins on the device before downloading only the requested tile.
 pub struct PipelineTiles {
     client: Client,
     runtime: String,
+    cache: Arc<EvalCache>,
+    last_timings: Mutex<EvalTimings>,
 }
 
 impl PipelineTiles {
     /// On `target`'s default device; `None` (and why) when it has none.
     pub fn open(target: ComputeTarget) -> Result<Arc<Self>, String> {
         let client = target.client().map_err(|e| e.to_string())?;
-        Ok(Arc::new(Self { client, runtime: target.name().to_string() }))
+        Ok(Arc::new(Self {
+            client,
+            runtime: target.name().to_string(),
+            cache: Arc::new(EvalCache::default()),
+            last_timings: Mutex::new(EvalTimings::default()),
+        }))
     }
 
     /// The runtime it runs on, for pages (`wgpu`, `cuda`, `cpu`).
     pub fn runtime(&self) -> &str {
         &self.runtime
+    }
+
+    /// Where the last tile's time went.
+    #[allow(dead_code)]
+    pub fn last_timings(&self) -> EvalTimings {
+        self.last_timings.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -39,14 +56,22 @@ impl TileProcessor for PipelineTiles {
             return Err(format!("tile {tx},{ty} (plane {z}) is outside level {level}"));
         }
         let (w, h) = ((l.width - x0).min(l.tile_w), (l.height - y0).min(l.tile_h));
-        // The operators' reach, in this level's pixels, read around the tile (clipped to the image)
+        // The operators' reach, in this level's pixels, rounded out to READ_GRID so small halo
+        // changes from editing a parameter reuse the already-uploaded raw region and prefix nodes.
         let plan = at_downsample(&spec.plan(), l.downsample);
         let reach = halo(&plan, &spec.target);
-        let (rx0, ry0) = (x0.saturating_sub(reach), y0.saturating_sub(reach));
-        let (rx1, ry1) = ((x0 + w + reach).min(l.width), (y0 + h + reach).min(l.height));
-        let (rw, rh) = (rx1 - rx0, ry1 - ry0);
+        let (rx0, ry0, rw, rh) = align_region(
+            x0.saturating_sub(reach),
+            y0.saturating_sub(reach),
+            (x0 + w + reach).min(l.width),
+            (y0 + h + reach).min(l.height),
+            l.width,
+            l.height,
+        );
+        let image_id = image.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| format!("{:p}", image as *const Pyramid));
+        let region_tag = format!("{image_id}|L{level}|Z{z}|{rx0},{ry0},{rw},{rh}|norm:{}", spec.normalize);
         let client = &self.client;
-        let value = evaluate(client, &plan, &spec.target, &mut |id: &str| {
+        let (value, mut timings) = evaluate_cached(client, &plan, &spec.target, &region_tag, &self.cache, &mut |id: &str| {
             let channel = *spec.sources.get(id).ok_or_else(|| format!("{id} is neither a source nor a node"))?;
             let mut values = image.read_region_at(level, channel, z, rx0, ry0, rw, rh).map_err(|e| e.to_string())?;
             // Raw values to 0–1 by the type's range, as the app does
@@ -57,16 +82,17 @@ impl TileProcessor for PipelineTiles {
             }
             DeviceArray::from_host(client, Shape::new([rh, rw]), values).map(Value::Image).map_err(|e| e.to_string())
         })?;
-        let region = value.to_host(client).ok_or("a table is not a tile: its rows are a plugin call")?;
-        if region.len() != rw * rh {
-            return Err(format!("the pipeline gave {} values for a region of {rw} × {rh}", region.len()));
+        // Crop halo on the device so only the requested w × h tile crosses back to the host.
+        let (out, readback_ms) = crop_and_download(client, &value, rx0, ry0, rw, rh, x0, y0, w, h)
+            .map_err(|e| if e.contains("table") { "a table is not a tile: its rows are a plugin call".to_string() } else { e })?;
+        timings.readback_ms = readback_ms;
+        if std::env::var_os("LUCEM_PREVIEW_TIMING").is_some() {
+            eprintln!(
+                "[lucem-tile] L{level} ({tx},{ty}) {w}x{h} (read {rw}x{rh}): src={:.2}ms compute={:.2}ms readback={:.2}ms hits={} fused={} reused={}",
+                timings.source_ms, timings.compute_ms, timings.readback_ms, timings.cache_hits, timings.fused_runs, timings.input_reused
+            );
         }
-        // The tile itself, out of the region read with its halo
-        let (ox, oy) = (x0 - rx0, y0 - ry0);
-        let mut out = Vec::with_capacity(w * h);
-        for y in oy..oy + h {
-            out.extend_from_slice(&region[y * rw + ox..y * rw + ox + w]);
-        }
+        *self.last_timings.lock().unwrap_or_else(|e| e.into_inner()) = timings;
         Ok((w, h, out))
     }
 }

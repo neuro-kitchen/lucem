@@ -29,7 +29,7 @@ USAGE
                                          Write a synthetic image (a volume with --depth)
   lucem serve [--data DIR] [--bind ADDR] [--name HOST]... [--max-clients N] [--allow-anonymous]
               [--web DIST [--web-bind ADDR] [--web-plain-http] [--web-cache-mib N (512)] [--samples DIR] [--runtime wgpu|cuda|cpu]]
-              [--pair] [--certificate FILE --private-key FILE]
+              [--memory SIZE] [--pair] [--certificate FILE --private-key FILE]
                                          Serve the images under DIR to enrolled clients
                                          (--pair: show a pairing code on the terminal at start)
   lucem clients pair [--control] [--out FILE]            (--auth DIR)
@@ -316,6 +316,10 @@ fn serve(mut args: Args) -> Result<(), String> {
     // The app's samples for pages (`lucem samples <dir>`): opened as files, never generated there
     let samples_dir = args.take_value("--samples")?.map(PathBuf::from);
     let runtime_name = args.take_value("--runtime")?;
+    if let Some(mem) = args.take_value("--memory")? {
+        let bytes = lucem_core::memory::parse_bytes(&mem).ok_or_else(|| format!("--memory {mem:?} is not a size like 4GiB or 512MiB"))?;
+        lucem_core::memory::set_ram_memory_limit(Some(bytes as usize));
+    }
     args.positional(0)?;
     let web_files = match (&certificate, &key) {
         (Some(c), Some(k)) => Some(ServerIdentity::Files { certificate_chain: c.into(), private_key: k.into() }),
