@@ -7287,7 +7287,7 @@ dependencies = [
 
 [[package]]
 name = "lucem"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "lucem-core",
  "lucem-io",
@@ -7297,7 +7297,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-app"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "gpui-kit",
  "kitchen-ui",
@@ -7309,7 +7309,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-app-core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "arrow",
  "async-channel",
@@ -7346,7 +7346,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-app-web"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -7363,7 +7363,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-cli"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "image",
  "lucem-core",
@@ -7387,7 +7387,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "cubecl",
  "num-traits",
@@ -7397,7 +7397,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-engine-web"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "js-sys",
  "lucem-io",
@@ -7411,7 +7411,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-hist"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "cubecl",
  "lucem-core",
@@ -7428,7 +7428,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-hub"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "flate2",
  "sha2 0.11.1",
@@ -7438,7 +7438,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-io"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "image",
  "lucem-core",
@@ -7452,7 +7452,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-mcp"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "lucem-core",
  "lucem-hist",
@@ -7466,7 +7466,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-ml"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -7474,7 +7474,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-ml-instanseg"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "lucem-ml",
  "lucem-model-instanseg",
@@ -7483,7 +7483,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-ml-sam"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "lucem-ml",
  "lucem-model-sam",
@@ -7492,7 +7492,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-ml-stardist"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "lucem-ml",
  "lucem-model-stardist",
@@ -7501,7 +7501,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-model-instanseg"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "burn",
  "cubecl",
@@ -7514,7 +7514,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-model-sam"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "lucem-hub",
  "lucem-ml",
@@ -7523,7 +7523,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-model-stardist"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "burn",
  "cubecl",
@@ -7535,7 +7535,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-ops"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "arrow",
  "cubecl",
@@ -7548,7 +7548,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-pipeline"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "arrow",
  "lucem-core",
@@ -7564,7 +7564,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-py"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "lucem-py-core",
  "lucem-py-hist",
@@ -7573,7 +7573,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-py-core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "lucem-core",
  "lucem-io",
@@ -7587,7 +7587,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-py-hist"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "lucem-hist",
  "lucem-py-core",
@@ -7599,7 +7599,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-session"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "geo",
  "lucem-hist",
@@ -7613,7 +7613,7 @@ dependencies = [
 
 [[package]]
 name = "lucem-stream"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -7650,14 +7650,14 @@ dependencies = [
 
 [[package]]
 name = "lucem-table"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "polars",
 ]
 
 [[package]]
 name = "lucem-view"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-channel",
  "cubecl",
