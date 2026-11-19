@@ -50,6 +50,8 @@ pub enum AppEvent {
     RevealNode(String),
     /// Show the images of the server (a browser page's "Open image…": it has no file dialog).
     ServerImages,
+    /// Open the live 128 × 128 Visual Operation Gallery overlay.
+    OpenOpGallery,
 }
 
 /// What a pane of Explore shows.
@@ -162,6 +164,14 @@ pub enum MaskOperation {
     Op(Op),
 }
 
+/// A user-facing notification shown as a toast and collected in the bottom-bar Bell popover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub id: u64,
+    pub message: String,
+    pub is_error: bool,
+}
+
 pub struct Store {
     pub doc: ProjectDoc,
     /// The project file (`<folder>/project.lucem.json`); `None` until saved somewhere.
@@ -172,6 +182,16 @@ pub struct Store {
     prefs_path: Option<PathBuf>,
     pub workspace: Workspace,
     pub status: String,
+    /// Recent notifications collected from status/error updates (newest last, capped at 20).
+    pub notifications: Vec<Notification>,
+    pub unread_notifications: usize,
+    pub active_toast: Option<Notification>,
+    pub notifications_open: bool,
+    next_notification_id: u64,
+    /// 60-second guided walkthrough state (launched from Home, auto-checked in Explore).
+    pub walkthrough_active: bool,
+    pub walkthrough_channel_edited: bool,
+    pub walkthrough_explored_views: bool,
     /// Names of images being opened.
     pub opening: Vec<String>,
     /// Images open for tile reads, by image id.
@@ -249,6 +269,14 @@ impl Store {
             prefs_path,
             workspace: Workspace::Explore,
             status: "Ready".into(),
+            notifications: Vec::new(),
+            unread_notifications: 0,
+            active_toast: None,
+            notifications_open: false,
+            next_notification_id: 1,
+            walkthrough_active: false,
+            walkthrough_channel_edited: false,
+            walkthrough_explored_views: false,
             opening: Vec::new(),
             pyramids: HashMap::new(),
             opening_ids: HashSet::new(),
@@ -296,14 +324,86 @@ impl Store {
     }
 
     pub fn set_status(&mut self, s: impl Into<String>, cx: &mut Context<Self>) {
-        self.status = s.into();
+        let msg = s.into();
+        self.status = msg.clone();
+        let trimmed = msg.trim();
+        if !trimmed.is_empty() && trimmed != "Ready" {
+            let lower = trimmed.to_ascii_lowercase();
+            let is_error = lower.starts_with("could not")
+                || lower.starts_with("failed")
+                || lower.contains("error")
+                || lower.contains("not applied")
+                || lower.contains("cannot ");
+            let id = self.next_notification_id;
+            self.next_notification_id += 1;
+            let n = Notification { id, message: trimmed.to_string(), is_error };
+            if self.notifications.last().map(|last| last.message.as_str()) != Some(trimmed) {
+                self.notifications.push(n.clone());
+                if self.notifications.len() > 20 {
+                    self.notifications.remove(0);
+                }
+            }
+            if !self.notifications_open {
+                self.unread_notifications = (self.unread_notifications + 1).min(99);
+            }
+            self.active_toast = Some(n);
+        }
         cx.emit(AppEvent::Status);
         cx.notify();
+    }
+
+    pub fn dismiss_toast(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
+        let should_clear = match (id, &self.active_toast) {
+            (Some(target), Some(cur)) => cur.id == target,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if should_clear {
+            self.active_toast = None;
+            cx.emit(AppEvent::Status);
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notifications_open = !self.notifications_open;
+        if self.notifications_open {
+            self.unread_notifications = 0;
+            self.active_toast = None;
+        }
+        cx.emit(AppEvent::Status);
+        cx.notify();
+    }
+
+    pub fn clear_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notifications.clear();
+        self.unread_notifications = 0;
+        self.active_toast = None;
+        self.notifications_open = false;
+        cx.emit(AppEvent::Status);
+        cx.notify();
+    }
+
+    /// Starts the 60-second guided walkthrough on the built-in 3D sample volume.
+    pub fn start_walkthrough(&mut self, cx: &mut Context<Self>) {
+        self.walkthrough_active = true;
+        self.walkthrough_channel_edited = false;
+        self.walkthrough_explored_views = false;
+        self.open(std::path::PathBuf::from("sample:volume"), cx);
+    }
+
+    /// Marks the 60-second guided walkthrough complete/dismissed and persists the choice.
+    pub fn finish_walkthrough(&mut self, cx: &mut Context<Self>) {
+        self.walkthrough_active = false;
+        self.update_prefs(|p| p.walkthrough_done = true, cx);
     }
 
     pub fn set_workspace(&mut self, w: Workspace, cx: &mut Context<Self>) {
         if self.workspace != w {
             self.workspace = w;
+            if w == Workspace::Pipeline && self.walkthrough_active {
+                self.walkthrough_explored_views = true;
+            }
             cx.emit(AppEvent::Workspace);
             cx.notify();
         }
@@ -1193,6 +1293,9 @@ impl Store {
 
     /// A view menu command, for Explore.
     pub fn request_view(&mut self, request: ViewRequest, cx: &mut Context<Self>) {
+        if self.walkthrough_active && matches!(request, ViewRequest::Show(ViewKind::Volume) | ViewRequest::Add(ViewKind::Volume) | ViewRequest::TogglePipeline) {
+            self.walkthrough_explored_views = true;
+        }
         cx.emit(AppEvent::View(request));
     }
 

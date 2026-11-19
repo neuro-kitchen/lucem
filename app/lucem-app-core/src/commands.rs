@@ -249,6 +249,15 @@ pub fn register(registry: &Registry, c: &Ctx) {
         CommandSpec::new("file.export_geojson", "Export as GeoJSON", IconName::FileOutput, st(|s, cx| s.export_geojson(cx))).group("File").hint("The shown image's shapes as GeoJSON").enabled(needs_image(s)),
         CommandSpec::new("file.export_cells", "Export cell measurements", IconName::Sheet, st(|s, cx| s.hist_export(cx))).group("File").hint("Cells, tiles, labels and provenance to the output store").enabled(needs_image(s)),
         CommandSpec::new("file.tune", "Tune this device", IconName::Gauge, st(|s, cx| s.tune_device(cx))).group("File").hint("Benchmark this GPU once for lucem's operators and models, in the background"),
+        CommandSpec::new("file.close_image", "Close image", IconName::Close, st(|s, cx| {
+            if let Some(id) = s.doc.active_image.clone() {
+                s.remove_image(id, cx);
+            }
+        }))
+        .group("File")
+        .hint("Close the active image (the file on disk is not touched)")
+        .key("secondary-w")
+        .enabled(needs_image(s)),
         CommandSpec::new("app.quit", "Quit", IconName::Power, |_, cx| cx.quit()).group("File").hint("Close lucem").key("secondary-q"),
     ];
     // Edit
@@ -430,7 +439,15 @@ pub fn register(registry: &Registry, c: &Ctx) {
             );
         }
     }
-    let (f1, f2) = (c.clone(), s.clone());
+    let (f1, f2, g1) = (c.clone(), s.clone(), s.clone());
+    list.push(
+        CommandSpec::new("process.gallery", "Visual op gallery…", IconName::LayoutGrid, move |_, cx| {
+            g1.update(cx, |_, cx| cx.emit(AppEvent::OpenOpGallery));
+        })
+        .group("Process")
+        .hint("Preview 14 operations live on your image with Before ↔ After hover transition")
+        .enabled(needs_image(s)),
+    );
     list.push(
         CommandSpec::new("process.find", "Find an operation…", IconName::Search, move |window, cx| {
             let pipeline = f2.read(cx).workspace == Workspace::Pipeline;
@@ -886,6 +903,7 @@ pub fn app_menu() -> Vec<MenuItem> {
         MenuItem::Separator,
         MenuItem::command("file.tune"),
         MenuItem::Separator,
+        MenuItem::command("file.close_image"),
         MenuItem::command("app.quit"),
     ]
 }
@@ -937,7 +955,7 @@ pub fn explore_menus() -> Vec<MenuSpec> {
             vec![MenuItem::label("Channels shown"), MenuItem::provided("image.channels"), MenuItem::Separator, MenuItem::label("Images of the project"), MenuItem::provided("image.images"), MenuItem::Separator, c("file.open_image"), c("image.remove")],
         ),
         MenuSpec::new("Shapes", shapes),
-        MenuSpec::new("Process", vec![c("process.find"), MenuItem::Separator, MenuItem::label("A step on the shown channel"), MenuItem::provided("process.families")]),
+        MenuSpec::new("Process", vec![c("process.gallery"), c("process.find"), MenuItem::Separator, MenuItem::label("A step on the shown channel"), MenuItem::provided("process.families")]),
         MenuSpec::new(
             "Analyze",
             vec![

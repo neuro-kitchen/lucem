@@ -523,6 +523,88 @@ impl Render for ExploreView {
                         .on_drag(SideResize, |_, _, _, cx| cx.new(|_| SideResize)),
                 )
         });
+        let walkthrough = if s.walkthrough_active {
+            let step1 = s.walkthrough_channel_edited;
+            let step2 = s.doc.graph.nodes.iter().any(|n| matches!(n.kind, crate::domain::graph::NodeKind::Op { .. }));
+            let step3 = s.walkthrough_explored_views || self.panels.iter().any(|p| p.read(cx).kind == ViewKind::Volume);
+            let all_done = step1 && step2 && step3;
+            let done_count = usize::from(step1) + usize::from(step2) + usize::from(step3);
+            let st_dismiss = self.store.clone();
+            let st_finish = self.store.clone();
+            let step_row = |done: bool, label: &'static str| {
+                h_flex()
+                    .gap(px(theme::SM))
+                    .items_center()
+                    .child(
+                        div()
+                            .size(px(16.))
+                            .rounded(px(8.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .border_1()
+                            .border_color(if done { color::accent_mark() } else { color::border() })
+                            .bg(if done { color::accent_mark() } else { color::control() })
+                            .text_xs()
+                            .text_color(if done { color::canvas() } else { color::text_muted() })
+                            .child(if done { "✓" } else { "" }),
+                    )
+                    .child(div().flex_1().min_w_0().text_xs().text_color(if done { color::text_muted() } else { color::text() }).child(label))
+            };
+            Some(
+                v_flex()
+                    .id("walkthrough-card")
+                    .occlude()
+                    .absolute()
+                    .bottom(px(16.))
+                    .left(px(56.))
+                    .w(px(292.))
+                    .p(px(theme::MD))
+                    .gap(px(theme::SM))
+                    .rounded(px(theme::RADIUS_LG))
+                    .border_1()
+                    .border_color(color::border())
+                    .bg(color::raised())
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(theme::XS))
+                            .child(Icon::new(IconName::Sparkles).small().text_color(color::accent_mark()))
+                            .child(div().flex_1().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(color::text()).child("60-second walkthrough"))
+                            .child(div().text_xs().text_color(color::text_muted()).child(format!("{done_count}/3")))
+                            .child(
+                                Button::new("walkthrough-dismiss")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::Close))
+                                    .tooltip("Dismiss walkthrough")
+                                    .on_click(move |_, _, cx| st_dismiss.update(cx, |s, cx| s.finish_walkthrough(cx))),
+                            ),
+                    )
+                    .child(step_row(step1, "Adjust a channel's colour or levels in Layers"))
+                    .child(step_row(step2, "Add a processing op (+ Add op or F3)"))
+                    .child(step_row(step3, "Open 3D Volume View or Pipeline"))
+                    .when(all_done, |v| {
+                        v.child(
+                            h_flex()
+                                .pt(px(theme::XS))
+                                .items_center()
+                                .justify_between()
+                                .gap(px(theme::SM))
+                                .child(div().text_xs().text_color(color::accent_mark()).child("All done — you're ready!"))
+                                .child(
+                                    Button::new("walkthrough-finish")
+                                        .primary()
+                                        .xsmall()
+                                        .label("Finish")
+                                        .on_click(move |_, _, cx| st_finish.update(cx, |s, cx| s.finish_walkthrough(cx))),
+                                ),
+                        )
+                    }),
+            )
+        } else {
+            None
+        };
         v_flex()
             .size_full()
             .relative()
@@ -555,6 +637,7 @@ impl Render for ExploreView {
                     .children(side_panel)
                     .child(rail),
             )
+            .children(walkthrough)
             .into_any_element()
     }
 }

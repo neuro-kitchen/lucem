@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, App, AppContext as _, Context, Entity, ExternalPaths, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
@@ -89,6 +89,19 @@ impl Render for StatusReadings {
                     })
             })
             .child(meter(IconName::Gpu, device, "GPU device and active compute cache"))
+            .child({
+                let st_bell = self.store.clone();
+                let unread = s.unread_notifications;
+                let open = s.notifications_open;
+                Button::new("status-notifications")
+                    .ghost()
+                    .xsmall()
+                    .selected(open)
+                    .icon(Icon::new(IconName::Bell))
+                    .when(unread > 0, |b| b.label(unread.to_string()))
+                    .tooltip(if unread > 0 { "Notifications (unread)" } else { "Notifications" })
+                    .on_click(move |_, _, cx| st_bell.update(cx, |s, cx| s.toggle_notifications(cx)))
+            })
     }
 }
 
@@ -235,6 +248,8 @@ pub struct LucemApp {
     pub pipeline: Entity<PipelineView>,
     #[cfg(not(target_family = "wasm"))]
     pub analyze: Entity<AnalyzeView>,
+    last_toast_id: u64,
+    toast_timer: Option<gpui_kit::Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -411,9 +426,9 @@ impl LucemApp {
                     });
                 }
             }),
-            // A page's "Open image…": the server's images, over the frame
-            cx.subscribe_in(&store, window, |this, _, e: &AppEvent, window, cx| {
-                if matches!(e, AppEvent::ServerImages) {
+            // A page's "Open image…": the server's images, over the frame; or Visual Op Gallery
+            cx.subscribe_in(&store, window, |this, _, e: &AppEvent, window, cx| match e {
+                AppEvent::ServerImages => {
                     let shell = this.shell.downgrade();
                     let close: crate::screens::server_images::Close = Rc::new(move |window, cx| {
                         if let Some(s) = shell.upgrade() {
@@ -423,9 +438,33 @@ impl LucemApp {
                     let list = cx.new(|cx| crate::screens::server_images::ServerImages::new(this.store.clone(), close, cx));
                     this.shell.update(cx, |s, cx| s.set_overlay(Some(list.into()), window, cx));
                 }
+                AppEvent::OpenOpGallery => {
+                    let shell = this.shell.downgrade();
+                    let close: crate::ui::op_gallery::CloseGallery = Rc::new(move |window, cx| {
+                        if let Some(s) = shell.upgrade() {
+                            s.update(cx, |s, cx| s.set_overlay(None, window, cx));
+                        }
+                    });
+                    let gallery = cx.new(|cx| crate::ui::op_gallery::OpGallery::new(this.store.clone(), close, cx));
+                    this.shell.update(cx, |s, cx| s.set_overlay(Some(gallery.into()), window, cx));
+                }
+                _ => {}
             }),
             cx.subscribe(&store, |this, _, e: &AppEvent, cx| {
                 this.sync_shell(e, cx);
+                if matches!(e, AppEvent::Status)
+                    && let Some(toast) = this.store.read(cx).active_toast.clone()
+                    && toast.id != this.last_toast_id
+                {
+                    let id = toast.id;
+                    let delay = if toast.is_error { 8 } else { 5 };
+                    this.last_toast_id = id;
+                    let store = this.store.clone();
+                    this.toast_timer = Some(cx.spawn(async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(delay)).await;
+                        let _ = store.update(cx, |s, cx| s.dismiss_toast(Some(id), cx));
+                    }));
+                }
                 cx.notify();
             }),
             // A theme that follows the system follows it while running
@@ -445,6 +484,8 @@ impl LucemApp {
             pipeline,
             #[cfg(not(target_family = "wasm"))]
             analyze,
+            last_toast_id: 0,
+            toast_timer: None,
             _subs: subs,
         };
         this.sync_shell(&AppEvent::Workspace, cx);
@@ -456,7 +497,13 @@ impl LucemApp {
     fn sync_shell(&self, e: &AppEvent, cx: &mut App) {
         let s = self.store.read(cx);
         let workspace = commands::workspace_id(s.workspace);
-        let status = s.status.clone();
+        // Notifications now appear as a toast connected to the bottom-bar Bell icon;
+        // keep the bottom-left status strip quiet and uncluttered.
+        let status: String = s
+            .doc
+            .active()
+            .map(|img| img.name.clone())
+            .unwrap_or_default();
         let project: SharedString = if s.project_file.is_some() { s.doc.name.clone().into() } else { format!("{} · not saved", s.doc.name).into() };
         let workspace_changed = matches!(e, AppEvent::Workspace);
         self.shell.update(cx, |sh, cx| {
@@ -477,8 +524,18 @@ impl LucemApp {
 
 impl Render for LucemApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = self.store.read(cx);
+        let notifications_open = s.notifications_open;
+        let notifications = s.notifications.clone();
+        let active_toast = s.active_toast.clone();
+        let st_close = self.store.clone();
+        let st_clear = self.store.clone();
+        let st_dismiss = self.store.clone();
+        let st_open = self.store.clone();
+
         div()
             .id("lucem-app")
+            .relative()
             .size_full()
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.store.update(cx, |s, cx| s.request_view(ViewRequest::ToggleSides, cx))))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -487,6 +544,128 @@ impl Render for LucemApp {
                 }
             }))
             .child(self.shell.clone())
+            // Notification popover anchored above the bottom-bar Bell icon
+            .when(notifications_open, |d| {
+                d.child(
+                    v_flex()
+                        .id("notifications-popover")
+                        .occlude()
+                        .absolute()
+                        .bottom(px(36.))
+                        .right(px(12.))
+                        .w(px(360.))
+                        .max_h(px(340.))
+                        .rounded(px(theme::RADIUS_LG))
+                        .border_1()
+                        .border_color(color::border())
+                        .bg(color::raised())
+                        .p(px(theme::MD))
+                        .gap(px(theme::SM))
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(theme::XS))
+                                .child(Icon::new(IconName::Bell).small().text_color(color::text_muted()))
+                                .child(div().flex_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text()).child("Notifications"))
+                                .when(!notifications.is_empty(), |h| {
+                                    h.child(
+                                        Button::new("notif-clear")
+                                            .ghost()
+                                            .xsmall()
+                                            .label("Clear")
+                                            .on_click(move |_, _, cx| st_clear.update(cx, |s, cx| s.clear_notifications(cx))),
+                                    )
+                                })
+                                .child(
+                                    Button::new("notif-close")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(Icon::new(IconName::Close))
+                                        .on_click(move |_, _, cx| st_close.update(cx, |s, cx| s.toggle_notifications(cx))),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .id("notifications-list")
+                                .flex_1()
+                                .min_h_0()
+                                .max_h(px(260.))
+                                .overflow_y_scroll()
+                                .gap(px(theme::XS))
+                                .when(notifications.is_empty(), |v| {
+                                    v.child(div().py(px(theme::MD)).text_xs().text_color(color::text_muted()).child("No notifications yet."))
+                                })
+                                .children(notifications.iter().rev().map(|n| {
+                                    h_flex()
+                                        .gap(px(theme::SM))
+                                        .p(px(theme::SM))
+                                        .rounded(px(theme::RADIUS_SM))
+                                        .bg(color::panel())
+                                        .items_start()
+                                        .child(
+                                            div()
+                                                .mt(px(5.))
+                                                .size(px(6.))
+                                                .rounded(px(3.))
+                                                .flex_none()
+                                                .bg(if n.is_error { color::danger() } else { color::accent_mark() }),
+                                        )
+                                        .child(div().flex_1().min_w_0().text_xs().text_color(color::text()).child(n.message.clone()))
+                                })),
+                        ),
+                )
+            })
+            // Auto-dismissing toast anchored above the bottom-bar Bell icon
+            .when(!notifications_open && active_toast.is_some(), |d| {
+                let toast = active_toast.unwrap();
+                let toast_id = toast.id;
+                let stripe = if toast.is_error { color::danger() } else { color::accent_mark() };
+                d.child(
+                    h_flex()
+                        .id("status-toast")
+                        .occlude()
+                        .absolute()
+                        .bottom(px(36.))
+                        .right(px(12.))
+                        .max_w(px(400.))
+                        .rounded(px(theme::RADIUS_LG))
+                        .border_1()
+                        .border_color(color::border())
+                        .bg(color::raised())
+                        .overflow_hidden()
+                        .items_center()
+                        .child(div().w(px(3.)).h_full().flex_none().bg(stripe))
+                        .child(
+                            h_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .px(px(theme::MD))
+                                .py(px(theme::SM))
+                                .gap(px(theme::SM))
+                                .items_center()
+                                .child(Icon::new(IconName::Bell).small().text_color(stripe))
+                                .child(
+                                    div()
+                                        .id("toast-body")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(color::text())
+                                        .on_click(move |_, _, cx| st_open.update(cx, |s, cx| s.toggle_notifications(cx)))
+                                        .child(toast.message),
+                                )
+                                .child(
+                                    Button::new("toast-dismiss")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(Icon::new(IconName::Close))
+                                        .tooltip("Dismiss")
+                                        .on_click(move |_, _, cx| st_dismiss.update(cx, |s, cx| s.dismiss_toast(Some(toast_id), cx))),
+                                ),
+                        ),
+                )
+            })
     }
 }
 

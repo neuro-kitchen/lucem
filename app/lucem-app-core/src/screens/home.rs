@@ -75,7 +75,17 @@ pub fn home(store: &Entity<Store>, open_file: impl Fn(&mut Window, &mut App) + '
             h_flex()
                 .gap(px(theme::SM))
                 .child(Button::new("home-open").primary().icon(IconName::FolderOpen).label("Open image or OME-Zarr…").on_click(move |_, w, cx| open_file(w, cx)))
-                .child(Button::new("home-project").outline().icon(IconName::Folder).label("Open project…").on_click(move |_, w, cx| open_project(w, cx))),
+                .child(Button::new("home-project").outline().icon(IconName::Folder).label("Open project…").on_click(move |_, w, cx| open_project(w, cx)))
+                .child({
+                    let st = store.clone();
+                    let done = s.prefs.walkthrough_done;
+                    let b = Button::new("home-walkthrough")
+                        .icon(IconName::Sparkles)
+                        .label("60s walkthrough")
+                        .tooltip("Open the 3D sample volume with a quick 3-step interactive guide")
+                        .on_click(move |_, _, cx| st.update(cx, |s, cx| s.start_walkthrough(cx)));
+                    if done { b.ghost() } else { b.outline() }
+                }),
         )
         .when(!opening.is_empty(), |d| d.child(div().text_sm().text_color(color::warning()).child(format!("Opening {}…", opening.join(", ")))))
         .child(h_flex().items_start().gap(px(theme::XL)).child(recent_col).child(samples))

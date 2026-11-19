@@ -546,9 +546,18 @@ impl DisplayPanel {
             }
             m
         });
+        let st_gal = store.clone();
+        let gallery_btn = Button::new("proc-gallery")
+            .ghost()
+            .xsmall()
+            .icon(Icon::new(IconName::LayoutGrid))
+            .label("Gallery")
+            .tooltip("Visual op gallery — live 128 × 128 Before ↔ After previews on this channel")
+            .on_click(move |_, _, cx| st_gal.update(cx, |_, cx| cx.emit(crate::data::store::AppEvent::OpenOpGallery)));
         let proc_bar = h_flex()
             .gap(px(theme::XS))
             .child(add_op)
+            .child(gallery_btn)
             .child(div().flex_1())
             .children(view_style.clone().zip(view.clone()).map(|((name, style), vid)| {
                 let (a, b) = (store.clone(), store.clone());
