@@ -502,6 +502,164 @@ impl Op {
         matches!(self, Op::OtsuThreshold { .. } | Op::LiThreshold { .. } | Op::TriangleThreshold { .. })
     }
 
+    /// Plain-English explanation of what this op does and when to use it.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Op::GaussianBlur { .. } => "Smooths high-frequency pixel noise before thresholding or edge detection.",
+            Op::Median { .. } => "Removes salt-and-pepper specks while keeping sharp cell boundaries.",
+            Op::UnsharpMask { .. } => "Crisps fine textures and blurred membranes by boosting local detail.",
+            Op::DifferenceOfGaussians { .. } => "Band-pass filter that highlights bright spots and nuclei of a target size.",
+            Op::Sobel {} => "Highlights intensity gradients and object outlines.",
+            Op::Laplace {} => "Second derivative highlighting fine edges, spots, and membranes.",
+            Op::Frangi { .. } => "Enhances tubular structures such as blood vessels, axons, and neurites.",
+            Op::Sato { .. } => "Multi-scale ridge detector for continuous filaments and vasculature.",
+            Op::Gamma { .. } => "Nonlinear tone curve that lifts faint signal without clipping bright peaks.",
+            Op::Rescale { .. } => "Maps a chosen intensity range [min, max] linearly to [0, 1].",
+            Op::Invert {} => "Inverts intensities (1 − x), useful for dark-on-bright stains.",
+            Op::LogContrast { .. } => "Compresses very bright peaks so dim fluorescence structures become visible.",
+            Op::SigmoidContrast { .. } => "S-curve contrast stretch around a cutoff intensity.",
+            Op::Clahe { .. } => "Local adaptive contrast enhancement for unevenly illuminated slides.",
+            Op::RollingBall { .. } => "Subtracts smooth uneven background illumination while keeping cells intact.",
+            Op::TvDenoise { .. } => "Edge-preserving total-variation denoising for noisy fluorescence images.",
+            Op::Bilateral { .. } => "Smooths flat regions while strictly preserving crisp membrane edges.",
+            Op::WhiteTophat { .. } => "Extracts bright spots/cells smaller than the disk radius from uneven background.",
+            Op::BlackTophat { .. } => "Extracts dark structures smaller than the disk radius on bright backgrounds.",
+            Op::MorphGradient { .. } => "Grayscale dilation minus erosion — highlights boundaries without thresholding.",
+            Op::Canny { .. } => "Detects thin, clean 1-px object edges as a binary mask.",
+            Op::OtsuThreshold { .. } => "Automatic global threshold for bimodal foreground/background histograms.",
+            Op::LiThreshold { .. } => "Minimum cross-entropy threshold — often better than Otsu on fluorescence.",
+            Op::TriangleThreshold { .. } => "Best when bright cells are sparse against a large dark background.",
+            Op::SauvolaThreshold { .. } => "Local adaptive threshold for uneven lighting or varying stain density.",
+            Op::NiblackThreshold { .. } => "Local mean/std adaptive threshold for textured or low-contrast regions.",
+            Op::HysteresisThreshold { .. } => "Keeps pixels above `low` only when connected to strong pixels above `high`.",
+            Op::Threshold { .. } => "Manual binary threshold keeping pixels at or above `value`.",
+            Op::Open { .. } => "Erode then dilate — removes small isolated noise specks from a mask.",
+            Op::Close { .. } => "Dilate then erode — bridges narrow gaps and smooths mask outlines.",
+            Op::Erode { .. } => "Shrinks foreground mask regions by `radius` pixels.",
+            Op::Dilate { .. } => "Expands foreground mask regions by `radius` pixels.",
+            Op::FillHoles {} => "Fills enclosed dark holes inside segmented nuclei or tissue masks.",
+            Op::RemoveSmallHoles { .. } => "Fills only small enclosed holes below `max_size` pixels.",
+            Op::RemoveSmall { .. } => "Drops debris and tiny objects smaller than `min_size` pixels.",
+            Op::Skeletonize {} => "Thins mask structures to 1-px centerlines for neurite/vessel tracing.",
+            Op::DistanceTransform {} => "Computes Euclidean distance from every foreground pixel to background.",
+            Op::MaskUnion {} => "Combines two masks (on where A or B is on).",
+            Op::MaskIntersect {} => "Keeps overlap of two masks (on where both A and B are on).",
+            Op::MaskSubtract {} => "Removes mask B from mask A.",
+            Op::MaskInvert {} => "Swaps foreground and background of a binary mask.",
+            Op::Label {} => "Numbers each connected object in a mask so it can be measured or split.",
+            Op::Watershed { .. } => "Splits touching nuclei/cells by flooding markers over a relief image.",
+            Op::ExpandLabels { .. } => "Grows each labeled nucleus outward into cytoplasm without overlapping.",
+            Op::ClearBorder { .. } => "Removes partial objects touching the image border before measuring.",
+            Op::FindBoundaries {} => "Extracts 1-px outlines between adjacent labeled objects.",
+            Op::MaskImage {} => "Zeroes image pixels outside a mask to isolate a region of interest.",
+            Op::Combine { .. } => "Linear channel blend (a·A + b·B), e.g. bleed-through subtraction.",
+            Op::ChannelRatio { .. } => "Ratiometric channel math A / (B + eps) for FRET or normalized stains.",
+            Op::NormalizedDiff { .. } => "Normalized difference (A − B) / (|A| + |B| + eps) between two channels.",
+            Op::ChannelProduct {} => "Colocalization product A · B highlighting co-expressed signal.",
+            Op::Measure {} => "Computes per-object area, shape, and intensity table for Analyze.",
+        }
+    }
+
+    /// Plain-English intent synonyms used by Command Search (`F3` / `Ctrl+K`).
+    pub fn keywords(&self) -> &'static str {
+        match self {
+            Op::GaussianBlur { .. } => "smooth denoise blur soft",
+            Op::Median { .. } => "speckle salt pepper denoise",
+            Op::UnsharpMask { .. } => "sharpen crisp detail",
+            Op::DifferenceOfGaussians { .. } => "dog blob spot nuclei bandpass",
+            Op::Sobel {} | Op::Laplace {} => "edge outline gradient",
+            Op::Frangi { .. } | Op::Sato { .. } => "vessels neurites axons filaments tubular ridges",
+            Op::Gamma { .. } | Op::LogContrast { .. } | Op::SigmoidContrast { .. } => "brightness contrast faint dim tone",
+            Op::Rescale { .. } => "normalize stretch contrast",
+            Op::Invert {} => "negative reverse flip",
+            Op::Clahe { .. } => "contrast equalize uneven local",
+            Op::RollingBall { .. } => "background shading uneven lighting flatfield illumination",
+            Op::TvDenoise { .. } | Op::Bilateral { .. } => "denoise smooth edge preserving noise",
+            Op::WhiteTophat { .. } | Op::BlackTophat { .. } => "background subtract spots illumination",
+            Op::MorphGradient { .. } => "outline border membrane",
+            Op::Canny { .. } => "edges contours",
+            Op::OtsuThreshold { .. } | Op::LiThreshold { .. } | Op::TriangleThreshold { .. } => "segment binarize auto threshold nuclei cells",
+            Op::SauvolaThreshold { .. } | Op::NiblackThreshold { .. } => "adaptive local uneven threshold",
+            Op::HysteresisThreshold { .. } => "dual threshold connected",
+            Op::Threshold { .. } => "manual cutoff binarize mask",
+            Op::Open { .. } | Op::RemoveSmall { .. } => "clean specks debris dust",
+            Op::Close { .. } | Op::FillHoles {} | Op::RemoveSmallHoles { .. } => "holes gaps fill clean",
+            Op::Erode { .. } | Op::Dilate { .. } => "shrink grow morphology",
+            Op::Skeletonize {} => "centerline trace neurite vessel branch",
+            Op::DistanceTransform {} => "edt distance thickness watershed",
+            Op::Label {} => "count objects connected components cells nuclei",
+            Op::Watershed { .. } => "split touching cells nuclei separate",
+            Op::ExpandLabels { .. } => "cytoplasm ring grow cell",
+            Op::ClearBorder { .. } => "edge touch partial exclude",
+            Op::FindBoundaries {} => "outline perimeter border",
+            Op::Combine { .. } | Op::ChannelRatio { .. } | Op::NormalizedDiff { .. } | Op::ChannelProduct {} => "channel math calculator ratio colocalization",
+            Op::MaskImage {} | Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} => "boolean mask roi",
+            Op::Measure {} => "quantify table area intensity stats",
+        }
+    }
+
+    /// Suggested follow-up op tags for predictive "Next step" chips.
+    pub fn next_steps(&self) -> &'static [&'static str] {
+        match self {
+            Op::RollingBall { .. } | Op::WhiteTophat { .. } | Op::BlackTophat { .. } => &["gaussian_blur", "li_threshold", "otsu_threshold"],
+            Op::GaussianBlur { .. } | Op::Median { .. } | Op::Bilateral { .. } | Op::TvDenoise { .. } | Op::Clahe { .. } => {
+                &["li_threshold", "otsu_threshold", "triangle_threshold"]
+            }
+            Op::Frangi { .. } | Op::Sato { .. } => &["hysteresis_threshold", "triangle_threshold", "li_threshold"],
+            Op::OtsuThreshold { .. }
+            | Op::LiThreshold { .. }
+            | Op::TriangleThreshold { .. }
+            | Op::SauvolaThreshold { .. }
+            | Op::NiblackThreshold { .. }
+            | Op::HysteresisThreshold { .. }
+            | Op::Threshold { .. } => &["fill_holes", "remove_small", "label"],
+            Op::FillHoles {} | Op::RemoveSmallHoles { .. } | Op::Open { .. } | Op::Close { .. } => &["remove_small", "label", "distance_transform"],
+            Op::RemoveSmall { .. } => &["label", "skeletonize", "distance_transform"],
+            Op::Label {} => &["expand_labels", "clear_border", "measure"],
+            Op::ExpandLabels { .. } | Op::ClearBorder { .. } | Op::Watershed { .. } => &["find_boundaries", "measure"],
+            _ => &[],
+        }
+    }
+
+    /// Direct documentation URL for this op (shown in the Inspector / Explain popover).
+    pub fn docs_url(&self) -> String {
+        format!("https://github.com/neuro-kitchen/lucem/blob/main/crates/lucem-ops/src/{}", self.source_rel_path())
+    }
+
+    /// Relative path to this op's CubeCL implementation inside `crates/lucem-ops/src/`.
+    pub fn source_rel_path(&self) -> &'static str {
+        match self {
+            Op::GaussianBlur { .. } | Op::UnsharpMask { .. } | Op::DifferenceOfGaussians { .. } => "filter/gaussian.rs",
+            Op::Median { .. } => "filter/order.rs",
+            Op::Sobel {} | Op::Laplace {} => "filter/gradient.rs",
+            Op::Frangi { .. } | Op::Sato { .. } => "filter/ridge.rs",
+            Op::Gamma { .. } | Op::LogContrast { .. } | Op::SigmoidContrast { .. } => "intensity/contrast.rs",
+            Op::Rescale { .. } | Op::Invert {} | Op::Combine { .. } | Op::ChannelRatio { .. } | Op::NormalizedDiff { .. } | Op::ChannelProduct {} => "core/elementwise.rs",
+            Op::Clahe { .. } => "intensity/equalize.rs",
+            Op::RollingBall { .. } => "restore/background.rs",
+            Op::TvDenoise { .. } | Op::Bilateral { .. } => "restore/denoise.rs",
+            Op::WhiteTophat { .. } | Op::BlackTophat { .. } | Op::MorphGradient { .. } => "morphology/grayscale.rs",
+            Op::Canny { .. } => "feature/canny.rs",
+            Op::OtsuThreshold { .. } | Op::LiThreshold { .. } | Op::TriangleThreshold { .. } => "threshold/global.rs",
+            Op::SauvolaThreshold { .. } | Op::NiblackThreshold { .. } => "threshold/local.rs",
+            Op::HysteresisThreshold { .. } => "threshold/hysteresis.rs",
+            Op::Threshold { .. } => "core/elementwise.rs",
+            Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::FillHoles {} => "morphology/binary.rs",
+            Op::RemoveSmall { .. } | Op::RemoveSmallHoles { .. } => "morphology/geodesic.rs",
+            Op::Skeletonize {} => "morphology/skeleton.rs",
+            Op::DistanceTransform {} => "core/distance.rs",
+            Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} | Op::MaskImage {} => "core/elementwise.rs",
+            Op::Label {} | Op::Measure {} => "measure/regions.rs",
+            Op::Watershed { .. } => "segment/watershed.rs",
+            Op::ExpandLabels { .. } | Op::ClearBorder { .. } | Op::FindBoundaries {} => "segment/labels.rs",
+        }
+    }
+
+    /// Instantiates a default op from its snake_case tag (`"fill_holes"`, `"li_threshold"`, …).
+    pub fn by_tag(tag: &str) -> Option<Op> {
+        catalog().into_iter().find(|op| op.tag() == tag)
+    }
+
     /// The pointwise representation of a unary `Image -> Image` op that can be fused into a
     /// [`lucem_ops::core::pointwise::PointwiseRun`], or `None` for any other op.
     pub fn pointwise_op(&self) -> Option<lucem_ops::core::pointwise::PointwiseOp> {
