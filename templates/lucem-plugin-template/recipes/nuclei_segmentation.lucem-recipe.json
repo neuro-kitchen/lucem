@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "name": "Nuclei Segmentation (Fluorescence)",
+  "family": "Segment",
+  "description": "Rolling-ball background subtraction, Gaussian denoise, Li auto-threshold, hole fill, size filter, and connected-component labeling.",
+  "inputs": [
+    { "name": "nuclei", "port": "image" }
+  ],
+  "output": "labels",
+  "steps": [
+    { "id": "bg", "op": "rolling_ball", "radius": 25.0 },
+    { "id": "smooth", "op": "gaussian_blur", "sigma": 1.5 },
+    { "id": "mask", "op": "li_threshold", "bins": 256 },
+    { "id": "holes", "op": "fill_holes" },
+    { "id": "clean", "op": "remove_small", "min_size": 30 },
+    { "id": "labels", "op": "label" }
+  ]
+}
