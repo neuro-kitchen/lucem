@@ -285,16 +285,24 @@ fn channel_menu(store: &Entity<Store>, image: String, channel: usize, view: Opti
                     let icon = cat.icon;
                     sub_outer = sub_outer.submenu(cat.name, w, cx, move |mut sub, _, _| {
                         for (label, op) in &items {
-                            let (st, img, vw, op) = (st.clone(), img.clone(), vw.clone(), op.clone());
-                            sub = sub.item(PopupMenuItem::new(label.clone()).icon(Icon::new(icon)).on_click(move |_, _, cx| {
-                                let (op, img, vw) = (op.clone(), img.clone(), vw.clone());
-                                st.update(cx, |s, cx| {
-                                    let title = op.title();
-                                    if s.execute(Command::ApplyOp { op, view: vw, image: img, channel }, cx).is_ok() {
-                                        s.set_status(format!("{title} added to channel"), cx);
-                                    }
-                                });
-                            }));
+                            let (st, img, vw, op_click, op_hov) = (st.clone(), img.clone(), vw.clone(), op.clone(), op.clone());
+                            let st_menu = st.clone();
+                            sub = sub.item(crate::ui::op_gallery::op_menu_item(
+                                format!("layer-op-{}", op_hov.tag()),
+                                label.clone(),
+                                icon,
+                                op_hov,
+                                st_menu,
+                                move |_, cx| {
+                                    let (op, img, vw) = (op_click.clone(), img.clone(), vw.clone());
+                                    st.update(cx, |s, cx| {
+                                        let title = op.title();
+                                        if s.execute(Command::ApplyOp { op, view: vw, image: img, channel }, cx).is_ok() {
+                                            s.set_status(format!("{title} added to channel"), cx);
+                                        }
+                                    });
+                                },
+                            ));
                         }
                         sub
                     });

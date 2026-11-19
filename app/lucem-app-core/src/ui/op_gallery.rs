@@ -456,7 +456,7 @@ impl Render for OpGallery {
                                                         .child(
                                                             div()
                                                                 .absolute()
-                                                                .bottom(px(3.))
+                                                                .top(px(3.))
                                                                 .left(px(3.))
                                                                 .px(px(3.))
                                                                 .py(px(1.))
@@ -469,7 +469,7 @@ impl Render for OpGallery {
                                                         .child(
                                                             div()
                                                                 .absolute()
-                                                                .bottom(px(3.))
+                                                                .top(px(3.))
                                                                 .right(px(3.))
                                                                 .px(px(3.))
                                                                 .py(px(1.))
@@ -659,7 +659,7 @@ impl Render for OpHoverPreview {
                     .child(
                         div()
                             .absolute()
-                            .bottom(px(4.))
+                            .top(px(4.))
                             .left(px(4.))
                             .px(px(5.))
                             .py(px(1.))
@@ -672,7 +672,7 @@ impl Render for OpHoverPreview {
                     .child(
                         div()
                             .absolute()
-                            .bottom(px(4.))
+                            .top(px(4.))
                             .right(px(4.))
                             .px(px(5.))
                             .py(px(1.))
@@ -687,6 +687,42 @@ impl Render for OpHoverPreview {
             .child(div().text_size(px(10.)).text_color(color::text_muted()).child(op.description()))
             .into_any_element()
     }
+}
+
+/// Builds a `PopupMenuItem` for an operation that drives the floating Before ↔ After hover
+/// preview card whenever the user hovers over the menu row.
+pub fn op_menu_item(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    icon: IconName,
+    op: Op,
+    store: Entity<Store>,
+    on_click: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
+) -> gpui_kit::component::menu::PopupMenuItem {
+    let id = id.into();
+    let label = label.into();
+    let op_hov = op.clone();
+    let st_hov = store.clone();
+    let st_click = store.clone();
+    gpui_kit::component::menu::PopupMenuItem::element(move |_, _| {
+        let op_hov = op_hov.clone();
+        let st_hov = st_hov.clone();
+        h_flex()
+            .id(id.clone())
+            .w_full()
+            .gap(px(8.))
+            .items_center()
+            .child(Icon::new(icon).small().text_color(color::text_muted()))
+            .child(div().text_sm().child(label.clone()))
+            .on_hover(move |enter, _, cx| {
+                let next = (*enter).then(|| op_hov.clone());
+                st_hov.update(cx, |s, cx| s.set_hovered_op(next, cx));
+            })
+    })
+    .on_click(move |_, w, cx| {
+        st_click.update(cx, |s, cx| s.set_hovered_op(None, cx));
+        on_click(w, cx);
+    })
 }
 
 // ----------------------------------------------------------------------------

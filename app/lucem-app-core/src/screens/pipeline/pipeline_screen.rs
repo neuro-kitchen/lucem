@@ -69,6 +69,8 @@ pub struct PipelineView {
     registry: Option<Registry>,
     /// Where the floating tool bar sits.
     dock: ToolbarDock,
+    /// Whether the right-side Inspector pane is open.
+    inspector_open: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -116,7 +118,7 @@ impl PipelineView {
             }),
             cx.subscribe(&canvas, |_, _, _: &CanvasEvent, cx| cx.notify()),
         ];
-        Self { store, canvas, inspector, registry: None, dock: ToolbarDock::default(), _subs: subs }
+        Self { store, canvas, inspector, registry: None, dock: ToolbarDock::default(), inspector_open: true, _subs: subs }
     }
 
     fn canvas_do(canvas: &WeakEntity<GraphCanvas>, cx: &mut App, f: impl FnOnce(&mut GraphCanvas, &mut Context<GraphCanvas>)) {
@@ -381,7 +383,7 @@ impl PipelineView {
     /// aside (fades out, takes no pointer) while the view moves.
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let c = self.canvas.read(cx);
-        let (hand, selected, moving) = (c.hand, !c.selected.is_empty(), c.moving());
+        let (hand, selected) = (c.hand, !c.selected.is_empty());
         let dock = self.dock;
         let column = dock.column();
         let canvas = self.canvas.downgrade();
@@ -425,8 +427,7 @@ impl PipelineView {
             .border_color(color::border())
             .bg(color::raised())
             .shadow_lg()
-            .when(moving, |d| d.opacity(0.))
-            .when(!moving, |d| d.occlude())
+            .occlude()
             .child(place)
             .child(tool("tool-select", IconName::MousePointer2, "Select (V)", !hand, |c, cx| {
                 c.hand = false;
@@ -462,6 +463,25 @@ impl Render for PipelineView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // In its own workspace the menus are in the app's menu row; docked in Explore, here
         let own_bar = (self.store.read(cx).workspace != crate::navigation::route::Workspace::Pipeline).then(|| self.menu_bar(cx));
+        let inspector_open = self.inspector_open;
+        let reopen_inspector = (!inspector_open).then(|| {
+            div()
+                .absolute()
+                .top_3()
+                .right_3()
+                .occlude()
+                .child(
+                    Button::new("pipe-inspector-open")
+                        .outline()
+                        .small()
+                        .icon(Icon::new(IconName::PanelRight))
+                        .tooltip("Show Inspector")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.inspector_open = true;
+                            cx.notify();
+                        })),
+                )
+        });
         v_flex().id("pipeline-workspace").size_full().children(own_bar).child(
             h_flex()
             .flex_1()
@@ -471,17 +491,40 @@ impl Render for PipelineView {
             .p(px(theme::PANE_GAP))
             .gap(px(theme::PANE_GAP))
             .bg(color::chrome())
-            .child(div().relative().flex_1().min_w_0().h_full().rounded(px(theme::RADIUS_LG)).overflow_hidden().child(self.canvas.clone()).child(self.toolbar(cx)))
-            .child(
-                v_flex()
-                    .flex_none()
-                    .w(px(INSPECTOR_W))
-                    .h_full()
-                    .rounded(px(theme::RADIUS_LG))
-                    .overflow_hidden()
-                    .bg(color::panel())
-                    .child(self.inspector.clone()),
-            ))
+            .child(div().relative().flex_1().min_w_0().h_full().rounded(px(theme::RADIUS_LG)).overflow_hidden().child(self.canvas.clone()).child(self.toolbar(cx)).children(reopen_inspector))
+            .when(inspector_open, |d| {
+                d.child(
+                    v_flex()
+                        .flex_none()
+                        .w(px(INSPECTOR_W))
+                        .h_full()
+                        .rounded(px(theme::RADIUS_LG))
+                        .overflow_hidden()
+                        .bg(color::panel())
+                        .child(
+                            h_flex()
+                                .flex_none()
+                                .h(px(32.))
+                                .px(px(theme::MD))
+                                .items_center()
+                                .border_b_1()
+                                .border_color(color::border())
+                                .child(div().flex_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child("INSPECTOR"))
+                                .child(
+                                    Button::new("pipe-inspector-close")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(Icon::new(IconName::PanelRight))
+                                        .tooltip("Hide Inspector")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.inspector_open = false;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(div().flex_1().min_h_0().child(self.inspector.clone())),
+                )
+            }))
     }
 }
 
@@ -628,6 +671,7 @@ impl Inspector {
             let active_name = doc.active().map_or("No image open".to_string(), |i| i.name.clone());
             let (n_nodes, n_edges) = (g.nodes.len(), g.edges.len());
             let canvas_add = self.canvas.downgrade();
+            let st_add = self.store.clone();
             let store_run = self.store.clone();
             let add_btn = Button::new("inspector-add-op")
                 .outline()
@@ -636,18 +680,28 @@ impl Inspector {
                 .label("Add operation")
                 .dropdown_menu(move |mut m: PopupMenu, w, cx| {
                     for cat in operations() {
-                        let canvas = canvas_add.clone();
+                        let (canvas, st_cat) = (canvas_add.clone(), st_add.clone());
                         let icon = cat.icon;
-                        let items: Vec<_> = cat.items.into_iter().filter(|it| matches!(it.template, Template::Op(_))).collect();
+                        let items: Vec<_> = cat.items.into_iter().filter_map(|it| match it.template.clone() {
+                            Template::Op(op) => Some((it.label, it.template, op)),
+                            _ => None,
+                        }).collect();
                         if items.is_empty() {
                             continue;
                         }
                         m = m.submenu(cat.name, w, cx, move |mut sub, _, _| {
-                            for it in &items {
-                                let (canvas, template) = (canvas.clone(), it.template.clone());
-                                sub = sub.item(PopupMenuItem::new(it.label.clone()).icon(Icon::new(icon)).on_click(move |_, _, cx| {
-                                    let _ = canvas.update(cx, |c, cx| c.add(&template, None, cx));
-                                }));
+                            for (label, template, op) in &items {
+                                let (canvas, template, op_hov, st_item) = (canvas.clone(), template.clone(), op.clone(), st_cat.clone());
+                                sub = sub.item(crate::ui::op_gallery::op_menu_item(
+                                    format!("insp-op-{}", op_hov.tag()),
+                                    label.clone(),
+                                    icon,
+                                    op_hov,
+                                    st_item,
+                                    move |_, cx| {
+                                        let _ = canvas.update(cx, |c, cx| c.add(&template, None, cx));
+                                    },
+                                ));
                             }
                             sub
                         });
@@ -1124,7 +1178,6 @@ impl Render for Inspector {
         v_flex()
             .id("pipeline-inspector")
             .size_full()
-            .child(h_flex().flex_none().h(px(32.)).px(px(theme::MD)).border_b_1().border_color(color::border()).child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child("INSPECTOR")))
             .child(div().id("inspector-body").flex_1().min_h_0().overflow_y_scroll().p(px(theme::MD)).child(body))
     }
 }

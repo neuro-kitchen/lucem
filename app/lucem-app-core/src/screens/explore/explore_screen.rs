@@ -515,7 +515,25 @@ impl Render for ExploreView {
                 .rounded(px(theme::RADIUS_LG))
                 .overflow_hidden()
                 .bg(color::panel())
-                .child(h_flex().flex_none().h(px(30.)).px(px(theme::MD)).items_center().border_b_1().border_color(color::border()).child(div().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(color::text_muted()).child(title.to_uppercase())))
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .h(px(30.))
+                        .px(px(theme::MD))
+                        .items_center()
+                        .border_b_1()
+                        .border_color(color::border())
+                        .child(div().flex_1().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(color::text_muted()).child(title.to_uppercase()))
+                        .child({
+                            let st_hide = self.store.clone();
+                            Button::new("side-panel-collapse")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::PanelRight))
+                                .tooltip("Hide side panel (Ctrl+])")
+                                .on_click(move |_, _, cx| st_hide.update(cx, |s, cx| s.request_view(ViewRequest::ToggleRight, cx)))
+                        }),
+                )
                 .child(div().flex_1().min_h_0().child(p))
                 // Its inner edge resizes it
                 .child(

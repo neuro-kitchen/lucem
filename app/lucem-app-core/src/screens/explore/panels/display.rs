@@ -16,7 +16,7 @@ use std::rc::Rc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu};
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -530,16 +530,24 @@ impl DisplayPanel {
                 let icon = cat.icon;
                 m = m.submenu(cat.name, window, cx, move |mut sub, _, _| {
                     for (label, op) in &items {
-                        let (st, image, view, op) = (st.clone(), image.clone(), view.clone(), op.clone());
-                        sub = sub.item(PopupMenuItem::new(label.clone()).icon(Icon::new(icon)).on_click(move |_, _, cx| {
-                            let (op, image, view) = (op.clone(), image.clone(), view.clone());
-                            st.update(cx, |s, cx| {
-                                let title = op.title();
-                                if s.execute(Command::ApplyOp { op, view, image, channel: c }, cx).is_ok() {
-                                    s.set_status(format!("{title} added to this channel's processing"), cx);
-                                }
-                            });
-                        }));
+                        let (st, image, view, op_click, op_hov) = (st.clone(), image.clone(), view.clone(), op.clone(), op.clone());
+                        let st_menu = st.clone();
+                        sub = sub.item(crate::ui::op_gallery::op_menu_item(
+                            format!("disp-op-{}", op_hov.tag()),
+                            label.clone(),
+                            icon,
+                            op_hov,
+                            st_menu,
+                            move |_, cx| {
+                                let (op, image, view) = (op_click.clone(), image.clone(), view.clone());
+                                st.update(cx, |s, cx| {
+                                    let title = op.title();
+                                    if s.execute(Command::ApplyOp { op, view, image, channel: c }, cx).is_ok() {
+                                        s.set_status(format!("{title} added to this channel's processing"), cx);
+                                    }
+                                });
+                            },
+                        ));
                     }
                     sub
                 });

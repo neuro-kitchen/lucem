@@ -331,7 +331,7 @@ impl LucemApp {
         spec.app_menu = commands::app_menu();
         spec.help_menu = vec![kitchen_shell::MenuItem::command("help.keys")];
         spec.settings = sections;
-        spec.layout_toggles = vec!["view.right".into()];
+        spec.layout_toggles = vec![];
         spec.remote = Some(RemoteSpec { label: crate::platform::host_label().into(), icon: IconName::Server, menu: vec![kitchen_shell::MenuItem::command("remote.this"), kitchen_shell::MenuItem::Separator, kitchen_shell::MenuItem::command("remote.connect"), kitchen_shell::MenuItem::provided("remote.images")] });
         spec.status_items = Some(Rc::new(move |_, _| readings.clone().into_any_element()));
         let shell = cx.new(|cx| Shell::new(spec, window, cx));

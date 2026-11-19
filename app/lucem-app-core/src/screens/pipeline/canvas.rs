@@ -217,11 +217,6 @@ impl GraphCanvas {
         self.settle = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(std::time::Duration::from_millis(SETTLE_MS)).await;
             let _ = this.update(cx, |c, cx| {
-                // A pan still held (the pointer resting) keeps it moving: look again later
-                if matches!(c.drag, Some(Drag::Pan { .. })) {
-                    c.note_motion(cx);
-                    return;
-                }
                 c.moving = false;
                 c.settle = None;
                 cx.emit(CanvasEvent::Moving);
@@ -714,8 +709,7 @@ impl GraphCanvas {
             .border_color(color::border())
             .bg(color::raised())
             .shadow_md()
-            .when(self.moving, |d| d.opacity(0.))
-            .when(!self.moving, |d| d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(b("zoom-out", IconName::ZoomOut, "Zoom out (Ctrl −)", |c, cx| c.zoom_by(0.8, None, cx)))
             .child(div().w(px(48.)).text_xs().child({
                 let me = me.clone();
