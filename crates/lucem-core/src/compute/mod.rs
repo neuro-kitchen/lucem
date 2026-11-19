@@ -19,6 +19,7 @@ pub mod bench;
 pub mod launch;
 pub mod limits;
 pub mod pinning;
+pub mod pointwise;
 mod special;
 mod target;
 pub mod tune;
@@ -27,5 +28,6 @@ pub use crate::device::{ComputeError, ComputeTarget, RUNTIME_ENV, TEST_RUNTIMES_
 pub use launch::{cube_row, element_position, line_position, row_share, tile_point, unit_col, unit_row, LaunchGeometry, RowShare};
 pub use limits::{device_elements, MAX_DEVICE_ELEMENTS};
 pub use pinning::{pin_tuned_choices, tuned_choices_pinned, PinnedChoices};
+pub use pointwise::{apply_pointwise, POINTWISE_AFFINE, POINTWISE_CLAMP, POINTWISE_GAMMA, POINTWISE_RESCALE};
 pub use special::{negative_infinity, positive_infinity, NEGATIVE_INFINITY_BITS, POSITIVE_INFINITY_BITS};
 pub use target::{configure_runtime, open_device, shutdown_devices, ComputeTask, CACHE_DIR_ENV, KERNEL_CACHE_ENV};

@@ -141,42 +141,86 @@ pub struct Pyramid {
     chunks: ChunkCache,
 }
 
-/// Decoded chunks by `(level, chunk index)`, least recently used dropped first.
-#[derive(Debug, Default)]
-struct ChunkCache(Mutex<ChunkCacheState>);
+/// Process-wide decoded chunk cache key: `(pyramid_id, level, chunk index)`.
+type GlobalChunkKey = (u64, usize, Vec<usize>);
 
-#[derive(Debug, Default)]
-struct ChunkCacheState {
-    map: HashMap<(usize, Vec<usize>), CachedChunk>,
+/// Single shared RAM cache across every open [`Pyramid`], bounded by
+/// [`lucem_core::memory::ram_memory_limit`] (least recently used dropped first; any single chunk
+/// larger than a quarter of the budget is bypassed so total RAM never exceeds the limit).
+#[derive(Default)]
+struct GlobalChunkCacheState {
+    map: HashMap<GlobalChunkKey, CachedChunk>,
     bytes: usize,
     clock: u64,
 }
 
+static GLOBAL_CHUNK_CACHE: std::sync::LazyLock<Mutex<GlobalChunkCacheState>> = std::sync::LazyLock::new(Default::default);
+static NEXT_PYRAMID_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Decoded chunk cache handle for one [`Pyramid`], backed by [`GLOBAL_CHUNK_CACHE`].
+#[derive(Debug)]
+struct ChunkCache {
+    pyramid_id: u64,
+}
+
+impl Default for ChunkCache {
+    fn default() -> Self {
+        Self { pyramid_id: NEXT_PYRAMID_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+    }
+}
+
+impl Drop for ChunkCache {
+    fn drop(&mut self) {
+        if let Ok(mut c) = GLOBAL_CHUNK_CACHE.lock() {
+            let pid = self.pyramid_id;
+            let mut freed = 0usize;
+            c.map.retain(|k, v| {
+                if k.0 == pid {
+                    freed += v.0.len() * 4;
+                    false
+                } else {
+                    true
+                }
+            });
+            c.bytes = c.bytes.saturating_sub(freed);
+        }
+    }
+}
+
 impl ChunkCache {
     fn get(&self, key: &(usize, Vec<usize>)) -> Option<Arc<Vec<f32>>> {
-        let mut c = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut c = GLOBAL_CHUNK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         c.clock += 1;
         let clock = c.clock;
-        c.map.get_mut(key).map(|e| {
+        c.map.get_mut(&(self.pyramid_id, key.0, key.1.clone())).map(|e| {
             e.1 = clock;
             e.0.clone()
         })
     }
 
     fn put(&self, key: (usize, Vec<usize>), data: Arc<Vec<f32>>) {
-        let mut c = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        c.clock += 1;
-        let clock = c.clock;
-        c.bytes += data.len() * 4;
-        if let Some(old) = c.map.insert(key, (data, clock)) {
-            c.bytes -= old.0.len() * 4;
+        let limit = lucem_core::memory::ram_memory_limit().max(CHUNK_CACHE_BYTES);
+        let entry_bytes = data.len() * 4;
+        // Guarantee: never store a single entry over a quarter of the RAM budget.
+        if entry_bytes > limit / 4 {
+            return;
         }
-        while c.bytes > CHUNK_CACHE_BYTES && c.map.len() > 1 {
+        let mut c = GLOBAL_CHUNK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let gkey = (self.pyramid_id, key.0, key.1);
+        if let Some(old) = c.map.remove(&gkey) {
+            c.bytes = c.bytes.saturating_sub(old.0.len() * 4);
+        }
+        // Make room BEFORE inserting so total never exceeds limit.
+        while c.bytes.saturating_add(entry_bytes) > limit {
             let Some(oldest) = c.map.iter().min_by_key(|(_, e)| e.1).map(|(k, _)| k.clone()) else { break };
             if let Some(e) = c.map.remove(&oldest) {
-                c.bytes -= e.0.len() * 4;
+                c.bytes = c.bytes.saturating_sub(e.0.len() * 4);
             }
         }
+        c.clock += 1;
+        let clock = c.clock;
+        c.bytes += entry_bytes;
+        c.map.insert(gkey, (data, clock));
     }
 }
 

@@ -100,7 +100,7 @@ kitchen-shell = "0.0.8"
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 # Analytics & columnar data (Arrow + Polars)
 arrow = { version = "60.1.0", default-features = false }
-polars = { version = "0.55.2", default-features = false, features = ["lazy", "fmt", "parquet"] }
+polars = { version = "0.55.2", default-features = false, features = ["lazy", "fmt", "parquet", "dtype-slim"] }
 # Image I/O
 image = "0.25.10"
 tiff = "0.11.3"

@@ -15,9 +15,10 @@ impl Scratch {
         Self::default()
     }
 
-    /// A buffer of at least `len` elements of `E` (contents unspecified).
+    /// A buffer of at least `len` elements of `E` (contents unspecified), rounded to a size class
+    /// (`2^k × {1, 1.25, 1.5, 1.75}`) so CubeCL's pool reuses freed pages across nearby sizes.
     pub fn get<E: CubeElement>(&mut self, client: &Client, len: usize) -> Handle {
-        let need = buffer::bytes::<E>(len);
+        let need = super::budget::size_class(buffer::bytes::<E>(len));
         match &self.handle {
             Some(handle) if self.capacity_bytes >= need => handle.clone(),
             _ => {
