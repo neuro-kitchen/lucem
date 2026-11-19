@@ -293,6 +293,34 @@ impl SettingsView {
     /// The programs scripts use: where each is found (Settings, its variable or the `PATH`) and
     /// its version; Choose… sets a path, Use PATH clears it. Nothing is installed by lucem.
     fn tools(&mut self, p: &Prefs, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = (p, cx);
+            return v_flex()
+                .gap(px(theme::MD))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(color::text())
+                        .child("Desktop-only environment settings"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color::text_muted())
+                        .child("Local Python/.venv environments, warm script workers, drop-in plugin scripts, and Rust toolchains run inside the native Lucem desktop app or on a connected lucem serve host. Browsers cannot spawn local subprocesses or inspect the local filesystem."),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color::text_muted())
+                        .child("Built-in image processing operations, 2D/3D exploration, and remote pipelines work directly in the browser."),
+                )
+                .into_any_element();
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
         if self.versions_for.as_ref() != Some(&p.tools) {
             self.versions_for = Some(p.tools.clone());
             cx.spawn(async move |this, cx| {
@@ -345,10 +373,12 @@ impl SettingsView {
             col = col.child(Self::row(tool.title(), tool.what(), "", control));
         }
         col.into_any_element()
+        }
     }
 
     /// The project's environments: the Python its scripts run in (the project's own, the active
     /// one or lucem's default), and the Rust toolchain pinned for its Rust scripts.
+    #[cfg(not(target_family = "wasm"))]
     fn environment(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let dir = tools::scripts_dir();
         let py = tools::python_env();

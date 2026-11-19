@@ -526,6 +526,122 @@ pub fn render_volume_rgba_clipped(
     Ok(out)
 }
 
+/// Pure-CPU fallback of [`render_volume_rgba_clipped`] for environments without a CubeCL compute
+/// device (such as the browser WASM build). Produces packed BGRA `u32` pixels using the exact
+/// same camera, six-sided [`VolumeClip`], and [`VolumeMode`] semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn render_volume_rgba_cpu(
+    volume: &[f32],
+    extra: Option<&[f32]>,
+    dims: Zyx,
+    spacing: [f32; 3],
+    camera: OrbitCamera,
+    clip: VolumeClip,
+    (width, height): (usize, usize),
+    channels: &[VolumeChannel],
+    mode: VolumeMode,
+    quality: VolumeQuality,
+) -> Result<Vec<u32>, String> {
+    let [d, h, w] = dims;
+    let voxels = d * h * w;
+    if voxels == 0 || width == 0 || height == 0 || !volume.len().is_multiple_of(voxels) {
+        return Err("the volume or the image is empty or of the wrong size".into());
+    }
+    let n_volume = volume.len() / voxels;
+    let n_extra = extra.map_or(0, |e| e.len() / voxels);
+    if channels.len() != n_volume + n_extra {
+        return Err(format!("{} channel settings for {} channels", channels.len(), n_volume + n_extra));
+    }
+    let c = camera_setup(dims, spacing, camera, (width, height));
+    let voxel = (0..3).map(|a| 2.0 * c.half[a] / [w, h, d][a].max(1) as f32).fold(f32::MAX, f32::min);
+    let step = voxel * if quality == VolumeQuality::Fine { 1.0 } else { 1.75 };
+    let alpha = (step * 12.0).min(1.0);
+    let [hx, hy, hz] = c.half;
+    let bx0 = -hx + 2.0 * hx * clip.x[0].clamp(0.0, 0.99);
+    let bx1 = -hx + 2.0 * hx * clip.x[1].clamp(clip.x[0] + 0.005, 1.0);
+    let by0 = -hy + 2.0 * hy * clip.y[0].clamp(0.0, 0.99);
+    let by1 = -hy + 2.0 * hy * clip.y[1].clamp(clip.y[0] + 0.005, 1.0);
+    let bz0 = -hz + 2.0 * hz * clip.z[0].clamp(0.0, 0.99);
+    let bz1 = -hz + 2.0 * hz * clip.z[1].clamp(clip.z[0] + 0.005, 1.0);
+    let back = 2.0 * c.radius;
+    let (dx, dy, dz) = (c.forward[0], c.forward[1], c.forward[2]);
+    let (fx, fy, fz) = (w as f32, h as f32, d as f32);
+    let max_steps = (3 * d.max(h).max(w)).clamp(16, 512);
+    let mut out = vec![255u32 << 24; width * height];
+    let ch_info: Vec<(usize, f32, f32, [f32; 3], f32)> = channels
+        .iter()
+        .enumerate()
+        .filter(|(_, ch)| ch.visible)
+        .map(|(i, ch)| (i, ch.window.0, 1.0 / (ch.window.1 - ch.window.0).abs().max(1e-12), ch.color, 1.0 / ch.gamma.max(0.05)))
+        .collect();
+    for row in 0..height {
+        let v = (height as f32 * 0.5 - row as f32 - 0.5) * c.scale;
+        for col in 0..width {
+            let u = (col as f32 + 0.5 - width as f32 * 0.5) * c.scale;
+            let ox = c.right[0] * u + c.up[0] * v - dx * back;
+            let oy = c.right[1] * u + c.up[1] * v - dy * back;
+            let oz = c.right[2] * u + c.up[2] * v - dz * back;
+            let (t1, t2) = ((bx0 - ox) / dx, (bx1 - ox) / dx);
+            let (t3, t4) = ((by0 - oy) / dy, (by1 - oy) / dy);
+            let (t5, t6) = ((bz0 - oz) / dz, (bz1 - oz) / dz);
+            let near = t1.min(t2).max(t3.min(t4)).max(t5.min(t6));
+            let far = t1.max(t2).min(t3.max(t4)).min(t5.max(t6));
+            if far <= near {
+                continue;
+            }
+            let n = (((far - near) / step).floor() as usize + 1).min(max_steps);
+            let dt = (far - near) / n as f32;
+            let inv_n = 1.0 / n as f32;
+            let (mut red, mut green, mut blue) = (0.0f32, 0.0f32, 0.0f32);
+            for &(ci, lo, inv, rgb, inv_gamma) in &ch_info {
+                let slice = if ci < n_volume {
+                    &volume[ci * voxels..(ci + 1) * voxels]
+                } else if let Some(ex) = extra {
+                    let ei = ci - n_volume;
+                    &ex[ei * voxels..(ei + 1) * voxels]
+                } else {
+                    continue;
+                };
+                let (mut acc, mut opacity) = (0.0f32, 0.0f32);
+                for i in 0..n {
+                    let t = near + (i as f32 + 0.5) * dt;
+                    let ix = (((ox + dx * t + hx) / (2.0 * hx) * fx) as isize).clamp(0, w as isize - 1) as usize;
+                    let iy = (((oy + dy * t + hy) / (2.0 * hy) * fy) as isize).clamp(0, h as isize - 1) as usize;
+                    let iz = (((oz + dz * t + hz) / (2.0 * hz) * fz) as isize).clamp(0, d as isize - 1) as usize;
+                    let raw = slice[(iz * h + iy) * w + ix];
+                    let s = ((raw - lo) * inv).clamp(0.0, 1.0);
+                    match mode {
+                        VolumeMode::MaximumIntensity => acc = acc.max(s),
+                        VolumeMode::DepthCue => {
+                            let cue = 1.0 - 0.65 * (i as f32 * inv_n);
+                            acc = acc.max(s * cue);
+                        }
+                        VolumeMode::Composite => {
+                            let a = (s * alpha).min(1.0);
+                            acc += (1.0 - opacity) * a;
+                            opacity += (1.0 - opacity) * a;
+                            if opacity > 0.98 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if acc > 0.0 {
+                    let shade = acc.powf(inv_gamma);
+                    red += rgb[0] * shade;
+                    green += rgb[1] * shade;
+                    blue += rgb[2] * shade;
+                }
+            }
+            let r8 = (red.min(1.0) * 255.0 + 0.5) as u32;
+            let g8 = (green.min(1.0) * 255.0 + 0.5) as u32;
+            let b8 = (blue.min(1.0) * 255.0 + 0.5) as u32;
+            out[row * width + col] = b8 | (g8 << 8) | (r8 << 16) | (255u32 << 24);
+        }
+    }
+    Ok(out)
+}
+
 /// Packed BGRA pixels (as [`render_volume_rgba`] returns them) as bytes in BGRA order.
 pub fn unpack_bgra(pixels: &[u32]) -> Vec<u8> {
     pixels.iter().flat_map(|v| v.to_le_bytes()).collect()

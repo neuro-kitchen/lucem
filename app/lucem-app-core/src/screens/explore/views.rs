@@ -25,7 +25,7 @@ use gpui_kit::{
 use lucem_core::memory::DeviceArray;
 use lucem_core::Shape;
 use lucem_io::{PlaneAxis, Pyramid};
-use lucem_view::{bgra_image, composite_bgra, project_point, ray_midpoint_frac, render_volume_rgba_clipped, unpack_bgra, ChannelDisplay, OrbitCamera, VolumeChannel, VolumeClip, VolumeMode, VolumeQuality};
+use lucem_view::{bgra_image, composite_bgra, project_point, ray_midpoint_frac, render_volume_rgba_clipped, render_volume_rgba_cpu, unpack_bgra, ChannelDisplay, OrbitCamera, VolumeChannel, VolumeClip, VolumeMode, VolumeQuality};
 
 use crate::data::labels::{plane_overlay, volume_labels, ClassColor};
 use crate::data::store::{AppEvent, Store};
@@ -39,9 +39,14 @@ const PLANE_SIDE: usize = 1024;
 const VOLUME_MOVING: usize = 96;
 const VOLUME_RESTING: usize = 256;
 const VOLUME_RESTING_HI: usize = 512;
+/// Longest side of the volume when rendering on the CPU (e.g. in the browser).
+const VOLUME_CPU_MOVING: usize = 64;
+const VOLUME_CPU_RESTING: usize = 128;
 /// Longest side of the image rendered while turning; at rest, 2 px per voxel up to the cap.
 const IMAGE_MOVING: usize = 320;
 const IMAGE_RESTING: usize = 1024;
+const IMAGE_CPU_MOVING: usize = 200;
+const IMAGE_CPU_RESTING: usize = 384;
 /// Opacity of annotations over the planes.
 const OVERLAY_ALPHA: f32 = 0.45;
 /// Wheel pixels per plane.
@@ -359,10 +364,17 @@ type ImageVolume = ((String, usize), Arc<DeviceArray<f32>>);
 /// `(image, level, annotations revision)` → every class with annotations, and their colours.
 type LabelVolume = ((String, usize, u64), Option<Arc<DeviceArray<f32>>>, Vec<[u8; 3]>);
 
+/// `(image, level)` → host-side channels stacked for CPU fallback rendering (WASM / no GPU).
+type HostImageVolume = ((String, usize), Arc<Vec<f32>>);
+/// `(image, level, annotations revision)` → host-side rasterized labels and their colours.
+type HostLabelVolume = ((String, usize, u64), Option<Arc<Vec<f32>>>, Vec<[u8; 3]>);
+
 #[derive(Default)]
 struct DeviceVolumes {
     image: Option<ImageVolume>,
     labels: Option<LabelVolume>,
+    host_image: Option<HostImageVolume>,
+    host_labels: Option<HostLabelVolume>,
     /// The device they live on (the store's device generation).
     generation: u64,
 }
@@ -454,10 +466,7 @@ impl VolumeView {
             return;
         }
         let s = self.store.read(cx);
-        let Some(device) = s.device.clone() else {
-            self.store.update(cx, |s, cx| s.ensure_device(cx));
-            return;
-        };
+        let device = s.device.clone();
         let Some(py) = s.active_pyramid().cloned() else { return };
         let Some(id) = s.doc.active_image.clone() else { return };
         if !py.is_volume() {
@@ -471,70 +480,117 @@ impl VolumeView {
         if bw < 16 || bh < 16 {
             return;
         }
-        let rest_cap = if self.high_res { VOLUME_RESTING_HI } else { VOLUME_RESTING };
-        let level = level_under(&py, if fast { VOLUME_MOVING } else { rest_cap });
+        let generation = s.device_generation;
+        if device.is_none() {
+            #[cfg(not(target_family = "wasm"))]
+            self.store.update(cx, |s, cx| s.ensure_device(cx));
+        }
+        let (vol_cap, img_cap) = if device.is_some() {
+            let rest_cap = if self.high_res { VOLUME_RESTING_HI } else { VOLUME_RESTING };
+            (if fast { VOLUME_MOVING } else { rest_cap }, if fast { IMAGE_MOVING } else { IMAGE_RESTING })
+        } else {
+            (if fast { VOLUME_CPU_MOVING } else { VOLUME_CPU_RESTING }, if fast { IMAGE_CPU_MOVING } else { IMAGE_CPU_RESTING })
+        };
+        let level = level_under(&py, vol_cap);
         let l = py.levels[level].clone();
         let side = l.width.max(l.height).max(l.depth);
         // No more than 2 image px per voxel: finer only costs time
-        let longest = if fast { IMAGE_MOVING } else { (2 * side).clamp(256, IMAGE_RESTING) };
+        let longest = if fast { img_cap } else { (2 * side).clamp(160, img_cap) };
         let scale = (longest as f32 / bw.max(bh) as f32).min(1.0);
         let (iw, ih) = (((bw as f32 * scale) as usize).max(2), ((bh as f32 * scale) as usize).max(2));
         let (camera, clip, mode, volumes) = (self.camera, self.clip, self.mode, self.volumes.clone());
-        let generation = s.device_generation;
         let quality = if fast { VolumeQuality::Fast } else { VolumeQuality::Fine };
         self.busy = true;
         let work = cx.background_spawn(async move {
             let t0 = Instant::now();
-            let client = &device.client;
             let (px_um, dz_um) = (py.pixel_size_um.unwrap_or(1.0) * l.downsample, py.z_spacing_um.or(py.pixel_size_um).unwrap_or(1.0) * l.z_downsample);
             let spacing = [dz_um as f32, px_um as f32, px_um as f32];
             let dims = [l.depth, l.height, l.width];
             let err = |e: &dyn std::fmt::Display| e.to_string();
-            // The channels on the device, read and uploaded once per image and level
-            // Volumes uploaded to a device used before a switch are not on this one
-            {
-                let mut v = crate::platform::lock(&volumes);
-                if v.generation != generation {
-                    *v = DeviceVolumes { generation, ..Default::default() };
-                }
-            }
             let image_key = (id.clone(), level);
-            let cached = crate::platform::lock(&volumes).image.as_ref().filter(|(k, _)| *k == image_key).map(|(_, v)| v.clone());
-            let volume = match cached {
-                Some(v) => v,
-                None => {
-                    let mut values = Vec::new();
-                    for c in 0..displays.len() {
-                        values.extend(py.read_block(level, c, [0, 0, 0], dims).map_err(|e| err(&e))?);
-                    }
-                    let v = Arc::new(DeviceArray::from_host(client, Shape::new([displays.len() * dims[0], dims[1], dims[2]]), values).map_err(|e| err(&e))?);
-                    crate::platform::lock(&volumes).image = Some((image_key, v.clone()));
-                    v
-                }
-            };
-            // The annotation classes, rasterized again when the annotations change
             let labels_key = (id.clone(), level, rev);
-            let cached = crate::platform::lock(&volumes).labels.as_ref().filter(|(k, _, _)| *k == labels_key).map(|(_, v, c)| (v.clone(), c.clone()));
-            let (labels, label_colors) = match cached {
-                Some(l) => l,
-                None => {
-                    let (values, colors) = volume_labels(&anns, &classes, &l);
-                    let v = if colors.is_empty() { None } else { Some(Arc::new(DeviceArray::from_host(client, Shape::new([colors.len() * dims[0], dims[1], dims[2]]), values).map_err(|e| err(&e))?)) };
-                    crate::platform::lock(&volumes).labels = Some((labels_key, v.clone(), colors.clone()));
-                    (v, colors)
+            let (pixels, device_ms) = if let Some(device) = device {
+                let client = &device.client;
+                // Volumes uploaded to a device used before a switch are not on this one
+                {
+                    let mut v = crate::platform::lock(&volumes);
+                    if v.generation != generation {
+                        v.image = None;
+                        v.labels = None;
+                        v.generation = generation;
+                    }
                 }
+                let cached = crate::platform::lock(&volumes).image.as_ref().filter(|(k, _)| *k == image_key).map(|(_, v)| v.clone());
+                let volume = match cached {
+                    Some(v) => v,
+                    None => {
+                        let mut values = Vec::new();
+                        for c in 0..displays.len() {
+                            values.extend(py.read_block(level, c, [0, 0, 0], dims).map_err(|e| err(&e))?);
+                        }
+                        let v = Arc::new(DeviceArray::from_host(client, Shape::new([displays.len() * dims[0], dims[1], dims[2]]), values).map_err(|e| err(&e))?);
+                        crate::platform::lock(&volumes).image = Some((image_key, v.clone()));
+                        v
+                    }
+                };
+                // The annotation classes, rasterized again when the annotations change
+                let cached = crate::platform::lock(&volumes).labels.as_ref().filter(|(k, _, _)| *k == labels_key).map(|(_, v, c)| (v.clone(), c.clone()));
+                let (labels, label_colors) = match cached {
+                    Some(l) => l,
+                    None => {
+                        let (values, colors) = volume_labels(&anns, &classes, &l);
+                        let v = if colors.is_empty() { None } else { Some(Arc::new(DeviceArray::from_host(client, Shape::new([colors.len() * dims[0], dims[1], dims[2]]), values).map_err(|e| err(&e))?)) };
+                        crate::platform::lock(&volumes).labels = Some((labels_key, v.clone(), colors.clone()));
+                        (v, colors)
+                    }
+                };
+                let mut channels: Vec<VolumeChannel> = displays.iter().map(|d| VolumeChannel { visible: d.visible, window: (d.min, d.max), color: d.color, gamma: d.gamma }).collect();
+                if labels.is_some() {
+                    channels.extend(label_colors.iter().map(|c| VolumeChannel { visible: true, window: (0.0, 1.0), color: [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0], gamma: 1.0 }));
+                }
+                if !channels.iter().any(|c| c.visible) {
+                    return Err("No channel is visible".to_string());
+                }
+                let t_device = Instant::now();
+                let out = render_volume_rgba_clipped(client, &volume, labels.as_deref(), dims, spacing, camera, clip, (iw, ih), &channels, mode, quality)?;
+                let pixels = out.to_host(client);
+                (pixels, t_device.elapsed().as_secs_f64() * 1000.0)
+            } else {
+                // Pure-CPU software ray-marcher fallback (browser / no local GPU).
+                let cached = crate::platform::lock(&volumes).host_image.as_ref().filter(|(k, _)| *k == image_key).map(|(_, v)| v.clone());
+                let volume = match cached {
+                    Some(v) => v,
+                    None => {
+                        let mut values = Vec::new();
+                        for c in 0..displays.len() {
+                            values.extend(py.read_block(level, c, [0, 0, 0], dims).map_err(|e| err(&e))?);
+                        }
+                        let v = Arc::new(values);
+                        crate::platform::lock(&volumes).host_image = Some((image_key, v.clone()));
+                        v
+                    }
+                };
+                let cached = crate::platform::lock(&volumes).host_labels.as_ref().filter(|(k, _, _)| *k == labels_key).map(|(_, v, c)| (v.clone(), c.clone()));
+                let (labels, label_colors) = match cached {
+                    Some(l) => l,
+                    None => {
+                        let (values, colors) = volume_labels(&anns, &classes, &l);
+                        let v = if colors.is_empty() { None } else { Some(Arc::new(values)) };
+                        crate::platform::lock(&volumes).host_labels = Some((labels_key, v.clone(), colors.clone()));
+                        (v, colors)
+                    }
+                };
+                let mut channels: Vec<VolumeChannel> = displays.iter().map(|d| VolumeChannel { visible: d.visible, window: (d.min, d.max), color: d.color, gamma: d.gamma }).collect();
+                if labels.is_some() {
+                    channels.extend(label_colors.iter().map(|c| VolumeChannel { visible: true, window: (0.0, 1.0), color: [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0], gamma: 1.0 }));
+                }
+                if !channels.iter().any(|c| c.visible) {
+                    return Err("No channel is visible".to_string());
+                }
+                let t_cpu = Instant::now();
+                let pixels = render_volume_rgba_cpu(&volume, labels.as_deref().map(|v| v.as_slice()), dims, spacing, camera, clip, (iw, ih), &channels, mode, quality)?;
+                (pixels, t_cpu.elapsed().as_secs_f64() * 1000.0)
             };
-            let mut channels: Vec<VolumeChannel> = displays.iter().map(|d| VolumeChannel { visible: d.visible, window: (d.min, d.max), color: d.color, gamma: d.gamma }).collect();
-            if labels.is_some() {
-                channels.extend(label_colors.iter().map(|c| VolumeChannel { visible: true, window: (0.0, 1.0), color: [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0], gamma: 1.0 }));
-            }
-            if !channels.iter().any(|c| c.visible) {
-                return Err("No channel is visible".to_string());
-            }
-            let t_device = Instant::now();
-            let out = render_volume_rgba_clipped(client, &volume, labels.as_deref(), dims, spacing, camera, clip, (iw, ih), &channels, mode, quality)?;
-            let pixels = out.to_host(client);
-            let device_ms = t_device.elapsed().as_secs_f64() * 1000.0;
             let image = bgra_image(iw, ih, unpack_bgra(&pixels));
             let frame = Frame { image, camera, size: (iw, ih), dims, spacing };
             Ok::<_, String>((frame, Timing { side, device_ms, total_ms: t0.elapsed().as_secs_f64() * 1000.0 }))

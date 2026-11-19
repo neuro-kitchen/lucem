@@ -8,5 +8,5 @@ pub mod volume;
 
 pub use tonemap::{build_render_image, ColormapLut, TonemapSettings};
 pub use viewport::ViewportCamera;
-pub use volume::{project_point, ray_midpoint_frac, render_volume, render_volume_rgba, render_volume_rgba_clipped, unpack_bgra, OrbitCamera, VolumeChannel, VolumeClip, VolumeMode, VolumeQuality};
+pub use volume::{project_point, ray_midpoint_frac, render_volume, render_volume_rgba, render_volume_rgba_clipped, render_volume_rgba_cpu, unpack_bgra, OrbitCamera, VolumeChannel, VolumeClip, VolumeMode, VolumeQuality};
 pub use tiles::{bgra_image, composite_bgra, label_color, render_layer, ChannelDisplay, LayerStyle, TileImage, TileKey, RegionReader, TileResult, TileService};
