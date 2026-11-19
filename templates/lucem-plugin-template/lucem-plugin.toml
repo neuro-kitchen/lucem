@@ -1,0 +1,21 @@
+[plugin]
+id = "example-microscopy-pack"
+name = "Example Microscopy Pack"
+version = "0.1.0"
+description = "Starter pack demonstrating Lucem drop-in Python/Rust ops and GPU recipes."
+authors = ["Your Name <you@example.org>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/your-org/lucem-plugin-example"
+min_lucem_version = "0.0.3"
+tags = ["fluorescence", "segmentation", "filter", "template"]
+
+[provides]
+ops = [
+  "ops/membrane_enhance.py",
+  "ops/channel_ratio.rs",
+  "ops/ml_segment_tile.py",
+]
+recipes = [
+  "recipes/nuclei_segmentation.lucem-recipe.json",
+]
+models = []

@@ -249,6 +249,15 @@ pub fn register(registry: &Registry, c: &Ctx) {
         CommandSpec::new("file.export_geojson", "Export as GeoJSON", IconName::FileOutput, st(|s, cx| s.export_geojson(cx))).group("File").hint("The shown image's shapes as GeoJSON").enabled(needs_image(s)),
         CommandSpec::new("file.export_cells", "Export cell measurements", IconName::Sheet, st(|s, cx| s.hist_export(cx))).group("File").hint("Cells, tiles, labels and provenance to the output store").enabled(needs_image(s)),
         CommandSpec::new("file.tune", "Tune this device", IconName::Gauge, st(|s, cx| s.tune_device(cx))).group("File").hint("Benchmark this GPU once for lucem's operators and models, in the background"),
+        CommandSpec::new("file.close_image", "Close image", IconName::Close, st(|s, cx| {
+            if let Some(id) = s.doc.active_image.clone() {
+                s.remove_image(id, cx);
+            }
+        }))
+        .group("File")
+        .hint("Close the active image (the file on disk is not touched)")
+        .key("secondary-w")
+        .enabled(needs_image(s)),
         CommandSpec::new("app.quit", "Quit", IconName::Power, |_, cx| cx.quit()).group("File").hint("Close lucem").key("secondary-q"),
     ];
     // Edit
@@ -380,6 +389,17 @@ pub fn register(registry: &Registry, c: &Ctx) {
                 .enabled(move |cx| if sel.read(cx).sel.shapes.len() >= 2 { Ok(()) } else { Err("Select two regions or more".into()) }),
         );
     }
+    {
+        let (store, sel) = (s.clone(), s.clone());
+        list.push(
+            CommandSpec::new("shapes.tile_grid", "Create tile grid inside shape (256 px)", IconName::LayoutGrid, move |_, cx| {
+                store.update(cx, |s, cx| s.create_tile_grid(256.0, 0.0, true, cx))
+            })
+            .group("Shapes")
+            .hint("Fill the selected region(s) with a clipped 256 px tile grid (QuPath-style)")
+            .enabled(move |cx| if !sel.read(cx).sel.shapes.is_empty() { Ok(()) } else { Err("Select a region shape first".into()) }),
+        );
+    }
     let masks: [(&str, &str, usize, IconName, MaskOperation); 6] = [
         ("union", "Union", 2, IconName::SquaresUnite, MaskOperation::Union),
         ("intersect", "Intersect", 2, IconName::SquaresIntersect, MaskOperation::Intersect),
@@ -403,6 +423,7 @@ pub fn register(registry: &Registry, c: &Ctx) {
         for it in cat.items {
             let Template::Op(op) = it.template.clone() else { continue };
             let (store, pipeline, template) = (s.clone(), pipeline.clone(), it.template.clone());
+            let op_hint = format!("{} · {} [{}]", op.description(), it.hint, op.keywords());
             list.push(
                 CommandSpec::with_args::<OpArgs>(op_id(&it.label), it.label.clone(), cat.icon, move |a, _, cx| {
                     let on_canvas = a.node || store.read(cx).workspace == Workspace::Pipeline;
@@ -414,11 +435,19 @@ pub fn register(registry: &Registry, c: &Ctx) {
                     Ok(Value::Null)
                 })
                 .group(cat.name)
-                .hint(format!("{} · a step on the shown channel, or a node in the Pipeline", it.hint)),
+                .hint(op_hint),
             );
         }
     }
-    let (f1, f2) = (c.clone(), s.clone());
+    let (f1, f2, g1) = (c.clone(), s.clone(), s.clone());
+    list.push(
+        CommandSpec::new("process.gallery", "Visual op gallery…", IconName::LayoutGrid, move |_, cx| {
+            g1.update(cx, |_, cx| cx.emit(AppEvent::OpenOpGallery));
+        })
+        .group("Process")
+        .hint("Preview 14 operations live on your image with Before ↔ After hover transition")
+        .enabled(needs_image(s)),
+    );
     list.push(
         CommandSpec::new("process.find", "Find an operation…", IconName::Search, move |window, cx| {
             let pipeline = f2.read(cx).workspace == Workspace::Pipeline;
@@ -874,6 +903,7 @@ pub fn app_menu() -> Vec<MenuItem> {
         MenuItem::Separator,
         MenuItem::command("file.tune"),
         MenuItem::Separator,
+        MenuItem::command("file.close_image"),
         MenuItem::command("app.quit"),
     ]
 }
@@ -886,6 +916,7 @@ pub fn explore_menus() -> Vec<MenuSpec> {
     let mut shapes = vec![MenuItem::label("Select")];
     shapes.extend(tools(&[Tool::Select, Tool::Marquee]));
     shapes.push(MenuItem::submenu_with_icon("Combine the selected shapes", IconName::SquaresUnite, ShapeOp::ALL.iter().map(|o| c(&format!("shapes.{}", o.title().to_lowercase()))).collect()));
+    shapes.push(c("shapes.tile_grid"));
     shapes.push(MenuItem::Separator);
     shapes.push(MenuItem::label("Draw"));
     shapes.extend(tools(&[Tool::Rect, Tool::Ellipse, Tool::Polygon, Tool::Lasso, Tool::Point, Tool::Brush, Tool::Eraser, Tool::Wand, Tool::Threshold, Tool::Segment]));
@@ -924,7 +955,7 @@ pub fn explore_menus() -> Vec<MenuSpec> {
             vec![MenuItem::label("Channels shown"), MenuItem::provided("image.channels"), MenuItem::Separator, MenuItem::label("Images of the project"), MenuItem::provided("image.images"), MenuItem::Separator, c("file.open_image"), c("image.remove")],
         ),
         MenuSpec::new("Shapes", shapes),
-        MenuSpec::new("Process", vec![c("process.find"), MenuItem::Separator, MenuItem::label("A step on the shown channel"), MenuItem::provided("process.families")]),
+        MenuSpec::new("Process", vec![c("process.gallery"), c("process.find"), MenuItem::Separator, MenuItem::label("A step on the shown channel"), MenuItem::provided("process.families")]),
         MenuSpec::new(
             "Analyze",
             vec![

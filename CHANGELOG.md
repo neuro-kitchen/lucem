@@ -5,6 +5,61 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+## [0.0.4] - 2026-11-19
+
+Fused GPU pipeline & memory budgets, native **OME-Zarr v0.5 / Zarr v3** reading, **22 new GPU
+operations** (52 built-in ops), **3D Volume Viewer in the browser** with six-sided clipping and
+depth-cued rendering, warm Python script workers & public plugin template, and an **M3 Expressive +
+Instagram Edits-inspired UX overhaul** with live Before ↔ After previews.
+
+### Added
+
+- **Native OME-Zarr v0.5 / Zarr v3 reader** (`lucem-io`): opens v0.5 containers (`zarr.json` with
+  `attributes.ome.multiscales`, `c/` chunk key encoding, zstd/gzip/blosc/bytes codecs) alongside
+  OME-Zarr v0.4.
+- **22 new GPU operations** (52 built-in ops in `lucem-pipeline` / `lucem-ops`): `Frangi`, `Sato`,
+  `Invert`, `LogContrast`, `SigmoidContrast`, `ChannelRatio`, `NormalizedDiff`, `ChannelProduct`,
+  `Bilateral`, `BlackTophat`, `LiThreshold`, `TriangleThreshold`, `SauvolaThreshold`,
+  `NiblackThreshold`, `HysteresisThreshold`, `FillHoles`, `RemoveSmallHoles`, `Skeletonize`,
+  `DistanceTransform`, `ExpandLabels`, `ClearBorder`, and `FindBoundaries`.
+- **Fused GPU `EvalCache` & unified memory budgets** (`lucem-core`, `lucem-pipeline`, `lucem serve
+  --memory`): fused `PointwiseOp`/`PointwiseRun` CubeCL kernel, size-classed GPU scratch pooling,
+  shared `GLOBAL_CHUNK_CACHE`, and persistent `PipelineTiles` cache.
+- **3D Volume Viewer upgrades** (`lucem-view`, `lucem-app-core`): six-sided GPU `VolumeClip`
+  planes, `VolumeMode::DepthCue`, `OrbitCamera::{xy, xz, yz, isometric}` presets, and a pure-CPU
+  software ray-marcher fallback (`render_volume_rgba_cpu`) so 3D volumes render live in the browser.
+- **Warm Python worker pool & plugin template** (`lucem-app-core`, `templates/lucem-plugin-template`):
+  persistent warm Python workers with PEP 723 auto-provisioned `uv` venvs, drop-in `.py`/`.rs`
+  script ops, `.lucem-recipe.json` & Macro Recorder export, and a ready-to-publish starter plugin
+  repository template.
+- **Visual Effect Strip & live Before ↔ After hover previews**: non-blocking bottom Visual Effect
+  Strip with inline primary parameter tuning, floating animated Before ↔ After hover preview card
+  across all operation dropdown menus and `"What's next?"` tonal cards, and a **Hold to compare**
+  floating pill on the Explore canvas.
+- **2D & 3D 60-second Guided Walkthroughs**: interactive auto-checking onboarding missions for both
+  2D fluorescence and 3D volumes with an M3 Expressive 3-segment progress bar.
+- **Notification Toast + bottom-bar Bell popover**, **`Close image`** (`Ctrl+W`) in the `Lucem`
+  menu above `Quit`, searchable `F1` shortcuts, intent-aware `F3` op search, and inline `Docs ↗`
+  kernel links.
+
+### Changed
+
+- **A pairing code never reaches a log.** `lucem serve` shows one only on a terminal; with none (a
+  container) it says how to get one: `podman exec -it <container> lucem clients pair`, which now
+  also shows the page's sign-in link (`--page URL`, or `LUCEM_PAGE_URL`, set to
+  `http://localhost:8443` in the image). Signing a browser in to a container is now that one
+  command instead of reading the container's log.
+- **M3 Expressive UI polish**: Split Button (`Visual strip | ▾`) in Layers, conversational
+  `"What's next?"` tonal cards, `PanelRight` toggle moved into panel headers, upgraded `84 px`
+  Levels histogram, shared `‹ value ›` stepper widget, and right-click channel context menus.
+
+### Fixed
+
+- **Browser stability**: guarded desktop-only `Settings › Environment` and local script creation on
+  `wasm32`, fixed disabled ops still showing a cyan overlay in remote compute, kept Pipeline
+  floating toolbars permanently visible after panning, and ensured `every_icon_used_is_bundled`
+  passes for all icons (`Grip`, `Bell`, `Package`).
+
 ## [0.0.3] - 2026-11-18
 
 lucem in the browser, two ways: **the docs viewer** (neuro-kitchen.github.io/lucem/viewer/,

@@ -22,7 +22,11 @@ mod scratch;
 mod workspace;
 
 pub use array::DeviceArray;
-pub use budget::{check_allocation, device_memory_limit, memory_usage, set_device_memory_limit, DEVICE_MEMORY_LIMIT_ENV};
+pub use budget::{
+    check_allocation, device_budget_bytes, device_memory_limit, device_reserved_ceiling, make_gpu_room, memory_usage, parse_bytes, ram_memory_limit,
+    register_gpu_holder, set_device_memory_limit, set_ram_memory_limit, size_class, tracked_gpu_bytes, EvictPriority,
+    GpuMemoryHolder, DEVICE_MEMORY_ENV, DEVICE_MEMORY_LIMIT_ENV, RAM_MEMORY_ENV,
+};
 pub use cache::DeviceCache;
 pub use scratch::Scratch;
 pub use workspace::Workspace;

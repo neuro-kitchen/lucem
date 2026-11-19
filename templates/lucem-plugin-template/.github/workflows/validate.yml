@@ -1,0 +1,39 @@
+name: Validate Lucem Plugin
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate manifest, recipes, and script op headers
+        run: |
+          python3 - <<'EOF'
+          import json, pathlib, py_compile, tomllib
+
+          root = pathlib.Path(".")
+          manifest = tomllib.loads((root / "lucem-plugin.toml").read_text())
+          assert "plugin" in manifest and manifest["plugin"].get("id"), "Missing [plugin].id"
+          print(f"Manifest OK: {manifest['plugin']['id']} v{manifest['plugin']['version']}")
+
+          for rel in manifest.get("provides", {}).get("ops", []):
+              p = root / rel
+              assert p.exists(), f"Missing op file: {rel}"
+              text = p.read_text()
+              assert "lucem:" in text, f"{rel} must contain `lucem:` header lines"
+              if p.suffix == ".py":
+                  py_compile.compile(str(p), doraise=True)
+              print(f"Op OK: {rel}")
+
+          for rel in manifest.get("provides", {}).get("recipes", []):
+              p = root / rel
+              data = json.loads(p.read_text())
+              assert data.get("steps"), f"Recipe {rel} has no steps"
+              print(f"Recipe OK: {rel} ({len(data['steps'])} steps)")
+          EOF

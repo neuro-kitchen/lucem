@@ -27,6 +27,7 @@ pub mod fft;
 pub mod histogram;
 pub mod kernels;
 pub mod pad;
+pub mod pointwise;
 pub mod random;
 pub mod reduce;
 pub mod scan;

@@ -141,42 +141,86 @@ pub struct Pyramid {
     chunks: ChunkCache,
 }
 
-/// Decoded chunks by `(level, chunk index)`, least recently used dropped first.
-#[derive(Debug, Default)]
-struct ChunkCache(Mutex<ChunkCacheState>);
+/// Process-wide decoded chunk cache key: `(pyramid_id, level, chunk index)`.
+type GlobalChunkKey = (u64, usize, Vec<usize>);
 
-#[derive(Debug, Default)]
-struct ChunkCacheState {
-    map: HashMap<(usize, Vec<usize>), CachedChunk>,
+/// Single shared RAM cache across every open [`Pyramid`], bounded by
+/// [`lucem_core::memory::ram_memory_limit`] (least recently used dropped first; any single chunk
+/// larger than a quarter of the budget is bypassed so total RAM never exceeds the limit).
+#[derive(Default)]
+struct GlobalChunkCacheState {
+    map: HashMap<GlobalChunkKey, CachedChunk>,
     bytes: usize,
     clock: u64,
 }
 
+static GLOBAL_CHUNK_CACHE: std::sync::LazyLock<Mutex<GlobalChunkCacheState>> = std::sync::LazyLock::new(Default::default);
+static NEXT_PYRAMID_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Decoded chunk cache handle for one [`Pyramid`], backed by [`GLOBAL_CHUNK_CACHE`].
+#[derive(Debug)]
+struct ChunkCache {
+    pyramid_id: u64,
+}
+
+impl Default for ChunkCache {
+    fn default() -> Self {
+        Self { pyramid_id: NEXT_PYRAMID_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+    }
+}
+
+impl Drop for ChunkCache {
+    fn drop(&mut self) {
+        if let Ok(mut c) = GLOBAL_CHUNK_CACHE.lock() {
+            let pid = self.pyramid_id;
+            let mut freed = 0usize;
+            c.map.retain(|k, v| {
+                if k.0 == pid {
+                    freed += v.0.len() * 4;
+                    false
+                } else {
+                    true
+                }
+            });
+            c.bytes = c.bytes.saturating_sub(freed);
+        }
+    }
+}
+
 impl ChunkCache {
     fn get(&self, key: &(usize, Vec<usize>)) -> Option<Arc<Vec<f32>>> {
-        let mut c = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut c = GLOBAL_CHUNK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         c.clock += 1;
         let clock = c.clock;
-        c.map.get_mut(key).map(|e| {
+        c.map.get_mut(&(self.pyramid_id, key.0, key.1.clone())).map(|e| {
             e.1 = clock;
             e.0.clone()
         })
     }
 
     fn put(&self, key: (usize, Vec<usize>), data: Arc<Vec<f32>>) {
-        let mut c = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        c.clock += 1;
-        let clock = c.clock;
-        c.bytes += data.len() * 4;
-        if let Some(old) = c.map.insert(key, (data, clock)) {
-            c.bytes -= old.0.len() * 4;
+        let limit = lucem_core::memory::ram_memory_limit().max(CHUNK_CACHE_BYTES);
+        let entry_bytes = data.len() * 4;
+        // Guarantee: never store a single entry over a quarter of the RAM budget.
+        if entry_bytes > limit / 4 {
+            return;
         }
-        while c.bytes > CHUNK_CACHE_BYTES && c.map.len() > 1 {
+        let mut c = GLOBAL_CHUNK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let gkey = (self.pyramid_id, key.0, key.1);
+        if let Some(old) = c.map.remove(&gkey) {
+            c.bytes = c.bytes.saturating_sub(old.0.len() * 4);
+        }
+        // Make room BEFORE inserting so total never exceeds limit.
+        while c.bytes.saturating_add(entry_bytes) > limit {
             let Some(oldest) = c.map.iter().min_by_key(|(_, e)| e.1).map(|(k, _)| k.clone()) else { break };
             if let Some(e) = c.map.remove(&oldest) {
-                c.bytes -= e.0.len() * 4;
+                c.bytes = c.bytes.saturating_sub(e.0.len() * 4);
             }
         }
+        c.clock += 1;
+        let clock = c.clock;
+        c.bytes += entry_bytes;
+        c.map.insert(gkey, (data, clock));
     }
 }
 
@@ -257,7 +301,7 @@ impl std::fmt::Debug for SourceBox {
     }
 }
 
-/// One Zarr v2 array (a level).
+/// One Zarr v2 or v3 array (a level).
 #[derive(Debug, Clone)]
 struct ZarrArray {
     dir: ArrayStore,
@@ -265,6 +309,8 @@ struct ZarrArray {
     chunks: Vec<usize>,
     dtype: Dtype,
     compressor: Compressor,
+    /// `"c/"` for Zarr v3 default chunk keys, `""` for Zarr v2.
+    chunk_prefix: String,
     sep: String,
     fill: f32,
     /// Index of the channel, z, y and x axes in `shape`.
@@ -445,7 +491,7 @@ impl Pyramid {
         if let Some(root) = find_ome_zarr_root(path) {
             return Self::open_zarr(&root);
         }
-        if path.is_dir() && path.join(".zgroup").is_file() {
+        if path.is_dir() && (path.join(".zgroup").is_file() || path.join("zarr.json").is_file()) {
             return Self::open_zarr(path);
         }
         if let Some(stack) = read_tiff_stack(path)? {
@@ -467,9 +513,19 @@ impl Pyramid {
     /// metadata now and its chunks when tiles are asked for. `name`: what to call it when its
     /// metadata names nothing.
     pub fn open_store(name: &str, store: Arc<dyn ZarrStore>) -> IoResult<Self> {
-        let attrs: RootAttrs = match store_text(store.as_ref(), ".zattrs") {
-            Some(text) => serde_json::from_str(&text)?,
-            None => RootAttrs::default(),
+        let attrs: RootAttrs = if let Some(text) = store_text(store.as_ref(), ".zattrs") {
+            serde_json::from_str(&text)?
+        } else if let Some(text) = store_text(store.as_ref(), "zarr.json") {
+            // OME-Zarr v0.5 (Zarr v3): multiscales & omero live under `attributes.ome` (or `attributes`)
+            let v: serde_json::Value = serde_json::from_str(&text)?;
+            let attrs_val = v
+                .get("attributes")
+                .and_then(|a| a.get("ome").or(Some(a)))
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+            serde_json::from_value(attrs_val).unwrap_or_default()
+        } else {
+            RootAttrs::default()
         };
         let ms = attrs.multiscales.into_iter().next().unwrap_or_default();
         let axis_names: Vec<String> = ms
@@ -491,7 +547,9 @@ impl Pyramid {
         }
         if datasets.is_empty() {
             for cand in ["0", "1", "2", "3", "4", "5", "s0", "s1", "s2", "s3", "s4", "s5"] {
-                if store.get(&format!("{cand}/.zarray")).ok().flatten().is_some() {
+                if store.get(&format!("{cand}/.zarray")).ok().flatten().is_some()
+                    || store.get(&format!("{cand}/zarr.json")).ok().flatten().is_some()
+                {
                     datasets.push(Dataset { path: cand.into(), transforms: Vec::new() });
                 }
             }
@@ -854,8 +912,76 @@ impl Pyramid {
 
 impl ZarrArray {
     fn open(dir: ArrayStore, axis_names: &[String]) -> IoResult<Self> {
-        let text = dir.get(".zarray").ok().flatten().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| IoError::OmeZarr(format!("{}/.zarray: not found", dir.prefix)))?;
-        let meta: ZArray = serde_json::from_str(&text)?;
+        if let Some(text) = dir.get(".zarray").ok().flatten().and_then(|b| String::from_utf8(b).ok()) {
+            return Self::open_v2(dir, &text, axis_names);
+        }
+        if let Some(text) = dir.get("zarr.json").ok().flatten().and_then(|b| String::from_utf8(b).ok()) {
+            return Self::open_v3(dir, &text, axis_names);
+        }
+        Err(IoError::OmeZarr(format!("{}: neither .zarray nor zarr.json found", dir.prefix)))
+    }
+
+    fn open_v3(dir: ArrayStore, text: &str, axis_names: &[String]) -> IoResult<Self> {
+        let v: serde_json::Value = serde_json::from_str(text)?;
+        let shape: Vec<usize> = serde_json::from_value(v.get("shape").cloned().unwrap_or_default())?;
+        let chunks: Vec<usize> = serde_json::from_value(
+            v.get("chunk_grid")
+                .and_then(|g| g.get("configuration"))
+                .and_then(|c| c.get("chunk_shape"))
+                .cloned()
+                .unwrap_or_default(),
+        )?;
+        let dt_str = v.get("data_type").and_then(|d| d.as_str()).unwrap_or("");
+        let mut little = true;
+        let mut compressor = Compressor::None;
+        if let Some(codecs) = v.get("codecs").and_then(|c| c.as_array()) {
+            for codec in codecs {
+                match codec.get("name").and_then(|n| n.as_str()) {
+                    Some("bytes") => {
+                        if codec.get("configuration").and_then(|c| c.get("endian")).and_then(|e| e.as_str()) == Some("big") {
+                            little = false;
+                        }
+                    }
+                    Some("zstd") => compressor = Compressor::Zstd,
+                    Some("blosc") => compressor = Compressor::Blosc,
+                    Some("sharding_indexed") => return Err(IoError::OmeZarr("Zarr v3 sharded arrays are not supported yet".into())),
+                    _ => {}
+                }
+            }
+        }
+        let dtype = match dt_str {
+            "uint8" => Dtype { kind: 'u', size: 1, little },
+            "uint16" => Dtype { kind: 'u', size: 2, little },
+            "uint32" => Dtype { kind: 'u', size: 4, little },
+            "int8" => Dtype { kind: 'i', size: 1, little },
+            "int16" => Dtype { kind: 'i', size: 2, little },
+            "int32" => Dtype { kind: 'i', size: 4, little },
+            "float32" => Dtype { kind: 'f', size: 4, little },
+            "float64" => Dtype { kind: 'f', size: 8, little },
+            "bool" => Dtype { kind: 'b', size: 1, little },
+            other => return Err(IoError::OmeZarr(format!("unsupported Zarr v3 data_type {other:?}"))),
+        };
+        let enc_name = v.get("chunk_key_encoding").and_then(|e| e.get("name")).and_then(|n| n.as_str()).unwrap_or("default");
+        let sep = v
+            .get("chunk_key_encoding")
+            .and_then(|e| e.get("configuration"))
+            .and_then(|c| c.get("separator"))
+            .and_then(|s| s.as_str())
+            .unwrap_or(if enc_name == "v2" { "." } else { "/" })
+            .to_string();
+        let chunk_prefix = if enc_name == "v2" { String::new() } else { format!("c{sep}") };
+        let dim_names: Vec<String> = v
+            .get("dimension_names")
+            .and_then(|d| d.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .filter(|d: &Vec<String>| !d.is_empty())
+            .unwrap_or_else(|| axis_names.to_vec());
+        let fill = v.get("fill_value").and_then(|f| f.as_f64()).unwrap_or(0.0) as f32;
+        Self::finish_open(dir, shape, chunks, dtype, compressor, chunk_prefix, sep, fill, &dim_names)
+    }
+
+    fn open_v2(dir: ArrayStore, text: &str, axis_names: &[String]) -> IoResult<Self> {
+        let meta: ZArray = serde_json::from_str(text)?;
         if meta.order.as_deref() == Some("F") {
             return Err(IoError::OmeZarr("Fortran-ordered Zarr arrays are not supported".into()));
         }
@@ -872,31 +998,46 @@ impl ZarrArray {
             Some("zstd") => Compressor::Zstd,
             Some(other) => return Err(IoError::OmeZarr(format!("Zarr compressor {other:?} is not supported yet (blosc-lz4, zstd and none are)"))),
         };
-        let nd = meta.shape.len();
-        if !(2..=6).contains(&nd) || meta.chunks.len() != nd {
-            return Err(IoError::OmeZarr(format!("unsupported Zarr shape {:?}", meta.shape)));
-        }
-        if meta.chunks.contains(&0) || meta.shape.contains(&0) {
-            return Err(IoError::OmeZarr(format!("Zarr shape {:?} / chunks {:?} has an empty axis", meta.shape, meta.chunks)));
-        }
-        let elements = meta.shape.iter().try_fold(1u128, |a, &v| a.checked_mul(v as u128));
-        if elements.is_none_or(|e| e > MAX_ARRAY_ELEMENTS) {
-            return Err(IoError::OmeZarr(format!("Zarr shape {:?} is too large", meta.shape)));
-        }
-        let chunk_bytes = meta.chunks.iter().try_fold(dtype.size as u128, |a, &v| a.checked_mul(v as u128));
-        if chunk_bytes.is_none_or(|b| b > MAX_CHUNK_BYTES) {
-            return Err(IoError::OmeZarr(format!("Zarr chunks {:?} are too large", meta.chunks)));
-        }
-        let find = |name: &str| axis_names.iter().position(|a| a == name).filter(|&i| i < nd);
-        let (y_axis, x_axis) = (find("y").unwrap_or(nd - 2), find("x").unwrap_or(nd - 1));
-        let c_axis = find("c").or(if nd >= 3 && axis_names.is_empty() { Some(nd - 3) } else { None });
-        let z_axis = find("z");
         if meta.dimension_separator.as_deref().is_some_and(|s| s != "." && s != "/") {
             return Err(IoError::OmeZarr(format!("unsupported dimension separator {:?}", meta.dimension_separator)));
         }
         let fill = meta.fill_value.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
         let sep = meta.dimension_separator.unwrap_or_else(|| ".".into());
-        Ok(Self { dir, shape: meta.shape, chunks: meta.chunks, dtype, compressor, sep, fill, c_axis, z_axis, y_axis, x_axis })
+        Self::finish_open(dir, meta.shape, meta.chunks, dtype, compressor, String::new(), sep, fill, axis_names)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_open(
+        dir: ArrayStore,
+        shape: Vec<usize>,
+        chunks: Vec<usize>,
+        dtype: Dtype,
+        compressor: Compressor,
+        chunk_prefix: String,
+        sep: String,
+        fill: f32,
+        axis_names: &[String],
+    ) -> IoResult<Self> {
+        let nd = shape.len();
+        if !(2..=6).contains(&nd) || chunks.len() != nd {
+            return Err(IoError::OmeZarr(format!("unsupported Zarr shape {shape:?}")));
+        }
+        if chunks.contains(&0) || shape.contains(&0) {
+            return Err(IoError::OmeZarr(format!("Zarr shape {shape:?} / chunks {chunks:?} has an empty axis")));
+        }
+        let elements = shape.iter().try_fold(1u128, |a, &v| a.checked_mul(v as u128));
+        if elements.is_none_or(|e| e > MAX_ARRAY_ELEMENTS) {
+            return Err(IoError::OmeZarr(format!("Zarr shape {shape:?} is too large")));
+        }
+        let chunk_bytes = chunks.iter().try_fold(dtype.size as u128, |a, &v| a.checked_mul(v as u128));
+        if chunk_bytes.is_none_or(|b| b > MAX_CHUNK_BYTES) {
+            return Err(IoError::OmeZarr(format!("Zarr chunks {chunks:?} are too large")));
+        }
+        let find = |name: &str| axis_names.iter().position(|a| a == name).filter(|&i| i < nd);
+        let (y_axis, x_axis) = (find("y").unwrap_or(nd - 2), find("x").unwrap_or(nd - 1));
+        let c_axis = find("c").or(if nd >= 3 && axis_names.is_empty() { Some(nd - 3) } else { None });
+        let z_axis = find("z");
+        Ok(Self { dir, shape, chunks, dtype, compressor, chunk_prefix, sep, fill, c_axis, z_axis, y_axis, x_axis })
     }
 
     /// Chunk `(ty, tx)` of `channel` at plane `z` (other axes at 0), cut to `w × h`.
@@ -949,7 +1090,8 @@ impl ZarrArray {
 
     /// The values of a chunk; `None` when its file does not exist (it holds the fill value).
     fn decode_chunk(&self, idx: &[usize]) -> IoResult<Option<Vec<f32>>> {
-        let name = idx.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(&self.sep);
+        let joined = idx.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(&self.sep);
+        let name = if self.chunk_prefix.is_empty() { joined } else { format!("{}{joined}", self.chunk_prefix) };
         let raw = match self.dir.get(&name)? {
             Some(b) => b,
             None => return Ok(None),

@@ -70,12 +70,16 @@ impl Store {
     pub fn execute(&mut self, cmd: Command, cx: &mut Context<Self>) -> Result<Changed, CommandError> {
         let before = self.doc.clone();
         let label = cmd.label();
+        let is_channel_edit = matches!(cmd, Command::SetChannel { .. });
         let result = apply(&mut self.doc, cmd);
         match &result {
             Ok(change) => {
                 if before != self.doc {
                     self.undo.record(before, label);
                     self.save();
+                    if is_channel_edit && self.walkthrough_active {
+                        self.walkthrough_channel_edited = true;
+                    }
                 }
                 self.after_change(change.clone(), cx);
             }

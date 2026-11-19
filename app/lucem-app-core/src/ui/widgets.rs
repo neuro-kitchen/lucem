@@ -9,7 +9,15 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{h_flex, ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{div, px, App, ElementId, InteractiveElement as _, IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
-pub use kitchen_ui::widgets::{icon_button, row, scrub_label, slider, stepper, AccentChanged, AccentPicker, EmptyState, MenuSelect, OnSlide, OnStep, Section, SCRUB_PX};
+pub use crate::ui::scrub_input::{scrub_number, ScrubState};
+pub use kitchen_ui::widgets::{icon_button, row, scrub_field, scrub_label, slider, AccentChanged, AccentPicker, EmptyState, MenuSelect, OnSlide, OnStep, Section, SCRUB_PX};
+
+/// Shared Lucem numeric scrub pill (`‹ value ›`): drag horizontally anywhere in the window to
+/// adjust smoothly (replaces the older `− value +` stepper across all panels and inspectors).
+/// For click-to-type inline editing as well, use [`scrub_number`] with a [`ScrubState`].
+pub fn stepper(id: impl Into<String>, value: impl Into<SharedString>, on_step: impl Fn(f32, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    scrub_field(id, value, on_step, |_, _| {})
+}
 
 use super::theme::{self, color};
 

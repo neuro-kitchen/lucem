@@ -268,7 +268,13 @@ fn apply_inner(doc: &mut ProjectDoc, cmd: Command) -> Result<Changed, CommandErr
             doc.graph.nodes.push(GraphNode { id: id.clone(), x, y, kind });
             if let Some(from) = after {
                 let port = doc.graph.port_for(&from, &id).ok_or_else(|| invalid(format!("{from}'s output fits no input of the new node")))?;
+                // Splice: if `from` already feeds downstream node(s) whose input accepts the new
+                // node's output, rewire `from -> next` into `from -> id -> next`.
+                let outgoing: Vec<_> = doc.graph.edges.iter().filter(|e| e.from == from).cloned().collect();
                 doc.graph.connect(&from, &id, port).map_err(invalid)?;
+                for e in outgoing {
+                    let _ = doc.graph.connect(&id, &e.to, e.port);
+                }
             }
             Ok(Changed::Graph)
         }

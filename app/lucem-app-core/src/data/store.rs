@@ -23,7 +23,7 @@ use crate::navigation::route::Workspace;
 
 use super::device::Device;
 use super::prefs::Prefs;
-use super::results::{analysis_key, analyze, compute, Analysis, ResultRequest, Results};
+use super::results::{analysis_key, analyze, compute_cached, Analysis, ResultRequest, Results};
 
 /// Undo steps kept.
 pub(crate) const UNDO_DEPTH: usize = 200;
@@ -50,6 +50,8 @@ pub enum AppEvent {
     RevealNode(String),
     /// Show the images of the server (a browser page's "Open image…": it has no file dialog).
     ServerImages,
+    /// Open the live 128 × 128 Visual Operation Gallery overlay.
+    OpenOpGallery,
 }
 
 /// What a pane of Explore shows.
@@ -162,6 +164,21 @@ pub enum MaskOperation {
     Op(Op),
 }
 
+/// A user-facing notification shown as a toast and collected in the bottom-bar Bell popover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub id: u64,
+    pub message: String,
+    pub is_error: bool,
+}
+
+/// Which guided 60-second walkthrough is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkthroughKind {
+    TwoD,
+    ThreeD,
+}
+
 pub struct Store {
     pub doc: ProjectDoc,
     /// The project file (`<folder>/project.lucem.json`); `None` until saved somewhere.
@@ -172,6 +189,22 @@ pub struct Store {
     prefs_path: Option<PathBuf>,
     pub workspace: Workspace,
     pub status: String,
+    /// Recent notifications collected from status/error updates (newest last, capped at 20).
+    pub notifications: Vec<Notification>,
+    pub unread_notifications: usize,
+    pub active_toast: Option<Notification>,
+    pub notifications_open: bool,
+    next_notification_id: u64,
+    /// 60-second guided walkthrough state (launched from Home, auto-checked in Explore).
+    pub walkthrough_active: bool,
+    pub walkthrough_kind: WalkthroughKind,
+    pub walkthrough_channel_edited: bool,
+    pub walkthrough_explored_views: bool,
+    /// Operation currently hovered in a menu or "What's next?" chip — drives the floating
+    /// Before ↔ After animated preview card.
+    pub hovered_op: Option<Op>,
+    /// Whether the Instagram Edits-style non-blocking bottom Visual Effect Strip is open.
+    pub visual_strip_open: bool,
     /// Names of images being opened.
     pub opening: Vec<String>,
     /// Images open for tile reads, by image id.
@@ -179,6 +212,9 @@ pub struct Store {
     opening_ids: HashSet<String>,
     pub tool: ToolState,
     pub results: Results,
+    /// Device-resident cache of uploaded source regions and intermediate node outputs for
+    /// incremental recompute when editing pipeline parameters.
+    eval_cache: Arc<lucem_pipeline::EvalCache>,
     /// The whole-image pass of the shown image (previews, Otsu thresholds, tables).
     pub analysis: Option<Arc<Analysis>>,
     /// Per image, per channel: the histogram of the coarsest level.
@@ -246,11 +282,23 @@ impl Store {
             prefs_path,
             workspace: Workspace::Explore,
             status: "Ready".into(),
+            notifications: Vec::new(),
+            unread_notifications: 0,
+            active_toast: None,
+            notifications_open: false,
+            next_notification_id: 1,
+            walkthrough_active: false,
+            walkthrough_kind: WalkthroughKind::ThreeD,
+            walkthrough_channel_edited: false,
+            walkthrough_explored_views: false,
+            hovered_op: None,
+            visual_strip_open: false,
             opening: Vec::new(),
             pyramids: HashMap::new(),
             opening_ids: HashSet::new(),
             tool,
             results: Results::new(),
+            eval_cache: Arc::new(lucem_pipeline::EvalCache::default()),
             analysis: None,
             histograms: HashMap::new(),
             live_base: None,
@@ -292,14 +340,107 @@ impl Store {
     }
 
     pub fn set_status(&mut self, s: impl Into<String>, cx: &mut Context<Self>) {
-        self.status = s.into();
+        let msg = s.into();
+        self.status = msg.clone();
+        let trimmed = msg.trim();
+        if !trimmed.is_empty() && trimmed != "Ready" {
+            let lower = trimmed.to_ascii_lowercase();
+            let is_error = lower.starts_with("could not")
+                || lower.starts_with("failed")
+                || lower.contains("error")
+                || lower.contains("not applied")
+                || lower.contains("cannot ");
+            let id = self.next_notification_id;
+            self.next_notification_id += 1;
+            let n = Notification { id, message: trimmed.to_string(), is_error };
+            if self.notifications.last().map(|last| last.message.as_str()) != Some(trimmed) {
+                self.notifications.push(n.clone());
+                if self.notifications.len() > 20 {
+                    self.notifications.remove(0);
+                }
+            }
+            if !self.notifications_open {
+                self.unread_notifications = (self.unread_notifications + 1).min(99);
+            }
+            self.active_toast = Some(n);
+        }
         cx.emit(AppEvent::Status);
         cx.notify();
+    }
+
+    pub fn dismiss_toast(&mut self, id: Option<u64>, cx: &mut Context<Self>) {
+        let should_clear = match (id, &self.active_toast) {
+            (Some(target), Some(cur)) => cur.id == target,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if should_clear {
+            self.active_toast = None;
+            cx.emit(AppEvent::Status);
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notifications_open = !self.notifications_open;
+        if self.notifications_open {
+            self.unread_notifications = 0;
+            self.active_toast = None;
+        }
+        cx.emit(AppEvent::Status);
+        cx.notify();
+    }
+
+    pub fn clear_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notifications.clear();
+        self.unread_notifications = 0;
+        self.active_toast = None;
+        self.notifications_open = false;
+        cx.emit(AppEvent::Status);
+        cx.notify();
+    }
+
+    /// Starts a 60-second guided walkthrough (2D fluorescence/histology or 3D volume).
+    pub fn start_walkthrough(&mut self, kind: WalkthroughKind, cx: &mut Context<Self>) {
+        self.walkthrough_active = true;
+        self.walkthrough_kind = kind;
+        self.walkthrough_channel_edited = false;
+        self.walkthrough_explored_views = false;
+        let path = match kind {
+            WalkthroughKind::TwoD => PathBuf::from(format!("sample:{}", sample_name(PhantomKind::ALL[0]))),
+            WalkthroughKind::ThreeD => PathBuf::from("sample:volume"),
+        };
+        self.open(path, cx);
+    }
+
+    /// Marks the 60-second guided walkthrough complete/dismissed and persists the choice.
+    pub fn finish_walkthrough(&mut self, cx: &mut Context<Self>) {
+        self.walkthrough_active = false;
+        self.update_prefs(|p| p.walkthrough_done = true, cx);
+    }
+
+    /// Sets or clears the hovered operation for the floating live Before ↔ After preview card.
+    pub fn set_hovered_op(&mut self, op: Option<Op>, cx: &mut Context<Self>) {
+        if self.hovered_op != op {
+            self.hovered_op = op;
+            cx.notify();
+        }
+    }
+
+    /// Opens or closes the non-blocking bottom Visual Effect Strip.
+    pub fn set_visual_strip(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.visual_strip_open != open {
+            self.visual_strip_open = open;
+            cx.notify();
+        }
     }
 
     pub fn set_workspace(&mut self, w: Workspace, cx: &mut Context<Self>) {
         if self.workspace != w {
             self.workspace = w;
+            if w == Workspace::Pipeline && self.walkthrough_active {
+                self.walkthrough_explored_views = true;
+            }
             cx.emit(AppEvent::Workspace);
             cx.notify();
         }
@@ -603,6 +744,47 @@ impl Store {
         self.ensure_device(cx);
     }
 
+    /// Creates a regular tile grid (QuPath-style) clipped inside every selected region annotation
+    /// of the active image, in one undoable batch.
+    pub fn create_tile_grid(&mut self, tile_px: f64, overlap: f64, clip: bool, cx: &mut Context<Self>) {
+        let Some(image) = self.doc.active_image.clone() else { return };
+        let selected: Vec<Annotation> = self
+            .doc
+            .annotations_of(&image)
+            .filter(|a| self.sel.shapes.contains(&a.id) && a.shape.is_region())
+            .cloned()
+            .collect();
+        if selected.is_empty() {
+            self.set_status("Select one or more region shapes first to create a tile grid inside them", cx);
+            return;
+        }
+        let mut commands = Vec::new();
+        for a in &selected {
+            let outline = a.shape.outline();
+            let tiles = crate::domain::boolean::tile_grid(&outline, tile_px, tile_px, overlap, clip);
+            for pts in tiles {
+                commands.push(Command::AddAnnotation {
+                    annotation: Annotation {
+                        id: String::new(),
+                        image: image.clone(),
+                        shape: crate::domain::annotation::Shape::Polygon { points: pts },
+                        class: a.class.clone(),
+                        note: format!("grid {} px", tile_px as usize),
+                        z: a.z,
+                    },
+                });
+            }
+        }
+        let n = commands.len();
+        if n == 0 {
+            self.set_status("No tiles fit inside the selected shape(s) at that tile size", cx);
+            return;
+        }
+        if self.execute(Command::Batch { commands }, cx).is_ok() {
+            self.set_status(format!("Created {n} grid tile(s) ({:.0} px) inside {} shape(s) (Ctrl+Z undoes)", tile_px, selected.len()), cx);
+        }
+    }
+
     /// Removes a processing step; a channel's last step takes its chain with it (its source and
     /// result view), so the channel is back to how it was. One undo step.
     pub fn remove_step(&mut self, id: String, cx: &mut Context<Self>) {
@@ -622,6 +804,45 @@ impl Store {
         if self.execute(cmd, cx).is_ok() {
             self.set_status("Step removed (Ctrl+Z brings it back)", cx);
         }
+    }
+
+    /// Moves a processing step up (`dir < 0`) or down (`dir > 0`) in its channel's linear chain,
+    /// rewiring the surrounding edges in one undoable batch.
+    pub fn move_step(&mut self, id: String, dir: i32, cx: &mut Context<Self>) {
+        let Some(image) = self.doc.active_image.clone() else { return };
+        let n = self.doc.image(&image).map_or(0, |i| i.channels.len());
+        let Some((c, mut steps, view)) = (0..n).find_map(|c| {
+            let (steps, view) = self.doc.graph.channel_chain(&image, c);
+            steps.contains(&id).then_some((c, steps, view))
+        }) else {
+            return;
+        };
+        let Some(pos) = steps.iter().position(|s| s == &id) else { return };
+        let target = (pos as isize + dir as isize).clamp(0, steps.len() as isize - 1) as usize;
+        if target == pos {
+            return;
+        }
+        steps.swap(pos, target);
+        let Some(source) = self.doc.graph.nodes.iter().find(|g| matches!(&g.kind, NodeKind::Source { image: i, channel: ch } if *i == image && *ch == c)).map(|g| g.id.clone()) else {
+            return;
+        };
+        // Rewire source -> steps[0] -> ... -> steps[last] -> view (disconnect first to avoid transient loops)
+        let mut commands = Vec::new();
+        for s in &steps {
+            commands.push(Command::Disconnect { to: s.clone(), port: 0 });
+        }
+        if let Some(v) = &view {
+            commands.push(Command::Disconnect { to: v.clone(), port: 0 });
+        }
+        let mut prev = source;
+        for s in &steps {
+            commands.push(Command::Connect { from: prev, to: s.clone(), port: 0 });
+            prev = s.clone();
+        }
+        if let Some(v) = view {
+            commands.push(Command::Connect { from: prev, to: v, port: 0 });
+        }
+        let _ = self.execute(Command::Batch { commands }, cx);
     }
 
     /// The object hierarchy of `image` (regions and cells), from the cache when nothing changed.
@@ -654,6 +875,7 @@ impl Store {
         self.device_pending = false;
         self.device_generation += 1;
         self.results.clear();
+        self.eval_cache.clear();
         self.results_for = None;
         self.analysis = None;
         cx.emit(AppEvent::Results);
@@ -886,34 +1108,52 @@ impl Store {
     /// A new script node (Python or Rust) from the template, in the project's `scripts/` folder
     /// (or the user's), selected in the Pipeline so its code opens in the Inspector's editor.
     pub fn add_script_node(&mut self, lang: crate::data::script::Language, cx: &mut Context<Self>) {
-        use crate::data::script;
-        let dir = script::scripts_dir(self.folder().as_deref());
-        let path = match script::new_script(&dir, lang) {
-            Ok(p) => p,
-            Err(e) => return self.set_status(format!("Could not write the script: {e}"), cx),
-        };
-        self.add_script_file(path, cx);
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = lang;
+            self.set_status("Local Python/Rust script files run in the desktop app (browsers cannot spawn local processes)", cx);
+            return;
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            use crate::data::script;
+            let dir = script::scripts_dir(self.folder().as_deref());
+            let path = match script::new_script(&dir, lang) {
+                Ok(p) => p,
+                Err(e) => return self.set_status(format!("Could not write the script: {e}"), cx),
+            };
+            self.add_script_file(path, cx);
+        }
     }
 
     /// A script node running an existing `.py` or `.rs` file.
     pub fn add_script_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        use crate::data::script;
-        if script::Language::of(&path).is_none() {
-            return self.set_status(format!("{}: a script is a .py or .rs file", crate::domain::paths::short_path(&path)), cx);
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = path;
+            self.set_status("Local Python/Rust script files run in the desktop app (browsers cannot spawn local processes)", cx);
+            return;
         }
-        let header = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| script::read_header(&t));
-        let h = match header {
-            Ok(h) => h,
-            Err(e) => return self.set_status(format!("{}: {e}", crate::domain::paths::short_path(&path)), cx),
-        };
-        let kind = NodeKind::Script { path: path.to_string_lossy().into_owned(), inputs: h.inputs, output: h.output, params: h.params, enabled: true };
-        let y = self.doc.graph.next_row();
-        let before: std::collections::HashSet<String> = self.doc.graph.nodes.iter().map(|n| n.id.clone()).collect();
-        if self.execute(Command::AddNode { kind, x: 0.0, y, id: None, after: self.sel.node.clone() }, cx).is_ok() {
-            self.set_status(format!("Script {} added: edit it in the Inspector, Save and run", crate::domain::paths::short_path(&path)), cx);
-            if let Some(id) = self.doc.graph.nodes.iter().find(|n| !before.contains(&n.id)).map(|n| n.id.clone()) {
-                self.set_workspace(Workspace::Pipeline, cx);
-                cx.emit(AppEvent::RevealNode(id));
+        #[cfg(not(target_family = "wasm"))]
+        {
+            use crate::data::script;
+            if script::Language::of(&path).is_none() {
+                return self.set_status(format!("{}: a script is a .py or .rs file", crate::domain::paths::short_path(&path)), cx);
+            }
+            let header = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| script::read_header(&t));
+            let h = match header {
+                Ok(h) => h,
+                Err(e) => return self.set_status(format!("{}: {e}", crate::domain::paths::short_path(&path)), cx),
+            };
+            let kind = NodeKind::Script { path: path.to_string_lossy().into_owned(), inputs: h.inputs, output: h.output, params: h.params, enabled: true };
+            let y = self.doc.graph.next_row();
+            let before: std::collections::HashSet<String> = self.doc.graph.nodes.iter().map(|n| n.id.clone()).collect();
+            if self.execute(Command::AddNode { kind, x: 0.0, y, id: None, after: self.sel.node.clone() }, cx).is_ok() {
+                self.set_status(format!("Script {} added: edit it in the Inspector, Save and run", crate::domain::paths::short_path(&path)), cx);
+                if let Some(id) = self.doc.graph.nodes.iter().find(|n| !before.contains(&n.id)).map(|n| n.id.clone()) {
+                    self.set_workspace(Workspace::Pipeline, cx);
+                    cx.emit(AppEvent::RevealNode(id));
+                }
             }
         }
     }
@@ -1090,6 +1330,9 @@ impl Store {
 
     /// A view menu command, for Explore.
     pub fn request_view(&mut self, request: ViewRequest, cx: &mut Context<Self>) {
+        if self.walkthrough_active && matches!(request, ViewRequest::Show(ViewKind::Volume) | ViewRequest::Add(ViewKind::Volume) | ViewRequest::TogglePipeline) {
+            self.walkthrough_explored_views = true;
+        }
         cx.emit(AppEvent::View(request));
     }
 
@@ -1138,6 +1381,7 @@ impl Store {
         let show = self.tool.show_results;
         let image = req.image.clone();
         let asked = req.clone();
+        let eval_cache = self.eval_cache.clone();
         self.computing = true;
         cx.emit(AppEvent::Results);
         let task = cx.background_spawn(async move {
@@ -1151,7 +1395,7 @@ impl Store {
             if latest.load(Ordering::Acquire) != generation {
                 return Some((analysis, None));
             }
-            let layers = show.then(|| compute(&device.client, &doc, &pyramid, &req, &analysis));
+            let layers = show.then(|| compute_cached(&device.client, &doc, &pyramid, &req, &analysis, &eval_cache));
             Some((analysis, layers))
         });
         cx.spawn(async move |this, cx| {
@@ -1248,12 +1492,29 @@ impl Store {
         let generation = self.results_gen.fetch_add(1, Ordering::AcqRel) + 1;
         let latest = self.results_gen.clone();
         let (doc, image, asked, show) = (self.doc.clone(), req.image.clone(), req.clone(), self.tool.show_results);
+        let key = analysis_key(&doc, &req.image) ^ (req.z as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let cached_analysis = self.analysis.clone().filter(|a| a.key == key);
         self.computing = true;
         cx.emit(AppEvent::Results);
-        let task = cx.background_spawn(async move { (latest.load(Ordering::Acquire) == generation && show).then(|| super::results::compute_remote(&doc, &pyramid, &req)) });
+        let task = cx.background_spawn(async move {
+            if latest.load(Ordering::Acquire) != generation {
+                return None;
+            }
+            let analysis = match cached_analysis {
+                Some(a) => a,
+                None => Arc::new(super::results::analyze_remote(&doc, &pyramid, &req.image, req.z)),
+            };
+            let layers = (latest.load(Ordering::Acquire) == generation && show).then(|| super::results::compute_remote(&doc, &pyramid, &req));
+            Some((analysis, layers))
+        });
         cx.spawn(async move |this, cx| {
-            let list = task.await;
+            let out = task.await;
             let _ = this.update(cx, |s, cx| {
+                if let Some((analysis, _)) = &out
+                    && s.analysis.as_ref().is_none_or(|a| a.key != analysis.key)
+                {
+                    s.analysis = Some(analysis.clone());
+                }
                 s.computing = false;
                 let current = s.results_gen.load(Ordering::Acquire) == generation;
                 s.results_for = Some(asked);
@@ -1265,7 +1526,7 @@ impl Store {
                     })
                     .detach();
                 }
-                if let Some(list) = list {
+                if let Some((_, Some(list))) = out {
                     s.results.retain(|v, r| r.image != image && s.doc.graph.contains(v));
                     let error = list.iter().find_map(|r| r.error.clone().map(|e| format!("{}: {e}", r.view)));
                     let ms: f64 = list.iter().map(|r| r.ms).sum();

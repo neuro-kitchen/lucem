@@ -78,10 +78,11 @@ pub fn operations() -> Vec<Category> {
         .collect()
 }
 
-/// The sources the project offers: each channel of each image, and each image's annotations.
+/// The sources the active image offers: each of its channels and its annotations.
 pub fn sources(doc: &ProjectDoc) -> Category {
     let mut items = Vec::new();
-    for img in &doc.images {
+    let active: Vec<_> = doc.active().into_iter().collect();
+    for img in active {
         for (c, ch) in img.channels.iter().enumerate() {
             items.push(Item { label: format!("{} · {}", img.name, ch.label), hint: "image".into(), template: Template::Source { image: img.id.clone(), channel: c } });
         }
@@ -135,7 +136,12 @@ pub fn summary(op: &Op) -> String {
     if let Some(m) = v.as_object() {
         for (k, x) in m {
             if k != "op" {
-                parts.push(format!("{} {}", k.replace('_', " "), crate::ui::param_editor::trim_number(x.as_f64().unwrap_or(0.0))));
+                let val = match x {
+                    serde_json::Value::Bool(b) => if *b { "on".to_string() } else { "off".to_string() },
+                    serde_json::Value::String(s) => s.clone(),
+                    other => crate::ui::param_editor::trim_number(other.as_f64().unwrap_or(0.0)),
+                };
+                parts.push(format!("{} {val}", k.replace('_', " ")));
             }
         }
     }

@@ -15,6 +15,30 @@ pub enum VolumeMode {
     MaximumIntensity,
     /// Samples composited front to back, each as opaque as it is bright.
     Composite,
+    /// Depth-cued maximum intensity projection: closer structures stay bright, deeper ones attenuate.
+    DepthCue,
+}
+
+/// Six-sided axis-aligned clipping box in normalized volume coordinates (`0.0..=1.0` per axis).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VolumeClip {
+    pub x: [f32; 2],
+    pub y: [f32; 2],
+    pub z: [f32; 2],
+}
+
+impl VolumeClip {
+    pub const FULL: Self = Self { x: [0.0, 1.0], y: [0.0, 1.0], z: [0.0, 1.0] };
+
+    pub fn is_full(&self) -> bool {
+        self.x[0] <= 0.001 && self.x[1] >= 0.999 && self.y[0] <= 0.001 && self.y[1] >= 0.999 && self.z[0] <= 0.001 && self.z[1] >= 0.999
+    }
+}
+
+impl Default for VolumeClip {
+    fn default() -> Self {
+        Self::FULL
+    }
 }
 
 /// Where the volume is seen from.
@@ -28,9 +52,24 @@ pub struct OrbitCamera {
     pub zoom: f32,
 }
 
+impl OrbitCamera {
+    pub const fn xy() -> Self {
+        Self { yaw: 0.0, pitch: 0.0, zoom: 1.0 }
+    }
+    pub const fn xz() -> Self {
+        Self { yaw: 0.0, pitch: 1.56, zoom: 1.0 }
+    }
+    pub const fn yz() -> Self {
+        Self { yaw: std::f32::consts::FRAC_PI_2, pitch: 0.0, zoom: 1.0 }
+    }
+    pub const fn isometric() -> Self {
+        Self { yaw: 0.6, pitch: 0.4, zoom: 1.0 }
+    }
+}
+
 impl Default for OrbitCamera {
     fn default() -> Self {
-        Self { yaw: 0.6, pitch: 0.4, zoom: 1.0 }
+        Self::isometric()
     }
 }
 
@@ -219,9 +258,17 @@ pub(crate) fn raymarch_rgba_kernel<F: ImageFloat>(
         let ox = p[0usize] * u + p[3usize] * v - dx * back;
         let oy = p[1usize] * u + p[4usize] * v - dy * back;
         let oz = p[2usize] * u + p[5usize] * v - dz * back;
-        let (t1, t2) = ((-hx - ox) / dx, (hx - ox) / dx);
-        let (t3, t4) = ((-hy - oy) / dy, (hy - oy) / dy);
-        let (t5, t6) = ((-hz - oz) / dz, (hz - oz) / dz);
+        // Clipped sub-box bounds in world space (`p[18..24]` are normalized [x0, x1, y0, y1, z0, z1])
+        let two = F::new(2.0f32);
+        let bx0 = -hx + two * hx * p[18usize];
+        let bx1 = -hx + two * hx * p[19usize];
+        let by0 = -hy + two * hy * p[20usize];
+        let by1 = -hy + two * hy * p[21usize];
+        let bz0 = -hz + two * hz * p[22usize];
+        let bz1 = -hz + two * hz * p[23usize];
+        let (t1, t2) = ((bx0 - ox) / dx, (bx1 - ox) / dx);
+        let (t3, t4) = ((by0 - oy) / dy, (by1 - oy) / dy);
+        let (t5, t6) = ((bz0 - oz) / dz, (bz1 - oz) / dz);
         let near = F::max(F::max(F::min(t1, t2), F::min(t3, t4)), F::min(t5, t6));
         let far = F::min(F::min(F::max(t1, t2), F::max(t3, t4)), F::max(t5, t6));
         let mut red = zero;
@@ -234,6 +281,7 @@ pub(crate) fn raymarch_rgba_kernel<F: ImageFloat>(
                 n = max_steps;
             }
             let dt = (far - near) / F::cast_from(n);
+            let inv_n = one / F::cast_from(n);
             let (fx, fy, fz) = (F::cast_from(nx), F::cast_from(ny), F::cast_from(nz));
             let alpha = p[16usize];
             let voxels = nz * ny * nx;
@@ -260,6 +308,10 @@ pub(crate) fn raymarch_rgba_kernel<F: ImageFloat>(
                         let s = F::max(F::min((raw - lo) * inv, one), zero);
                         if mode == 0u32 {
                             acc = F::max(acc, s);
+                        } else if mode == 2u32 {
+                            // Depth-cued MIP: closer samples keep full brightness, deeper ones fade
+                            let depth_cue = one - F::new(0.65f32) * (F::cast_from(i) * inv_n);
+                            acc = F::max(acc, s * depth_cue);
                         } else {
                             let a = F::min(s * alpha, one);
                             acc += (one - opacity) * a;
@@ -324,6 +376,45 @@ pub fn project_point(dims: Zyx, spacing: [f32; 3], camera: OrbitCamera, (width, 
     [u + width as f32 / 2.0, height as f32 / 2.0 - v]
 }
 
+/// Intersects a screen pixel ray with the clipped volume box and returns the midpoint `[z, y, x]`
+/// in normalized `0..=1` coordinates, or `None` if the ray misses the box.
+pub fn ray_midpoint_frac(
+    dims: Zyx,
+    spacing: [f32; 3],
+    camera: OrbitCamera,
+    clip: VolumeClip,
+    (width, height): (usize, usize),
+    pixel: [f32; 2],
+) -> Option<[f32; 3]> {
+    let c = camera_setup(dims, spacing, camera, (width, height));
+    let u = (pixel[0] - width as f32 * 0.5) * c.scale;
+    let v = (height as f32 * 0.5 - pixel[1]) * c.scale;
+    let back = 2.0 * c.radius;
+    let ox = c.right[0] * u + c.up[0] * v - c.forward[0] * back;
+    let oy = c.right[1] * u + c.up[1] * v - c.forward[1] * back;
+    let oz = c.right[2] * u + c.up[2] * v - c.forward[2] * back;
+    let [hx, hy, hz] = c.half;
+    let bx0 = -hx + 2.0 * hx * clip.x[0];
+    let bx1 = -hx + 2.0 * hx * clip.x[1];
+    let by0 = -hy + 2.0 * hy * clip.y[0];
+    let by1 = -hy + 2.0 * hy * clip.y[1];
+    let bz0 = -hz + 2.0 * hz * clip.z[0];
+    let bz1 = -hz + 2.0 * hz * clip.z[1];
+    let (t1, t2) = ((bx0 - ox) / c.forward[0], (bx1 - ox) / c.forward[0]);
+    let (t3, t4) = ((by0 - oy) / c.forward[1], (by1 - oy) / c.forward[1]);
+    let (t5, t6) = ((bz0 - oz) / c.forward[2], (bz1 - oz) / c.forward[2]);
+    let near = t1.min(t2).max(t3.min(t4)).max(t5.min(t6));
+    let far = t1.max(t2).min(t3.max(t4)).min(t5.max(t6));
+    if far <= near {
+        return None;
+    }
+    let tm = 0.5 * (near + far);
+    let fx = ((ox + c.forward[0] * tm + hx) / (2.0 * hx)).clamp(0.0, 1.0);
+    let fy = ((oy + c.forward[1] * tm + hy) / (2.0 * hy)).clamp(0.0, 1.0);
+    let fz = ((oz + c.forward[2] * tm + hz) / (2.0 * hz)).clamp(0.0, 1.0);
+    Some([fz, fy, fx])
+}
+
 /// Renders every channel of `volume` (`[c, d, h, w]`, `dims = [d, h, w]`) and of `extra` (label
 /// channels of the same size, or `None`) into one `width × height` image of packed BGRA pixels
 /// (one `u32` each, bytes in BGRA order): one launch and one read back for all channels, blended
@@ -337,6 +428,24 @@ pub fn render_volume_rgba(
     dims: Zyx,
     spacing: [f32; 3],
     camera: OrbitCamera,
+    size: (usize, usize),
+    channels: &[VolumeChannel],
+    mode: VolumeMode,
+    quality: VolumeQuality,
+) -> Result<DeviceArray<u32>, String> {
+    render_volume_rgba_clipped(client, volume, extra, dims, spacing, camera, VolumeClip::FULL, size, channels, mode, quality)
+}
+
+/// Same as [`render_volume_rgba`], restricted to the six-sided [`VolumeClip`] sub-box on GPU.
+#[allow(clippy::too_many_arguments)]
+pub fn render_volume_rgba_clipped(
+    client: &Client,
+    volume: &DeviceArray<f32>,
+    extra: Option<&DeviceArray<f32>>,
+    dims: Zyx,
+    spacing: [f32; 3],
+    camera: OrbitCamera,
+    clip: VolumeClip,
     (width, height): (usize, usize),
     channels: &[VolumeChannel],
     mode: VolumeMode,
@@ -358,10 +467,17 @@ pub fn render_volume_rgba(
     let step = voxel * if quality == VolumeQuality::Fine { 0.75 } else { 1.5 };
     // Opacity per unit length, so the look does not change with the step
     let alpha = (step * 12.0).min(1.0);
+    let x0 = clip.x[0].clamp(0.0, 0.99);
+    let x1 = clip.x[1].clamp(x0 + 0.005, 1.0);
+    let y0 = clip.y[0].clamp(0.0, 0.99);
+    let y1 = clip.y[1].clamp(y0 + 0.005, 1.0);
+    let z0 = clip.z[0].clamp(0.0, 0.99);
+    let z1 = clip.z[1].clamp(z0 + 0.005, 1.0);
     #[rustfmt::skip]
     let params = vec![
         c.right[0], c.right[1], c.right[2], c.up[0], c.up[1], c.up[2], c.forward[0], c.forward[1], c.forward[2],
         c.scale, 2.0 * c.radius, c.half[0], c.half[1], c.half[2], 0.0, 0.0, alpha, step,
+        x0, x1, y0, y1, z0, z1,
     ];
     let mut table = Vec::with_capacity(channels.len() * CHANNEL_PARAMS);
     for ch in channels {
@@ -382,6 +498,11 @@ pub fn render_volume_rgba(
     let out = DeviceArray::<u32>::empty(client, Shape::new([height, width])).map_err(e)?;
     let max_steps = (4 * d.max(h).max(w)).clamp(16, 4096) as u32;
     let geom = LaunchGeometry::elementwise(client, width * height);
+    let mode_id = match mode {
+        VolumeMode::MaximumIntensity => 0u32,
+        VolumeMode::Composite => 1u32,
+        VolumeMode::DepthCue => 2u32,
+    };
     raymarch_rgba_kernel::launch::<f32>(
         client,
         geom.cube_count,
@@ -399,9 +520,125 @@ pub fn render_volume_rgba(
         n_volume as u32,
         n_extra as u32,
         max_steps,
-        if mode == VolumeMode::MaximumIntensity { 0 } else { 1 },
+        mode_id,
         if quality == VolumeQuality::Fine { 1 } else { 0 },
     );
+    Ok(out)
+}
+
+/// Pure-CPU fallback of [`render_volume_rgba_clipped`] for environments without a CubeCL compute
+/// device (such as the browser WASM build). Produces packed BGRA `u32` pixels using the exact
+/// same camera, six-sided [`VolumeClip`], and [`VolumeMode`] semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn render_volume_rgba_cpu(
+    volume: &[f32],
+    extra: Option<&[f32]>,
+    dims: Zyx,
+    spacing: [f32; 3],
+    camera: OrbitCamera,
+    clip: VolumeClip,
+    (width, height): (usize, usize),
+    channels: &[VolumeChannel],
+    mode: VolumeMode,
+    quality: VolumeQuality,
+) -> Result<Vec<u32>, String> {
+    let [d, h, w] = dims;
+    let voxels = d * h * w;
+    if voxels == 0 || width == 0 || height == 0 || !volume.len().is_multiple_of(voxels) {
+        return Err("the volume or the image is empty or of the wrong size".into());
+    }
+    let n_volume = volume.len() / voxels;
+    let n_extra = extra.map_or(0, |e| e.len() / voxels);
+    if channels.len() != n_volume + n_extra {
+        return Err(format!("{} channel settings for {} channels", channels.len(), n_volume + n_extra));
+    }
+    let c = camera_setup(dims, spacing, camera, (width, height));
+    let voxel = (0..3).map(|a| 2.0 * c.half[a] / [w, h, d][a].max(1) as f32).fold(f32::MAX, f32::min);
+    let step = voxel * if quality == VolumeQuality::Fine { 1.0 } else { 1.75 };
+    let alpha = (step * 12.0).min(1.0);
+    let [hx, hy, hz] = c.half;
+    let bx0 = -hx + 2.0 * hx * clip.x[0].clamp(0.0, 0.99);
+    let bx1 = -hx + 2.0 * hx * clip.x[1].clamp(clip.x[0] + 0.005, 1.0);
+    let by0 = -hy + 2.0 * hy * clip.y[0].clamp(0.0, 0.99);
+    let by1 = -hy + 2.0 * hy * clip.y[1].clamp(clip.y[0] + 0.005, 1.0);
+    let bz0 = -hz + 2.0 * hz * clip.z[0].clamp(0.0, 0.99);
+    let bz1 = -hz + 2.0 * hz * clip.z[1].clamp(clip.z[0] + 0.005, 1.0);
+    let back = 2.0 * c.radius;
+    let (dx, dy, dz) = (c.forward[0], c.forward[1], c.forward[2]);
+    let (fx, fy, fz) = (w as f32, h as f32, d as f32);
+    let max_steps = (3 * d.max(h).max(w)).clamp(16, 512);
+    let mut out = vec![255u32 << 24; width * height];
+    let ch_info: Vec<(usize, f32, f32, [f32; 3], f32)> = channels
+        .iter()
+        .enumerate()
+        .filter(|(_, ch)| ch.visible)
+        .map(|(i, ch)| (i, ch.window.0, 1.0 / (ch.window.1 - ch.window.0).abs().max(1e-12), ch.color, 1.0 / ch.gamma.max(0.05)))
+        .collect();
+    for row in 0..height {
+        let v = (height as f32 * 0.5 - row as f32 - 0.5) * c.scale;
+        for col in 0..width {
+            let u = (col as f32 + 0.5 - width as f32 * 0.5) * c.scale;
+            let ox = c.right[0] * u + c.up[0] * v - dx * back;
+            let oy = c.right[1] * u + c.up[1] * v - dy * back;
+            let oz = c.right[2] * u + c.up[2] * v - dz * back;
+            let (t1, t2) = ((bx0 - ox) / dx, (bx1 - ox) / dx);
+            let (t3, t4) = ((by0 - oy) / dy, (by1 - oy) / dy);
+            let (t5, t6) = ((bz0 - oz) / dz, (bz1 - oz) / dz);
+            let near = t1.min(t2).max(t3.min(t4)).max(t5.min(t6));
+            let far = t1.max(t2).min(t3.max(t4)).min(t5.max(t6));
+            if far <= near {
+                continue;
+            }
+            let n = (((far - near) / step).floor() as usize + 1).min(max_steps);
+            let dt = (far - near) / n as f32;
+            let inv_n = 1.0 / n as f32;
+            let (mut red, mut green, mut blue) = (0.0f32, 0.0f32, 0.0f32);
+            for &(ci, lo, inv, rgb, inv_gamma) in &ch_info {
+                let slice = if ci < n_volume {
+                    &volume[ci * voxels..(ci + 1) * voxels]
+                } else if let Some(ex) = extra {
+                    let ei = ci - n_volume;
+                    &ex[ei * voxels..(ei + 1) * voxels]
+                } else {
+                    continue;
+                };
+                let (mut acc, mut opacity) = (0.0f32, 0.0f32);
+                for i in 0..n {
+                    let t = near + (i as f32 + 0.5) * dt;
+                    let ix = (((ox + dx * t + hx) / (2.0 * hx) * fx) as isize).clamp(0, w as isize - 1) as usize;
+                    let iy = (((oy + dy * t + hy) / (2.0 * hy) * fy) as isize).clamp(0, h as isize - 1) as usize;
+                    let iz = (((oz + dz * t + hz) / (2.0 * hz) * fz) as isize).clamp(0, d as isize - 1) as usize;
+                    let raw = slice[(iz * h + iy) * w + ix];
+                    let s = ((raw - lo) * inv).clamp(0.0, 1.0);
+                    match mode {
+                        VolumeMode::MaximumIntensity => acc = acc.max(s),
+                        VolumeMode::DepthCue => {
+                            let cue = 1.0 - 0.65 * (i as f32 * inv_n);
+                            acc = acc.max(s * cue);
+                        }
+                        VolumeMode::Composite => {
+                            let a = (s * alpha).min(1.0);
+                            acc += (1.0 - opacity) * a;
+                            opacity += (1.0 - opacity) * a;
+                            if opacity > 0.98 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if acc > 0.0 {
+                    let shade = acc.powf(inv_gamma);
+                    red += rgb[0] * shade;
+                    green += rgb[1] * shade;
+                    blue += rgb[2] * shade;
+                }
+            }
+            let r8 = (red.min(1.0) * 255.0 + 0.5) as u32;
+            let g8 = (green.min(1.0) * 255.0 + 0.5) as u32;
+            let b8 = (blue.min(1.0) * 255.0 + 0.5) as u32;
+            out[row * width + col] = b8 | (g8 << 8) | (r8 << 16) | (255u32 << 24);
+        }
+    }
     Ok(out)
 }
 

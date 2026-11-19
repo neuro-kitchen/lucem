@@ -1,0 +1,12 @@
+{
+  "id": "example-microscopy-pack",
+  "name": "Example Microscopy Pack",
+  "version": "0.1.0",
+  "description": "Starter pack demonstrating Lucem drop-in Python/Rust ops and GPU recipes.",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/your-org/lucem-plugin-example",
+  "min_lucem_version": "0.0.3",
+  "tags": ["fluorescence", "segmentation", "filter"],
+  "archive_url": "https://github.com/your-org/lucem-plugin-example/archive/refs/tags/v0.1.0.tar.gz",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

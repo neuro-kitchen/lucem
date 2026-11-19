@@ -23,7 +23,7 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     canvas, div, fill, point, px, size, App, AppContext as _, Bounds, Context, Corners, CursorStyle, Entity, FocusHandle, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Render, RenderImage, ScrollDelta, ScrollEvent, Styled as _, Subscription, Task, Window,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Render, RenderImage, ScrollDelta, ScrollEvent, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
 };
 use lucem_io::Pyramid;
 use lucem_view::{ChannelDisplay, TileImage, TileKey, TileResult, TileService};
@@ -1457,12 +1457,54 @@ impl ImageCanvas {
             "n" if !cmd && k.modifiers.shift => self.toggle_overlay(|o| o.names = !o.names, cx),
             "0" if cmd => self.fit(cx),
             "1" if cmd => self.actual_size(cx),
+            // Ctrl+= / Ctrl+- resize the active tool (Brush, Eraser, Wand, Threshold smooth);
+            // plain =/+/- without Ctrl zoom the canvas.
+            "=" | "+" if cmd => {
+                self.store.update(cx, |s, cx| {
+                    s.update_tool(
+                        |t| {
+                            if t.tool == Tool::Threshold {
+                                t.threshold_sigma = (t.threshold_sigma * 1.5).clamp(0.5, 200.0);
+                            } else {
+                                t.resize_brush(1.0);
+                            }
+                        },
+                        cx,
+                    )
+                });
+            }
+            "-" if cmd => {
+                self.store.update(cx, |s, cx| {
+                    s.update_tool(
+                        |t| {
+                            if t.tool == Tool::Threshold {
+                                t.threshold_sigma = (t.threshold_sigma / 1.5).clamp(0.0, 200.0);
+                            } else {
+                                t.resize_brush(-1.0);
+                            }
+                        },
+                        cx,
+                    )
+                });
+            }
             "=" | "+" => self.zoom_at(1.5, None, cx),
             "-" => self.zoom_at(1.0 / 1.5, None, cx),
             "f" if !cmd => self.fit(cx),
+            "\\" if !cmd => self.toggle_overlay(|o| o.results = !o.results, cx),
             "[" | "]" => {
                 let dir = if key == "]" { 1.0 } else { -1.0 };
-                self.store.update(cx, |s, cx| s.update_tool(|t| t.resize_brush(dir), cx));
+                self.store.update(cx, |s, cx| {
+                    s.update_tool(
+                        |t| {
+                            if t.tool == Tool::Threshold {
+                                t.threshold_sigma = (t.threshold_sigma * if dir > 0.0 { 1.5 } else { 1.0 / 1.5 }).clamp(0.0, 200.0).max(if dir > 0.0 { 0.5 } else { 0.0 });
+                            } else {
+                                t.resize_brush(dir);
+                            }
+                        },
+                        cx,
+                    )
+                });
             }
             _ if !cmd && !k.modifiers.alt => match Tool::from_key(key) {
                 Some(t) => {
@@ -1886,7 +1928,12 @@ impl Render for ImageCanvas {
                         window.paint_quad(fill(Bounds { origin: point(o.x + px(cx_), o.y), size: size(px(1.), bh) }, theme::rgb8([235, 92, 92]).opacity(0.85)));
                         window.paint_quad(fill(Bounds { origin: point(o.x, o.y + px(cy_)), size: size(bw, px(1.)) }, theme::rgb8([92, 200, 120]).opacity(0.85)));
                     }
-                    if let Some((m, r)) = brush {
+                    if let Some((m, r)) = brush
+                        && m.0 >= 0.0
+                        && m.1 >= 0.0
+                        && m.0 <= bounds.size.width.as_f32()
+                        && m.1 <= bounds.size.height.as_f32()
+                    {
                         let c = point(o.x + px(m.0), o.y + px(m.1));
                         for (w, col) in [(3.0, gpui_kit::black().opacity(0.6)), (1.0, gpui_kit::white())] {
                             let mut b = PathBuilder::stroke(px(w));
@@ -1931,6 +1978,11 @@ impl Render for ImageCanvas {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_down))
             .on_mouse_move(cx.listener(Self::on_move))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !hovered && this.gesture.is_none() && this.mouse.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_up))
             .on_scroll(cx.listener(Self::on_wheel))

@@ -62,12 +62,21 @@ pub struct Prefs {
     /// The compute backend (`wgpu`, `cuda`, `cpu`; `None`: automatic).
     #[serde(default)]
     pub runtime: Option<String>,
+    /// Host RAM cache budget (`"automatic"` / `None` = quarter of RAM, or e.g. `"8GiB"`).
+    #[serde(default)]
+    pub memory: Option<String>,
     /// The model the Segment tool uses (a plugin's model id; `None`: the plugin's default).
     #[serde(default)]
     pub ml_model: Option<String>,
     /// The agent the chat starts: its ACP command (`agy acp`; `None`: the first one installed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Keep Python script workers alive between tile runs so heavy ML/NumPy imports stay warm.
+    #[serde(default = "yes")]
+    pub warm_python_worker: bool,
+    /// Whether the user has completed or dismissed the 60-second guided walkthrough.
+    #[serde(default)]
+    pub walkthrough_done: bool,
 }
 
 fn dark() -> Option<bool> {
@@ -97,7 +106,7 @@ fn yes() -> bool {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { recent: Vec::new(), sidebar_open: true, rulers: false, left_tab: left_tab(), right_tab: None, studio_tabs: Vec::new(), studio_collapsed: Vec::new(), pipeline_dock: false, link_views: false, left_open: true, right_open: true, theme: dark(), accent: None, tools: Default::default(), pasteboard: 0, font_size: font_size(), tile_threads: 0, runtime: None, ml_model: None, dock_sides: None, agent: None }
+        Self { recent: Vec::new(), sidebar_open: true, rulers: false, left_tab: left_tab(), right_tab: None, studio_tabs: Vec::new(), studio_collapsed: Vec::new(), pipeline_dock: false, link_views: false, left_open: true, right_open: true, theme: dark(), accent: None, tools: Default::default(), pasteboard: 0, font_size: font_size(), tile_threads: 0, runtime: None, memory: None, ml_model: None, dock_sides: None, agent: None, warm_python_worker: true, walkthrough_done: false }
     }
 }
 

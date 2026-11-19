@@ -6,21 +6,27 @@
 
 use lucem_core::cubecl::prelude::Client;
 use lucem_core::memory::DeviceArray;
+use lucem_ops::core::distance::euclidean_distance;
 use lucem_ops::core::{elementwise, StructuringElement};
 use lucem_ops::feature::{canny, Canny};
 use lucem_ops::filter::gaussian::{difference_of_gaussians, gaussian_blur, unsharp_mask, GaussianBlur};
 use lucem_ops::filter::gradient::{laplace, sobel, GradientFilter};
 use lucem_ops::filter::order::{median_filter, OrderFilter};
-use lucem_ops::intensity::contrast::adjust_gamma;
+use lucem_ops::filter::ridge::{frangi, sato, RidgeFilter};
+use lucem_ops::intensity::contrast::{adjust_gamma, adjust_log, adjust_sigmoid};
 use lucem_ops::intensity::equalize::{clahe, ClaheSettings};
 use lucem_ops::measure::regions::{label_components, region_features, RegionFeatures};
-use lucem_ops::morphology::binary::{binary_close, binary_dilate, binary_erode, binary_open, BinaryMorphology};
-use lucem_ops::morphology::geodesic::remove_small_objects;
-use lucem_ops::morphology::grayscale::{morph_gradient, white_tophat, GrayMorphology};
+use lucem_ops::morphology::binary::{binary_close, binary_dilate, binary_erode, binary_open, fill_holes, BinaryMorphology};
+use lucem_ops::morphology::geodesic::{remove_small_holes, remove_small_objects};
+use lucem_ops::morphology::grayscale::{black_tophat, morph_gradient, white_tophat, GrayMorphology};
+use lucem_ops::morphology::skeleton::skeletonize;
 use lucem_ops::restore::background::{rolling_ball, RollingBall};
-use lucem_ops::restore::denoise::{tv_chambolle, TvChambolle};
+use lucem_ops::restore::denoise::{bilateral, tv_chambolle, Bilateral, TvChambolle};
+use lucem_ops::segment::labels::{clear_border, expand_labels, find_boundaries, BoundaryMode};
 use lucem_ops::segment::watershed::{watershed, WatershedOptions};
-use lucem_ops::threshold::global::otsu;
+use lucem_ops::threshold::global::{li, otsu, triangle};
+use lucem_ops::threshold::hysteresis::hysteresis_threshold;
+use lucem_ops::threshold::local::{niblack, sauvola, WindowThreshold};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -104,24 +110,48 @@ pub enum Op {
     Sobel {},
     /// Second derivative (edges, spots).
     Laplace {},
+    /// Frangi multi-scale vessel / neurite ridge filter.
+    Frangi { sigma_min: f64, sigma_max: f64, black_ridges: bool },
+    /// Sato multi-scale tubular structure filter.
+    Sato { sigma_min: f64, sigma_max: f64, black_ridges: bool },
     /// `gain · x^gamma` (values in 0–1).
     Gamma { gamma: f64, gain: f64 },
     /// Maps `[min, max]` to `[0, 1]`, clipped.
     Rescale { min: f64, max: f64 },
+    /// Inverts intensities (`1 − x`, fused pointwise).
+    Invert {},
+    /// Logarithmic contrast adjustment (`gain · log2(1 + x)`).
+    LogContrast { gain: f64 },
+    /// Sigmoid contrast curve (`1 / (1 + exp(gain · (cutoff − x)))`).
+    SigmoidContrast { cutoff: f64, gain: f64 },
     /// Contrast-limited adaptive histogram equalization.
     Clahe { clip_limit: f64, tiles: usize },
     /// Subtracts the rolling-ball background.
     RollingBall { radius: f64 },
     /// Total-variation denoising.
     TvDenoise { weight: f64, iterations: usize },
+    /// Edge-preserving bilateral denoising.
+    Bilateral { sigma_spatial: f64, sigma_color: f64 },
     /// Bright details smaller than the disk (background removal).
     WhiteTophat { radius: usize },
+    /// Dark details smaller than the disk.
+    BlackTophat { radius: usize },
     /// Dilation − erosion (outlines).
     MorphGradient { radius: usize },
     /// Edges as a mask.
     Canny { sigma: f64 },
     /// Pixels above the Otsu threshold.
     OtsuThreshold { bins: usize },
+    /// Pixels above the Li minimum cross-entropy threshold.
+    LiThreshold { bins: usize },
+    /// Pixels above the Triangle threshold (good for sparse fluorescence).
+    TriangleThreshold { bins: usize },
+    /// Local adaptive Sauvola threshold.
+    SauvolaThreshold { window_size: usize, k: f64 },
+    /// Local adaptive Niblack threshold.
+    NiblackThreshold { window_size: usize, k: f64 },
+    /// Dual-threshold connected hysteresis binarization.
+    HysteresisThreshold { low: f64, high: f64 },
     /// Pixels at or above `value`.
     Threshold { value: f64 },
     /// Mask opening (removes specks).
@@ -130,8 +160,16 @@ pub enum Op {
     Close { radius: usize },
     Erode { radius: usize },
     Dilate { radius: usize },
+    /// Fills all enclosed background holes in a mask.
+    FillHoles {},
+    /// Fills enclosed background holes smaller than `max_size` px.
+    RemoveSmallHoles { max_size: usize },
     /// Drops objects smaller than `min_size` px.
     RemoveSmall { min_size: usize },
+    /// Reduces foreground objects to 1-px skeletons.
+    Skeletonize {},
+    /// Euclidean distance transform from background (`Mask → Image`).
+    DistanceTransform {},
     /// On where A or B is on.
     MaskUnion {},
     /// On where A and B are on.
@@ -144,10 +182,22 @@ pub enum Op {
     Label {},
     /// Grows the marker labels over the relief image (splits touching objects).
     Watershed { compactness: f64 },
+    /// Dilates labels into background by up to `distance` px without overlapping.
+    ExpandLabels { distance: f64 },
+    /// Removes labeled objects touching the outer `buffer_size` px border.
+    ClearBorder { buffer_size: usize },
+    /// Boundary pixels between distinct labels (`Labels → Mask`).
+    FindBoundaries {},
     /// The image where the mask is on, 0 elsewhere.
     MaskImage {},
     /// `a · A + b · B`.
     Combine { a: f64, b: f64 },
+    /// Pixelwise ratio `A / (B + eps)`.
+    ChannelRatio { eps: f64 },
+    /// Normalized difference `(A − B) / (A + B + eps)`.
+    NormalizedDiff { eps: f64 },
+    /// Pixelwise product `A · B`.
+    ChannelProduct {},
     /// One row per labelled object: area, shape, intensity.
     Measure {},
 }
@@ -162,29 +212,51 @@ impl Op {
             Op::DifferenceOfGaussians { .. } => "difference_of_gaussians",
             Op::Sobel {} => "sobel",
             Op::Laplace {} => "laplace",
+            Op::Frangi { .. } => "frangi",
+            Op::Sato { .. } => "sato",
             Op::Gamma { .. } => "gamma",
             Op::Rescale { .. } => "rescale",
+            Op::Invert {} => "invert",
+            Op::LogContrast { .. } => "log_contrast",
+            Op::SigmoidContrast { .. } => "sigmoid_contrast",
             Op::Clahe { .. } => "clahe",
             Op::RollingBall { .. } => "rolling_ball",
             Op::TvDenoise { .. } => "tv_denoise",
+            Op::Bilateral { .. } => "bilateral",
             Op::WhiteTophat { .. } => "white_tophat",
+            Op::BlackTophat { .. } => "black_tophat",
             Op::MorphGradient { .. } => "morph_gradient",
             Op::Canny { .. } => "canny",
             Op::OtsuThreshold { .. } => "otsu_threshold",
+            Op::LiThreshold { .. } => "li_threshold",
+            Op::TriangleThreshold { .. } => "triangle_threshold",
+            Op::SauvolaThreshold { .. } => "sauvola_threshold",
+            Op::NiblackThreshold { .. } => "niblack_threshold",
+            Op::HysteresisThreshold { .. } => "hysteresis_threshold",
             Op::Threshold { .. } => "threshold",
             Op::Open { .. } => "open",
             Op::Close { .. } => "close",
             Op::Erode { .. } => "erode",
             Op::Dilate { .. } => "dilate",
+            Op::FillHoles {} => "fill_holes",
+            Op::RemoveSmallHoles { .. } => "remove_small_holes",
             Op::RemoveSmall { .. } => "remove_small",
+            Op::Skeletonize {} => "skeletonize",
+            Op::DistanceTransform {} => "distance_transform",
             Op::MaskUnion {} => "mask_union",
             Op::MaskIntersect {} => "mask_intersect",
             Op::MaskSubtract {} => "mask_subtract",
             Op::MaskInvert {} => "mask_invert",
             Op::Label {} => "label",
             Op::Watershed { .. } => "watershed",
+            Op::ExpandLabels { .. } => "expand_labels",
+            Op::ClearBorder { .. } => "clear_border",
+            Op::FindBoundaries {} => "find_boundaries",
             Op::MaskImage {} => "mask_image",
             Op::Combine { .. } => "combine",
+            Op::ChannelRatio { .. } => "channel_ratio",
+            Op::NormalizedDiff { .. } => "normalized_diff",
+            Op::ChannelProduct {} => "channel_product",
             Op::Measure {} => "measure",
         }
     }
@@ -198,29 +270,51 @@ impl Op {
             Op::DifferenceOfGaussians { .. } => "Difference of Gaussians",
             Op::Sobel {} => "Sobel",
             Op::Laplace {} => "Laplace",
+            Op::Frangi { .. } => "Frangi ridges",
+            Op::Sato { .. } => "Sato ridges",
             Op::Gamma { .. } => "Gamma",
             Op::Rescale { .. } => "Rescale",
+            Op::Invert {} => "Invert",
+            Op::LogContrast { .. } => "Log contrast",
+            Op::SigmoidContrast { .. } => "Sigmoid contrast",
             Op::Clahe { .. } => "CLAHE",
             Op::RollingBall { .. } => "Rolling ball",
             Op::TvDenoise { .. } => "TV denoise",
+            Op::Bilateral { .. } => "Bilateral denoise",
             Op::WhiteTophat { .. } => "White top-hat",
+            Op::BlackTophat { .. } => "Black top-hat",
             Op::MorphGradient { .. } => "Morph. gradient",
             Op::Canny { .. } => "Canny edges",
             Op::OtsuThreshold { .. } => "Otsu threshold",
+            Op::LiThreshold { .. } => "Li threshold",
+            Op::TriangleThreshold { .. } => "Triangle threshold",
+            Op::SauvolaThreshold { .. } => "Sauvola local threshold",
+            Op::NiblackThreshold { .. } => "Niblack local threshold",
+            Op::HysteresisThreshold { .. } => "Hysteresis threshold",
             Op::Threshold { .. } => "Threshold",
             Op::Open { .. } => "Open",
             Op::Close { .. } => "Close",
             Op::Erode { .. } => "Erode",
             Op::Dilate { .. } => "Dilate",
+            Op::FillHoles {} => "Fill holes",
+            Op::RemoveSmallHoles { .. } => "Remove small holes",
             Op::RemoveSmall { .. } => "Remove small",
+            Op::Skeletonize {} => "Skeletonize",
+            Op::DistanceTransform {} => "Distance transform",
             Op::MaskUnion {} => "Mask union",
             Op::MaskIntersect {} => "Mask intersect",
             Op::MaskSubtract {} => "Mask subtract",
             Op::MaskInvert {} => "Mask invert",
             Op::Label {} => "Label objects",
             Op::Watershed { .. } => "Watershed",
+            Op::ExpandLabels { .. } => "Expand labels",
+            Op::ClearBorder { .. } => "Clear border",
+            Op::FindBoundaries {} => "Find boundaries",
             Op::MaskImage {} => "Mask image",
             Op::Combine { .. } => "Combine",
+            Op::ChannelRatio { .. } => "Channel ratio",
+            Op::NormalizedDiff { .. } => "Normalized diff",
+            Op::ChannelProduct {} => "Channel product",
             Op::Measure {} => "Measure",
         }
     }
@@ -228,12 +322,53 @@ impl Op {
     /// Its family (menus, colours).
     pub fn family(&self) -> &'static str {
         match self {
-            Op::GaussianBlur { .. } | Op::Median { .. } | Op::UnsharpMask { .. } | Op::DifferenceOfGaussians { .. } | Op::Sobel {} | Op::Laplace {} => "Filter",
-            Op::Gamma { .. } | Op::Rescale { .. } | Op::Clahe { .. } | Op::Combine { .. } | Op::MaskImage {} => "Intensity",
-            Op::RollingBall { .. } | Op::TvDenoise { .. } | Op::WhiteTophat { .. } | Op::MorphGradient { .. } => "Restore",
-            Op::Canny { .. } | Op::OtsuThreshold { .. } | Op::Threshold { .. } => "Threshold",
-            Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::RemoveSmall { .. } | Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} => "Mask",
-            Op::Label {} | Op::Watershed { .. } => "Segment",
+            Op::GaussianBlur { .. }
+            | Op::Median { .. }
+            | Op::UnsharpMask { .. }
+            | Op::DifferenceOfGaussians { .. }
+            | Op::Sobel {}
+            | Op::Laplace {}
+            | Op::Frangi { .. }
+            | Op::Sato { .. } => "Filter",
+            Op::Gamma { .. }
+            | Op::Rescale { .. }
+            | Op::Invert {}
+            | Op::LogContrast { .. }
+            | Op::SigmoidContrast { .. }
+            | Op::Clahe { .. }
+            | Op::Combine { .. }
+            | Op::ChannelRatio { .. }
+            | Op::NormalizedDiff { .. }
+            | Op::ChannelProduct {}
+            | Op::MaskImage {} => "Intensity",
+            Op::RollingBall { .. }
+            | Op::TvDenoise { .. }
+            | Op::Bilateral { .. }
+            | Op::WhiteTophat { .. }
+            | Op::BlackTophat { .. }
+            | Op::MorphGradient { .. } => "Restore",
+            Op::Canny { .. }
+            | Op::OtsuThreshold { .. }
+            | Op::LiThreshold { .. }
+            | Op::TriangleThreshold { .. }
+            | Op::SauvolaThreshold { .. }
+            | Op::NiblackThreshold { .. }
+            | Op::HysteresisThreshold { .. }
+            | Op::Threshold { .. } => "Threshold",
+            Op::Open { .. }
+            | Op::Close { .. }
+            | Op::Erode { .. }
+            | Op::Dilate { .. }
+            | Op::FillHoles {}
+            | Op::RemoveSmallHoles { .. }
+            | Op::RemoveSmall { .. }
+            | Op::Skeletonize {}
+            | Op::DistanceTransform {}
+            | Op::MaskUnion {}
+            | Op::MaskIntersect {}
+            | Op::MaskSubtract {}
+            | Op::MaskInvert {} => "Mask",
+            Op::Label {} | Op::Watershed { .. } | Op::ExpandLabels { .. } | Op::ClearBorder { .. } | Op::FindBoundaries {} => "Segment",
             Op::Measure {} => "Measure",
         }
     }
@@ -242,11 +377,22 @@ impl Op {
     pub fn inputs(&self) -> Vec<(PortType, &'static str)> {
         use PortType::*;
         match self {
-            Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::RemoveSmall { .. } | Op::Label {} | Op::MaskInvert {} => vec![(Mask, "mask")],
+            Op::Open { .. }
+            | Op::Close { .. }
+            | Op::Erode { .. }
+            | Op::Dilate { .. }
+            | Op::FillHoles {}
+            | Op::RemoveSmallHoles { .. }
+            | Op::RemoveSmall { .. }
+            | Op::Skeletonize {}
+            | Op::DistanceTransform {}
+            | Op::Label {}
+            | Op::MaskInvert {} => vec![(Mask, "mask")],
             Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} => vec![(Mask, "A"), (Mask, "B")],
+            Op::ExpandLabels { .. } | Op::ClearBorder { .. } | Op::FindBoundaries {} => vec![(Labels, "labels")],
             Op::Watershed { .. } => vec![(Image, "relief"), (Labels, "markers")],
             Op::MaskImage {} => vec![(Image, "image"), (Mask, "mask")],
-            Op::Combine { .. } => vec![(Image, "A"), (Image, "B")],
+            Op::Combine { .. } | Op::ChannelRatio { .. } | Op::NormalizedDiff { .. } | Op::ChannelProduct {} => vec![(Image, "A"), (Image, "B")],
             Op::Measure {} => vec![(Labels, "labels"), (Image, "intensity")],
             _ => vec![(Image, "image")],
         }
@@ -255,8 +401,28 @@ impl Op {
     pub fn output(&self) -> PortType {
         use PortType::*;
         match self {
-            Op::Canny { .. } | Op::OtsuThreshold { .. } | Op::Threshold { .. } | Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::RemoveSmall { .. } | Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} => Mask,
-            Op::Label {} | Op::Watershed { .. } => Labels,
+            Op::Canny { .. }
+            | Op::OtsuThreshold { .. }
+            | Op::LiThreshold { .. }
+            | Op::TriangleThreshold { .. }
+            | Op::SauvolaThreshold { .. }
+            | Op::NiblackThreshold { .. }
+            | Op::HysteresisThreshold { .. }
+            | Op::Threshold { .. }
+            | Op::Open { .. }
+            | Op::Close { .. }
+            | Op::Erode { .. }
+            | Op::Dilate { .. }
+            | Op::FillHoles {}
+            | Op::RemoveSmallHoles { .. }
+            | Op::RemoveSmall { .. }
+            | Op::Skeletonize {}
+            | Op::MaskUnion {}
+            | Op::MaskIntersect {}
+            | Op::MaskSubtract {}
+            | Op::MaskInvert {}
+            | Op::FindBoundaries {} => Mask,
+            Op::Label {} | Op::Watershed { .. } | Op::ExpandLabels { .. } | Op::ClearBorder { .. } => Labels,
             Op::Measure {} => Table,
             _ => Image,
         }
@@ -270,10 +436,14 @@ impl Op {
         match self {
             Op::GaussianBlur { sigma } | Op::UnsharpMask { sigma, .. } => s(*sigma),
             Op::DifferenceOfGaussians { low_sigma, high_sigma } => s(low_sigma.max(*high_sigma)),
+            Op::Frangi { sigma_max, .. } | Op::Sato { sigma_max, .. } => s(*sigma_max),
+            Op::Bilateral { sigma_spatial, .. } => (3.0 * sigma_spatial.max(0.0)).ceil() as usize + 1,
             Op::Canny { sigma } => s(*sigma) + 2,
-            Op::Median { radius } | Op::WhiteTophat { radius } | Op::MorphGradient { radius } | Op::Erode { radius } | Op::Dilate { radius } => *radius,
+            Op::Median { radius } | Op::WhiteTophat { radius } | Op::BlackTophat { radius } | Op::MorphGradient { radius } | Op::Erode { radius } | Op::Dilate { radius } => *radius,
             Op::Open { radius } | Op::Close { radius } => 2 * radius,
-            Op::Sobel {} | Op::Laplace {} => 1,
+            Op::SauvolaThreshold { window_size, .. } | Op::NiblackThreshold { window_size, .. } => window_size / 2 + 1,
+            Op::ExpandLabels { distance } => distance.ceil() as usize + 1,
+            Op::Sobel {} | Op::Laplace {} | Op::FindBoundaries {} => 1,
             Op::RollingBall { radius } => (2.0 * radius).ceil() as usize,
             Op::TvDenoise { iterations, .. } => (*iterations).min(32),
             Op::Clahe { .. } => 32,
@@ -287,6 +457,10 @@ impl Op {
         let ds = ds.max(1e-9);
         let s = |v: f64| (v / ds).max(0.3);
         let r = |v: usize| ((v as f64 / ds).round() as usize).max(1);
+        let odd_w = |v: usize| {
+            let w = ((v as f64 / ds).round() as usize).max(3);
+            if w % 2 == 0 { w + 1 } else { w }
+        };
         match self.clone() {
             Op::GaussianBlur { sigma } => Op::GaussianBlur { sigma: s(sigma) },
             Op::Median { radius } => Op::Median { radius: r(radius) },
@@ -295,15 +469,29 @@ impl Op {
                 let (lo, hi) = (s(low_sigma), s(high_sigma));
                 Op::DifferenceOfGaussians { low_sigma: lo, high_sigma: hi.max(lo * 1.01) }
             }
+            Op::Frangi { sigma_min, sigma_max, black_ridges } => {
+                let (lo, hi) = (s(sigma_min), s(sigma_max));
+                Op::Frangi { sigma_min: lo, sigma_max: hi.max(lo), black_ridges }
+            }
+            Op::Sato { sigma_min, sigma_max, black_ridges } => {
+                let (lo, hi) = (s(sigma_min), s(sigma_max));
+                Op::Sato { sigma_min: lo, sigma_max: hi.max(lo), black_ridges }
+            }
+            Op::Bilateral { sigma_spatial, sigma_color } => Op::Bilateral { sigma_spatial: s(sigma_spatial), sigma_color },
             Op::RollingBall { radius } => Op::RollingBall { radius: (radius / ds).max(1.0) },
             Op::WhiteTophat { radius } => Op::WhiteTophat { radius: r(radius) },
+            Op::BlackTophat { radius } => Op::BlackTophat { radius: r(radius) },
             Op::MorphGradient { radius } => Op::MorphGradient { radius: r(radius) },
             Op::Canny { sigma } => Op::Canny { sigma: s(sigma) },
+            Op::SauvolaThreshold { window_size, k } => Op::SauvolaThreshold { window_size: odd_w(window_size), k },
+            Op::NiblackThreshold { window_size, k } => Op::NiblackThreshold { window_size: odd_w(window_size), k },
             Op::Open { radius } => Op::Open { radius: r(radius) },
             Op::Close { radius } => Op::Close { radius: r(radius) },
             Op::Erode { radius } => Op::Erode { radius: r(radius) },
             Op::Dilate { radius } => Op::Dilate { radius: r(radius) },
+            Op::RemoveSmallHoles { max_size } => Op::RemoveSmallHoles { max_size: ((max_size as f64) / (ds * ds)).round() as usize },
             Op::RemoveSmall { min_size } => Op::RemoveSmall { min_size: ((min_size as f64) / (ds * ds)).round() as usize },
+            Op::ExpandLabels { distance } => Op::ExpandLabels { distance: (distance / ds).max(0.0) },
             other => other,
         }
     }
@@ -311,7 +499,196 @@ impl Op {
     /// Whether its result depends on statistics of its whole input (so a region of the image
     /// needs the value computed on the whole image).
     pub fn is_global(&self) -> bool {
-        matches!(self, Op::OtsuThreshold { .. })
+        matches!(self, Op::OtsuThreshold { .. } | Op::LiThreshold { .. } | Op::TriangleThreshold { .. })
+    }
+
+    /// Plain-English explanation of what this op does and when to use it.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Op::GaussianBlur { .. } => "Smooths high-frequency pixel noise before thresholding or edge detection.",
+            Op::Median { .. } => "Removes salt-and-pepper specks while keeping sharp cell boundaries.",
+            Op::UnsharpMask { .. } => "Crisps fine textures and blurred membranes by boosting local detail.",
+            Op::DifferenceOfGaussians { .. } => "Band-pass filter that highlights bright spots and nuclei of a target size.",
+            Op::Sobel {} => "Highlights intensity gradients and object outlines.",
+            Op::Laplace {} => "Second derivative highlighting fine edges, spots, and membranes.",
+            Op::Frangi { .. } => "Enhances tubular structures such as blood vessels, axons, and neurites.",
+            Op::Sato { .. } => "Multi-scale ridge detector for continuous filaments and vasculature.",
+            Op::Gamma { .. } => "Nonlinear tone curve that lifts faint signal without clipping bright peaks.",
+            Op::Rescale { .. } => "Maps a chosen intensity range [min, max] linearly to [0, 1].",
+            Op::Invert {} => "Inverts intensities (1 − x), useful for dark-on-bright stains.",
+            Op::LogContrast { .. } => "Compresses very bright peaks so dim fluorescence structures become visible.",
+            Op::SigmoidContrast { .. } => "S-curve contrast stretch around a cutoff intensity.",
+            Op::Clahe { .. } => "Local adaptive contrast enhancement for unevenly illuminated slides.",
+            Op::RollingBall { .. } => "Subtracts smooth uneven background illumination while keeping cells intact.",
+            Op::TvDenoise { .. } => "Edge-preserving total-variation denoising for noisy fluorescence images.",
+            Op::Bilateral { .. } => "Smooths flat regions while strictly preserving crisp membrane edges.",
+            Op::WhiteTophat { .. } => "Extracts bright spots/cells smaller than the disk radius from uneven background.",
+            Op::BlackTophat { .. } => "Extracts dark structures smaller than the disk radius on bright backgrounds.",
+            Op::MorphGradient { .. } => "Grayscale dilation minus erosion — highlights boundaries without thresholding.",
+            Op::Canny { .. } => "Detects thin, clean 1-px object edges as a binary mask.",
+            Op::OtsuThreshold { .. } => "Automatic global threshold for bimodal foreground/background histograms.",
+            Op::LiThreshold { .. } => "Minimum cross-entropy threshold — often better than Otsu on fluorescence.",
+            Op::TriangleThreshold { .. } => "Best when bright cells are sparse against a large dark background.",
+            Op::SauvolaThreshold { .. } => "Local adaptive threshold for uneven lighting or varying stain density.",
+            Op::NiblackThreshold { .. } => "Local mean/std adaptive threshold for textured or low-contrast regions.",
+            Op::HysteresisThreshold { .. } => "Keeps pixels above `low` only when connected to strong pixels above `high`.",
+            Op::Threshold { .. } => "Manual binary threshold keeping pixels at or above `value`.",
+            Op::Open { .. } => "Erode then dilate — removes small isolated noise specks from a mask.",
+            Op::Close { .. } => "Dilate then erode — bridges narrow gaps and smooths mask outlines.",
+            Op::Erode { .. } => "Shrinks foreground mask regions by `radius` pixels.",
+            Op::Dilate { .. } => "Expands foreground mask regions by `radius` pixels.",
+            Op::FillHoles {} => "Fills enclosed dark holes inside segmented nuclei or tissue masks.",
+            Op::RemoveSmallHoles { .. } => "Fills only small enclosed holes below `max_size` pixels.",
+            Op::RemoveSmall { .. } => "Drops debris and tiny objects smaller than `min_size` pixels.",
+            Op::Skeletonize {} => "Thins mask structures to 1-px centerlines for neurite/vessel tracing.",
+            Op::DistanceTransform {} => "Computes Euclidean distance from every foreground pixel to background.",
+            Op::MaskUnion {} => "Combines two masks (on where A or B is on).",
+            Op::MaskIntersect {} => "Keeps overlap of two masks (on where both A and B are on).",
+            Op::MaskSubtract {} => "Removes mask B from mask A.",
+            Op::MaskInvert {} => "Swaps foreground and background of a binary mask.",
+            Op::Label {} => "Numbers each connected object in a mask so it can be measured or split.",
+            Op::Watershed { .. } => "Splits touching nuclei/cells by flooding markers over a relief image.",
+            Op::ExpandLabels { .. } => "Grows each labeled nucleus outward into cytoplasm without overlapping.",
+            Op::ClearBorder { .. } => "Removes partial objects touching the image border before measuring.",
+            Op::FindBoundaries {} => "Extracts 1-px outlines between adjacent labeled objects.",
+            Op::MaskImage {} => "Zeroes image pixels outside a mask to isolate a region of interest.",
+            Op::Combine { .. } => "Linear channel blend (a·A + b·B), e.g. bleed-through subtraction.",
+            Op::ChannelRatio { .. } => "Ratiometric channel math A / (B + eps) for FRET or normalized stains.",
+            Op::NormalizedDiff { .. } => "Normalized difference (A − B) / (|A| + |B| + eps) between two channels.",
+            Op::ChannelProduct {} => "Colocalization product A · B highlighting co-expressed signal.",
+            Op::Measure {} => "Computes per-object area, shape, and intensity table for Analyze.",
+        }
+    }
+
+    /// Plain-English intent synonyms used by Command Search (`F3` / `Ctrl+K`).
+    pub fn keywords(&self) -> &'static str {
+        match self {
+            Op::GaussianBlur { .. } => "smooth denoise blur soft",
+            Op::Median { .. } => "speckle salt pepper denoise",
+            Op::UnsharpMask { .. } => "sharpen crisp detail",
+            Op::DifferenceOfGaussians { .. } => "dog blob spot nuclei bandpass",
+            Op::Sobel {} | Op::Laplace {} => "edge outline gradient",
+            Op::Frangi { .. } | Op::Sato { .. } => "vessels neurites axons filaments tubular ridges",
+            Op::Gamma { .. } | Op::LogContrast { .. } | Op::SigmoidContrast { .. } => "brightness contrast faint dim tone",
+            Op::Rescale { .. } => "normalize stretch contrast",
+            Op::Invert {} => "negative reverse flip",
+            Op::Clahe { .. } => "contrast equalize uneven local",
+            Op::RollingBall { .. } => "background shading uneven lighting flatfield illumination",
+            Op::TvDenoise { .. } | Op::Bilateral { .. } => "denoise smooth edge preserving noise",
+            Op::WhiteTophat { .. } | Op::BlackTophat { .. } => "background subtract spots illumination",
+            Op::MorphGradient { .. } => "outline border membrane",
+            Op::Canny { .. } => "edges contours",
+            Op::OtsuThreshold { .. } | Op::LiThreshold { .. } | Op::TriangleThreshold { .. } => "segment binarize auto threshold nuclei cells",
+            Op::SauvolaThreshold { .. } | Op::NiblackThreshold { .. } => "adaptive local uneven threshold",
+            Op::HysteresisThreshold { .. } => "dual threshold connected",
+            Op::Threshold { .. } => "manual cutoff binarize mask",
+            Op::Open { .. } | Op::RemoveSmall { .. } => "clean specks debris dust",
+            Op::Close { .. } | Op::FillHoles {} | Op::RemoveSmallHoles { .. } => "holes gaps fill clean",
+            Op::Erode { .. } | Op::Dilate { .. } => "shrink grow morphology",
+            Op::Skeletonize {} => "centerline trace neurite vessel branch",
+            Op::DistanceTransform {} => "edt distance thickness watershed",
+            Op::Label {} => "count objects connected components cells nuclei",
+            Op::Watershed { .. } => "split touching cells nuclei separate",
+            Op::ExpandLabels { .. } => "cytoplasm ring grow cell",
+            Op::ClearBorder { .. } => "edge touch partial exclude",
+            Op::FindBoundaries {} => "outline perimeter border",
+            Op::Combine { .. } | Op::ChannelRatio { .. } | Op::NormalizedDiff { .. } | Op::ChannelProduct {} => "channel math calculator ratio colocalization",
+            Op::MaskImage {} | Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} => "boolean mask roi",
+            Op::Measure {} => "quantify table area intensity stats",
+        }
+    }
+
+    /// Suggested follow-up op tags for predictive "Next step" chips.
+    pub fn next_steps(&self) -> &'static [&'static str] {
+        match self {
+            Op::RollingBall { .. } | Op::WhiteTophat { .. } | Op::BlackTophat { .. } => &["gaussian_blur", "li_threshold", "otsu_threshold"],
+            Op::GaussianBlur { .. } | Op::Median { .. } | Op::Bilateral { .. } | Op::TvDenoise { .. } | Op::Clahe { .. } => {
+                &["li_threshold", "otsu_threshold", "triangle_threshold"]
+            }
+            Op::Frangi { .. } | Op::Sato { .. } => &["hysteresis_threshold", "triangle_threshold", "li_threshold"],
+            Op::OtsuThreshold { .. }
+            | Op::LiThreshold { .. }
+            | Op::TriangleThreshold { .. }
+            | Op::SauvolaThreshold { .. }
+            | Op::NiblackThreshold { .. }
+            | Op::HysteresisThreshold { .. }
+            | Op::Threshold { .. } => &["fill_holes", "remove_small", "label"],
+            Op::FillHoles {} | Op::RemoveSmallHoles { .. } | Op::Open { .. } | Op::Close { .. } => &["remove_small", "label", "distance_transform"],
+            Op::RemoveSmall { .. } => &["label", "skeletonize", "distance_transform"],
+            Op::Label {} => &["expand_labels", "clear_border", "measure"],
+            Op::ExpandLabels { .. } | Op::ClearBorder { .. } | Op::Watershed { .. } => &["find_boundaries", "measure"],
+            _ => &[],
+        }
+    }
+
+    /// Conversational question prompting the next biological step for M3 Expressive "What's next?" cards.
+    pub fn next_step_prompt(&self) -> &'static str {
+        match self {
+            Op::RollingBall { .. } | Op::WhiteTophat { .. } | Op::BlackTophat { .. } => "Ready to smooth or separate objects?",
+            Op::GaussianBlur { .. } | Op::Median { .. } | Op::Bilateral { .. } | Op::TvDenoise { .. } | Op::Clahe { .. } => "Ready to separate objects?",
+            Op::Frangi { .. } | Op::Sato { .. } => "Ready to threshold these ridges?",
+            Op::OtsuThreshold { .. }
+            | Op::LiThreshold { .. }
+            | Op::TriangleThreshold { .. }
+            | Op::SauvolaThreshold { .. }
+            | Op::NiblackThreshold { .. }
+            | Op::HysteresisThreshold { .. }
+            | Op::Threshold { .. } => "Clean up or label this mask?",
+            Op::FillHoles {} | Op::RemoveSmallHoles { .. } | Op::Open { .. } | Op::Close { .. } | Op::RemoveSmall { .. } => "Ready to label or split objects?",
+            Op::Label {} | Op::ExpandLabels { .. } | Op::ClearBorder { .. } | Op::Watershed { .. } => "Ready to measure regions?",
+            _ => "What's next?",
+        }
+    }
+
+    /// Direct documentation URL for this op (shown in the Inspector / Explain popover).
+    pub fn docs_url(&self) -> String {
+        format!("https://github.com/neuro-kitchen/lucem/blob/main/crates/lucem-ops/src/{}", self.source_rel_path())
+    }
+
+    /// Relative path to this op's CubeCL implementation inside `crates/lucem-ops/src/`.
+    pub fn source_rel_path(&self) -> &'static str {
+        match self {
+            Op::GaussianBlur { .. } | Op::UnsharpMask { .. } | Op::DifferenceOfGaussians { .. } => "filter/gaussian.rs",
+            Op::Median { .. } => "filter/order.rs",
+            Op::Sobel {} | Op::Laplace {} => "filter/gradient.rs",
+            Op::Frangi { .. } | Op::Sato { .. } => "filter/ridge.rs",
+            Op::Gamma { .. } | Op::LogContrast { .. } | Op::SigmoidContrast { .. } => "intensity/contrast.rs",
+            Op::Rescale { .. } | Op::Invert {} | Op::Combine { .. } | Op::ChannelRatio { .. } | Op::NormalizedDiff { .. } | Op::ChannelProduct {} => "core/elementwise.rs",
+            Op::Clahe { .. } => "intensity/equalize.rs",
+            Op::RollingBall { .. } => "restore/background.rs",
+            Op::TvDenoise { .. } | Op::Bilateral { .. } => "restore/denoise.rs",
+            Op::WhiteTophat { .. } | Op::BlackTophat { .. } | Op::MorphGradient { .. } => "morphology/grayscale.rs",
+            Op::Canny { .. } => "feature/canny.rs",
+            Op::OtsuThreshold { .. } | Op::LiThreshold { .. } | Op::TriangleThreshold { .. } => "threshold/global.rs",
+            Op::SauvolaThreshold { .. } | Op::NiblackThreshold { .. } => "threshold/local.rs",
+            Op::HysteresisThreshold { .. } => "threshold/hysteresis.rs",
+            Op::Threshold { .. } => "core/elementwise.rs",
+            Op::Open { .. } | Op::Close { .. } | Op::Erode { .. } | Op::Dilate { .. } | Op::FillHoles {} => "morphology/binary.rs",
+            Op::RemoveSmall { .. } | Op::RemoveSmallHoles { .. } => "morphology/geodesic.rs",
+            Op::Skeletonize {} => "morphology/skeleton.rs",
+            Op::DistanceTransform {} => "core/distance.rs",
+            Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} | Op::MaskImage {} => "core/elementwise.rs",
+            Op::Label {} | Op::Measure {} => "measure/regions.rs",
+            Op::Watershed { .. } => "segment/watershed.rs",
+            Op::ExpandLabels { .. } | Op::ClearBorder { .. } | Op::FindBoundaries {} => "segment/labels.rs",
+        }
+    }
+
+    /// Instantiates a default op from its snake_case tag (`"fill_holes"`, `"li_threshold"`, …).
+    pub fn by_tag(tag: &str) -> Option<Op> {
+        catalog().into_iter().find(|op| op.tag() == tag)
+    }
+
+    /// The pointwise representation of a unary `Image -> Image` op that can be fused into a
+    /// [`lucem_ops::core::pointwise::PointwiseRun`], or `None` for any other op.
+    pub fn pointwise_op(&self) -> Option<lucem_ops::core::pointwise::PointwiseOp> {
+        use lucem_ops::core::pointwise::PointwiseOp;
+        match self {
+            Op::Gamma { gamma, gain } => Some(PointwiseOp::gamma(*gamma, *gain)),
+            Op::Rescale { min, max } => Some(PointwiseOp::rescale(*min, *max)),
+            Op::Invert {} => Some(PointwiseOp::affine(-1.0, 1.0)),
+            _ => None,
+        }
     }
 
     /// Checks the parameters (positive sizes, finite numbers).
@@ -326,7 +703,14 @@ impl Op {
                 pos("high sigma", *high_sigma)?;
                 if high_sigma <= low_sigma { Err("high sigma must be larger than low sigma".into()) } else { Ok(()) }
             }
+            Op::Frangi { sigma_min, sigma_max, .. } | Op::Sato { sigma_min, sigma_max, .. } => {
+                pos("sigma min", *sigma_min)?;
+                pos("sigma max", *sigma_max)?;
+                if sigma_max < sigma_min { Err("sigma max must be ≥ sigma min".into()) } else { Ok(()) }
+            }
             Op::Gamma { gamma, gain } => pos("gamma", *gamma).and(pos("gain", *gain)),
+            Op::LogContrast { gain } => pos("gain", *gain),
+            Op::SigmoidContrast { cutoff, gain } => fin("cutoff", *cutoff).and(pos("gain", *gain)),
             Op::Rescale { min, max } => {
                 if min.is_finite() && max.is_finite() && max > min { Ok(()) } else { Err("max must be larger than min".into()) }
             }
@@ -339,14 +723,54 @@ impl Op {
                 pos("weight", *weight)?;
                 if *iterations >= 1 { Ok(()) } else { Err("iterations must be at least 1".into()) }
             }
-            Op::Median { radius } | Op::WhiteTophat { radius } | Op::MorphGradient { radius } | Op::Open { radius } | Op::Close { radius } | Op::Erode { radius } | Op::Dilate { radius } => {
+            Op::Bilateral { sigma_spatial, sigma_color } => pos("sigma spatial", *sigma_spatial).and(pos("sigma color", *sigma_color)),
+            Op::Median { radius }
+            | Op::WhiteTophat { radius }
+            | Op::BlackTophat { radius }
+            | Op::MorphGradient { radius }
+            | Op::Open { radius }
+            | Op::Close { radius }
+            | Op::Erode { radius }
+            | Op::Dilate { radius } => {
                 if *radius >= 1 && *radius <= 64 { Ok(()) } else { Err("radius must be 1–64 px".into()) }
             }
-            Op::OtsuThreshold { bins } => if (16..=4096).contains(bins) { Ok(()) } else { Err("bins must be 16–4096".into()) },
+            Op::OtsuThreshold { bins } | Op::LiThreshold { bins } | Op::TriangleThreshold { bins } => {
+                if (16..=4096).contains(bins) { Ok(()) } else { Err("bins must be 16–4096".into()) }
+            }
+            Op::SauvolaThreshold { window_size, k } | Op::NiblackThreshold { window_size, k } => {
+                if *window_size < 3 || window_size % 2 == 0 {
+                    return Err("window size must be an odd integer ≥ 3".into());
+                }
+                fin("k", *k)
+            }
+            Op::HysteresisThreshold { low, high } => {
+                fin("low", *low)?;
+                fin("high", *high)?;
+                if high < low { Err("high must be ≥ low".into()) } else { Ok(()) }
+            }
             Op::Threshold { value } => fin("value", *value),
             Op::Watershed { compactness } => if compactness.is_finite() && *compactness >= 0.0 { Ok(()) } else { Err("compactness must be ≥ 0".into()) },
+            Op::ExpandLabels { distance } => if distance.is_finite() && *distance >= 0.0 { Ok(()) } else { Err("distance must be ≥ 0".into()) },
             Op::Combine { a, b } => fin("a", *a).and(fin("b", *b)),
-            Op::RemoveSmall { .. } | Op::Sobel {} | Op::Laplace {} | Op::Label {} | Op::MaskImage {} | Op::Measure {} | Op::MaskUnion {} | Op::MaskIntersect {} | Op::MaskSubtract {} | Op::MaskInvert {} => Ok(()),
+            Op::ChannelRatio { eps } | Op::NormalizedDiff { eps } => pos("eps", *eps),
+            Op::ChannelProduct {} => Ok(()),
+            Op::RemoveSmall { .. }
+            | Op::RemoveSmallHoles { .. }
+            | Op::FillHoles {}
+            | Op::Skeletonize {}
+            | Op::DistanceTransform {}
+            | Op::ClearBorder { .. }
+            | Op::FindBoundaries {}
+            | Op::Invert {}
+            | Op::Sobel {}
+            | Op::Laplace {}
+            | Op::Label {}
+            | Op::MaskImage {}
+            | Op::Measure {}
+            | Op::MaskUnion {}
+            | Op::MaskIntersect {}
+            | Op::MaskSubtract {}
+            | Op::MaskInvert {} => Ok(()),
         }
     }
 
@@ -376,16 +800,29 @@ impl Op {
             }
             Op::Sobel {} => Value::Image(sobel(client, image(0)?, &GradientFilter::default()).map_err(e)?),
             Op::Laplace {} => Value::Image(laplace(client, image(0)?, lucem_ops::core::PadMode::Reflect, 0.0).map_err(e)?),
+            Op::Frangi { sigma_min, sigma_max, black_ridges } => {
+                let sigmas = ridge_sigmas(*sigma_min, *sigma_max);
+                Value::Image(frangi(client, image(0)?, &RidgeFilter { sigmas, black_ridges: *black_ridges, ..RidgeFilter::default() }).map_err(e)?)
+            }
+            Op::Sato { sigma_min, sigma_max, black_ridges } => {
+                let sigmas = ridge_sigmas(*sigma_min, *sigma_max);
+                Value::Image(sato(client, image(0)?, &RidgeFilter { sigmas, black_ridges: *black_ridges, ..RidgeFilter::default() }).map_err(e)?)
+            }
             Op::Gamma { gamma, gain } => Value::Image(adjust_gamma(client, image(0)?, *gamma, *gain).map_err(e)?),
             Op::Rescale { min, max } => {
                 let a = image(0)?;
-                let scaled = DeviceArray::<f32>::empty(client, a.shape().clone()).map_err(|err| err.to_string())?;
-                let scale = 1.0 / (max - min);
-                elementwise::scale_offset_into(client, a, &scaled, scale, -min * scale).map_err(e)?;
                 let out = DeviceArray::<f32>::empty(client, a.shape().clone()).map_err(|err| err.to_string())?;
-                elementwise::clip_into(client, &scaled, &out, 0.0, 1.0).map_err(e)?;
+                elementwise::rescale_clip_into(client, a, &out, (*min, *max), (0.0, 1.0)).map_err(e)?;
                 Value::Image(out)
             }
+            Op::Invert {} => {
+                let a = image(0)?;
+                let out = DeviceArray::<f32>::empty(client, a.shape().clone()).map_err(|err| err.to_string())?;
+                elementwise::affine_into(client, a, &out, -1.0, 1.0).map_err(e)?;
+                Value::Image(out)
+            }
+            Op::LogContrast { gain } => Value::Image(adjust_log(client, image(0)?, *gain, false).map_err(e)?),
+            Op::SigmoidContrast { cutoff, gain } => Value::Image(adjust_sigmoid(client, image(0)?, *cutoff, *gain, false).map_err(e)?),
             Op::Clahe { clip_limit, tiles } => Value::Image(clahe(client, image(0)?, ClaheSettings { grid_size: (*tiles, *tiles), clip_limit: *clip_limit, num_bins: 256 }).map_err(e)?),
             Op::RollingBall { radius } => {
                 let a = image(0)?;
@@ -395,7 +832,11 @@ impl Op {
                 Value::Image(out)
             }
             Op::TvDenoise { weight, iterations } => Value::Image(tv_chambolle(client, image(0)?, &TvChambolle { weight: *weight, max_num_iter: *iterations, ..TvChambolle::default() }).map_err(e)?),
+            Op::Bilateral { sigma_spatial, sigma_color } => {
+                Value::Image(bilateral(client, image(0)?, &Bilateral { sigma_spatial: *sigma_spatial, sigma_color: Some(*sigma_color), ..Bilateral::default() }).map_err(e)?)
+            }
             Op::WhiteTophat { radius } => Value::Image(white_tophat(client, image(0)?, &disk(*radius), &GrayMorphology::default()).map_err(e)?),
+            Op::BlackTophat { radius } => Value::Image(black_tophat(client, image(0)?, &disk(*radius), &GrayMorphology::default()).map_err(e)?),
             Op::MorphGradient { radius } => Value::Image(morph_gradient(client, image(0)?, &disk(*radius), &GrayMorphology::default()).map_err(e)?),
             Op::Canny { sigma } => Value::Mask(canny(client, image(0)?, &Canny { sigma: *sigma, ..Canny::default() }).map_err(e)?),
             Op::OtsuThreshold { bins } => {
@@ -403,17 +844,45 @@ impl Op {
                 let t = otsu(client, a, *bins).map_err(e)?;
                 Value::Mask(threshold(client, a, t)?)
             }
+            Op::LiThreshold { bins } => {
+                let a = image(0)?;
+                let t = li(client, a, *bins).map_err(e)?;
+                Value::Mask(threshold(client, a, t)?)
+            }
+            Op::TriangleThreshold { bins } => {
+                let a = image(0)?;
+                let t = triangle(client, a, *bins).map_err(e)?;
+                Value::Mask(threshold(client, a, t)?)
+            }
+            Op::SauvolaThreshold { window_size, k } => {
+                let a = image(0)?;
+                let surface = sauvola(client, a, &WindowThreshold { window_size: *window_size, k: *k, ..WindowThreshold::default() }).map_err(e)?;
+                Value::Mask(threshold_surface(client, a, &surface)?)
+            }
+            Op::NiblackThreshold { window_size, k } => {
+                let a = image(0)?;
+                let surface = niblack(client, a, &WindowThreshold { window_size: *window_size, k: *k, ..WindowThreshold::default() }).map_err(e)?;
+                Value::Mask(threshold_surface(client, a, &surface)?)
+            }
+            Op::HysteresisThreshold { low, high } => Value::Mask(hysteresis_threshold(client, image(0)?, *low, *high).map_err(e)?),
             Op::Threshold { value } => Value::Mask(threshold(client, image(0)?, *value)?),
             Op::Open { radius } => Value::Mask(binary_open(client, mask(0)?, &disk(*radius), &BinaryMorphology::default()).map_err(e)?),
             Op::Close { radius } => Value::Mask(binary_close(client, mask(0)?, &disk(*radius), &BinaryMorphology::default()).map_err(e)?),
             Op::Erode { radius } => Value::Mask(binary_erode(client, mask(0)?, &disk(*radius), &BinaryMorphology::default()).map_err(e)?),
             Op::Dilate { radius } => Value::Mask(binary_dilate(client, mask(0)?, &disk(*radius), &BinaryMorphology::default()).map_err(e)?),
+            Op::FillHoles {} => Value::Mask(fill_holes(client, mask(0)?, None).map_err(e)?),
+            Op::RemoveSmallHoles { max_size } => Value::Mask(remove_small_holes(client, mask(0)?, *max_size, None).map_err(e)?),
             Op::RemoveSmall { min_size } => Value::Mask(remove_small_objects(client, mask(0)?, *min_size, None).map_err(e)?),
+            Op::Skeletonize {} => Value::Mask(skeletonize(client, mask(0)?).map_err(e)?),
+            Op::DistanceTransform {} => Value::Image(euclidean_distance::<u32, f32>(client, mask(0)?, None).map_err(e)?),
             Op::Label {} => Value::Labels(label_components(client, mask(0)?, None).map_err(e)?.labels),
             Op::Watershed { compactness } => {
                 let opts = WatershedOptions { compactness: *compactness, ..WatershedOptions::default() };
                 Value::Labels(watershed(client, image(0)?, labels(1)?, None, None, &opts).map_err(e)?)
             }
+            Op::ExpandLabels { distance } => Value::Labels(expand_labels(client, labels(0)?, *distance, None).map_err(e)?),
+            Op::ClearBorder { buffer_size } => Value::Labels(clear_border(client, labels(0)?, *buffer_size, 0).map_err(e)?),
+            Op::FindBoundaries {} => Value::Mask(find_boundaries(client, labels(0)?, 1, BoundaryMode::Thick, 0).map_err(e)?),
             Op::MaskUnion {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), |a, b| a | b)?),
             Op::MaskIntersect {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), |a, b| a & b)?),
             Op::MaskSubtract {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), |a, b| a & !b)?),
@@ -441,6 +910,35 @@ impl Op {
                 elementwise::linear_combination_into(client, x, y, &out, *a, *b, 0.0).map_err(e)?;
                 Value::Image(out)
             }
+            Op::ChannelRatio { eps } => {
+                let (x, y) = (image(0)?, image(1)?);
+                if x.dims() != y.dims() {
+                    return Err("Channel ratio: A and B differ in size".into());
+                }
+                let eps = *eps as f32;
+                let (vx, vy) = (x.to_host(client), y.to_host(client));
+                let out: Vec<f32> = vx.iter().zip(vy.iter()).map(|(&a, &b)| a / (b.max(0.0) + eps)).collect();
+                Value::Image(DeviceArray::from_host(client, x.shape().clone(), out).map_err(|err| err.to_string())?)
+            }
+            Op::NormalizedDiff { eps } => {
+                let (x, y) = (image(0)?, image(1)?);
+                if x.dims() != y.dims() {
+                    return Err("Normalized diff: A and B differ in size".into());
+                }
+                let eps = *eps as f32;
+                let (vx, vy) = (x.to_host(client), y.to_host(client));
+                let out: Vec<f32> = vx.iter().zip(vy.iter()).map(|(&a, &b)| (a - b) / (a.abs() + b.abs() + eps)).collect();
+                Value::Image(DeviceArray::from_host(client, x.shape().clone(), out).map_err(|err| err.to_string())?)
+            }
+            Op::ChannelProduct {} => {
+                let (x, y) = (image(0)?, image(1)?);
+                if x.dims() != y.dims() {
+                    return Err("Channel product: A and B differ in size".into());
+                }
+                let (vx, vy) = (x.to_host(client), y.to_host(client));
+                let out: Vec<f32> = vx.iter().zip(vy.iter()).map(|(&a, &b)| a * b).collect();
+                Value::Image(DeviceArray::from_host(client, x.shape().clone(), out).map_err(|err| err.to_string())?)
+            }
             Op::Measure {} => Value::Table(region_features(client, labels(0)?, Some(image(1)?)).map_err(e)?),
         })
     }
@@ -462,6 +960,22 @@ fn threshold(client: &Client, a: &DeviceArray<f32>, t: f64) -> Result<DeviceArra
     Ok(m)
 }
 
+/// Binarizes `a >= surface` entirely on the device (`a - surface >= 0`).
+fn threshold_surface(client: &Client, a: &DeviceArray<f32>, surface: &DeviceArray<f32>) -> Result<DeviceArray<u32>, String> {
+    let diff = DeviceArray::<f32>::empty(client, a.shape().clone()).map_err(|e| e.to_string())?;
+    elementwise::linear_combination_into(client, a, surface, &diff, 1.0, -1.0, 0.0).map_err(|e| e.to_string())?;
+    threshold(client, &diff, 0.0)
+}
+
+/// Builds 4–5 evenly spaced Gaussian scales across `[sigma_min, sigma_max]` for ridge filters.
+fn ridge_sigmas(min_s: f64, max_s: f64) -> Vec<f64> {
+    if (max_s - min_s).abs() < 1e-6 {
+        return vec![min_s];
+    }
+    let steps = 4usize;
+    (0..=steps).map(|i| min_s + (max_s - min_s) * (i as f64 / steps as f64)).collect()
+}
+
 /// Every op with its default parameters, in menu order.
 pub fn catalog() -> Vec<Op> {
     vec![
@@ -471,29 +985,51 @@ pub fn catalog() -> Vec<Op> {
         Op::DifferenceOfGaussians { low_sigma: 1.0, high_sigma: 4.0 },
         Op::Sobel {},
         Op::Laplace {},
+        Op::Frangi { sigma_min: 1.0, sigma_max: 5.0, black_ridges: false },
+        Op::Sato { sigma_min: 1.0, sigma_max: 5.0, black_ridges: false },
         Op::Gamma { gamma: 0.7, gain: 1.0 },
         Op::Rescale { min: 0.0, max: 0.25 },
+        Op::Invert {},
+        Op::LogContrast { gain: 1.0 },
+        Op::SigmoidContrast { cutoff: 0.5, gain: 10.0 },
         Op::Clahe { clip_limit: 0.01, tiles: 8 },
         Op::Combine { a: 1.0, b: -1.0 },
+        Op::ChannelRatio { eps: 0.01 },
+        Op::NormalizedDiff { eps: 0.01 },
+        Op::ChannelProduct {},
         Op::MaskImage {},
         Op::RollingBall { radius: 25.0 },
         Op::TvDenoise { weight: 0.1, iterations: 50 },
+        Op::Bilateral { sigma_spatial: 2.0, sigma_color: 0.1 },
         Op::WhiteTophat { radius: 8 },
+        Op::BlackTophat { radius: 8 },
         Op::MorphGradient { radius: 2 },
         Op::OtsuThreshold { bins: 256 },
+        Op::LiThreshold { bins: 256 },
+        Op::TriangleThreshold { bins: 256 },
+        Op::SauvolaThreshold { window_size: 15, k: 0.2 },
+        Op::NiblackThreshold { window_size: 15, k: 0.2 },
+        Op::HysteresisThreshold { low: 0.1, high: 0.3 },
         Op::Threshold { value: 0.1 },
         Op::Canny { sigma: 1.5 },
         Op::Open { radius: 2 },
         Op::Close { radius: 2 },
         Op::Erode { radius: 1 },
         Op::Dilate { radius: 1 },
+        Op::FillHoles {},
+        Op::RemoveSmallHoles { max_size: 64 },
         Op::RemoveSmall { min_size: 30 },
+        Op::Skeletonize {},
+        Op::DistanceTransform {},
         Op::MaskUnion {},
         Op::MaskIntersect {},
         Op::MaskSubtract {},
         Op::MaskInvert {},
         Op::Label {},
         Op::Watershed { compactness: 0.0 },
+        Op::ExpandLabels { distance: 5.0 },
+        Op::ClearBorder { buffer_size: 1 },
+        Op::FindBoundaries {},
         Op::Measure {},
     ]
 }

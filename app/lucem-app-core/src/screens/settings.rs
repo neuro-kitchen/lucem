@@ -6,10 +6,13 @@ use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+#[cfg(not(target_family = "wasm"))]
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::{div, px, AnyElement, App, Context, Entity, Subscription, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Window};
 
 use crate::data::prefs::Prefs;
+#[cfg(not(target_family = "wasm"))]
 use crate::data::tools::{self, Found, Tool, ToolPaths};
 use crate::data::store::Store;
 use crate::ui::theme::{self, color, PASTEBOARDS};
@@ -61,17 +64,32 @@ type Run = Rc<dyn Fn(&mut Window, &mut App)>;
 pub struct SettingsView {
     store: Entity<Store>,
     /// Each tool's `--version` (Tools), and the paths it was read for.
+    #[cfg(not(target_family = "wasm"))]
     versions: Vec<(Tool, Result<String, String>)>,
+    #[cfg(not(target_family = "wasm"))]
     versions_for: Option<ToolPaths>,
     /// What the last environment action said (sync, pin), and whether one runs.
+    #[cfg(not(target_family = "wasm"))]
     env_note: Option<Result<String, String>>,
+    #[cfg(not(target_family = "wasm"))]
     env_busy: bool,
     _subs: Vec<Subscription>,
 }
 
 impl SettingsView {
     pub fn new(store: Entity<Store>) -> Self {
-        Self { store, versions: Vec::new(), versions_for: None, env_note: None, env_busy: false, _subs: Vec::new() }
+        Self {
+            store,
+            #[cfg(not(target_family = "wasm"))]
+            versions: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            versions_for: None,
+            #[cfg(not(target_family = "wasm"))]
+            env_note: None,
+            #[cfg(not(target_family = "wasm"))]
+            env_busy: false,
+            _subs: Vec::new(),
+        }
     }
 
     /// The settings of `section`.
@@ -292,6 +310,34 @@ impl SettingsView {
     /// The programs scripts use: where each is found (Settings, its variable or the `PATH`) and
     /// its version; Choose… sets a path, Use PATH clears it. Nothing is installed by lucem.
     fn tools(&mut self, p: &Prefs, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = (p, cx);
+            return v_flex()
+                .gap(px(theme::MD))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(color::text())
+                        .child("Desktop-only environment settings"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color::text_muted())
+                        .child("Local Python/.venv environments, warm script workers, drop-in plugin scripts, and Rust toolchains run inside the native Lucem desktop app or on a connected lucem serve host. Browsers cannot spawn local subprocesses or inspect the local filesystem."),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color::text_muted())
+                        .child("Built-in image processing operations, 2D/3D exploration, and remote pipelines work directly in the browser."),
+                )
+                .into_any_element();
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
         if self.versions_for.as_ref() != Some(&p.tools) {
             self.versions_for = Some(p.tools.clone());
             cx.spawn(async move |this, cx| {
@@ -344,10 +390,12 @@ impl SettingsView {
             col = col.child(Self::row(tool.title(), tool.what(), "", control));
         }
         col.into_any_element()
+        }
     }
 
     /// The project's environments: the Python its scripts run in (the project's own, the active
     /// one or lucem's default), and the Rust toolchain pinned for its Rust scripts.
+    #[cfg(not(target_family = "wasm"))]
     fn environment(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let dir = tools::scripts_dir();
         let py = tools::python_env();
@@ -404,12 +452,66 @@ impl SettingsView {
             Some(Err(e)) => Some(div().text_xs().text_color(color::danger()).child(e.clone())),
             None => None,
         };
+        let warm_on = self.store.read(cx).prefs.warm_python_worker;
+        let warm_count = crate::data::script::warm_worker_count();
+        let st_warm = self.store.clone();
+        let warm_ctrl = v_flex()
+            .items_end()
+            .gap(px(theme::XS))
+            .child(
+                h_flex()
+                    .gap(px(theme::SM))
+                    .items_center()
+                    .child(
+                        Checkbox::new("env-warm-worker")
+                            .checked(warm_on)
+                            .label(if warm_count > 0 { format!("Keep warm ({warm_count} running)") } else { "Keep warm".to_string() })
+                            .on_click(move |on: &bool, _, cx| {
+                                let on = *on;
+                                crate::data::script::set_warm_workers_enabled(on);
+                                st_warm.update(cx, |s, cx| s.update_prefs(|p| p.warm_python_worker = on, cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("env-warm-restart")
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(IconName::RefreshCw))
+                            .label("Restart")
+                            .disabled(warm_count == 0)
+                            .tooltip("Stop warm Python workers so the next run spawns a fresh interpreter")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                crate::data::script::restart_python_workers();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(color::text_muted())
+                    .child(format!("Managed uv cache: {}", crate::domain::paths::short_path(&crate::data::script::managed_venvs_dir()))),
+            );
+        let plugin_ops_dirs = crate::data::script::plugin_ops_dirs();
+        let plugin_ops_path = plugin_ops_dirs
+            .last()
+            .map(|p| crate::domain::paths::short_path(p))
+            .unwrap_or_else(|| "~/.config/lucem/plugins/ops".to_string());
+        let plugin_ops_count = crate::data::script::discover_plugin_ops().len();
+        let plugin_ops_ctrl = v_flex()
+            .items_end()
+            .gap(px(theme::XS))
+            .child(div().text_xs().text_color(color::text()).child(format!("{plugin_ops_count} drop-in script op(s) discovered")))
+            .child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(plugin_ops_path));
         v_flex()
             .child(div().pb(px(theme::SM)).text_xs().text_color(color::text_muted()).child(format!(
-                "The project's scripts folder ({}) holds its environments: pyproject.toml, uv.lock and .venv for Python, rust-toolchain.toml for Rust. The locks travel with the project, so its scripts run the same on another computer.",
+                "You can either point Lucem to an existing Python/.venv under Programs below, or let Lucem create and cache isolated .venv environments automatically using uv (in the project's scripts folder {} or the managed uv cache).",
                 crate::domain::paths::short_path(&dir)
             )))
-            .child(Self::row("Python", "The environment scripts and table code run in. uv makes and syncs it from the lock.", "", python))
+            .child(Self::row("Python", "The environment scripts and table code run in. Provide your own .venv/Python path below, or create/sync one with uv.", "", python))
+            .child(Self::row("Warm Python worker", "Keeps Python and loaded ML/NumPy imports alive between tile runs so scripts execute in milliseconds. Scripts with PEP 723 dependencies auto-provision cached uv venvs.", "On", warm_ctrl))
+            .child(Self::row("Plugin script ops", "Drop-in .py or .rs ops placed in plugins/ops (or $LUCEM_PLUGINS/ops) appear automatically in the Pipeline Script menu.", "", plugin_ops_ctrl))
             .child(Self::row("Rust", "The compiler the project's Rust scripts are built with (rust-toolchain.toml).", "", rust))
             .children(note)
             .into_any_element()
