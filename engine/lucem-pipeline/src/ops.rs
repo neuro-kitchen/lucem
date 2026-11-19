@@ -641,7 +641,7 @@ impl Op {
             Op::Invert {} => {
                 let a = image(0)?;
                 let out = DeviceArray::<f32>::empty(client, a.shape().clone()).map_err(|err| err.to_string())?;
-                elementwise::affine_into(client, a, -1.0, 1.0, &out).map_err(e)?;
+                elementwise::affine_into(client, a, &out, -1.0, 1.0).map_err(e)?;
                 Value::Image(out)
             }
             Op::LogContrast { gain } => Value::Image(adjust_log(client, image(0)?, *gain, false).map_err(e)?),
