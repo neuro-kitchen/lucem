@@ -352,9 +352,16 @@ pub fn find_ome_zarr_root(path: &Path) -> Option<PathBuf> {
     for ancestor in path.ancestors() {
         if ancestor.is_dir() && ancestor.join(".zattrs").is_file() && ancestor.join(".zgroup").is_file()
             && let Ok(txt) = fs::read_to_string(ancestor.join(".zattrs"))
-                && txt.contains("multiscales") {
-                    return Some(ancestor.to_path_buf());
-                }
+            && txt.contains("multiscales")
+        {
+            return Some(ancestor.to_path_buf());
+        }
+        if ancestor.is_dir() && ancestor.join("zarr.json").is_file()
+            && let Ok(txt) = fs::read_to_string(ancestor.join("zarr.json"))
+            && txt.contains("multiscales")
+        {
+            return Some(ancestor.to_path_buf());
+        }
     }
     for ancestor in path.ancestors() {
         if let Some(name) = ancestor.file_name().and_then(|n| n.to_str())
