@@ -11,6 +11,8 @@ pub mod labels;
 pub mod ml;
 pub mod model_node;
 pub mod prefs;
+pub mod python_worker;
+pub mod recipes;
 pub mod remote;
 pub mod results;
 pub mod script;

@@ -79,9 +79,13 @@ impl Language {
 // The header
 // ----------------------------------------------------------------------------
 
-/// What a script declares.
+/// What a script declares via `lucem:` header comments.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Header {
+    pub name: Option<String>,
+    pub family: Option<String>,
+    pub description: Option<String>,
+    pub halo: usize,
     pub inputs: Vec<ScriptPort>,
     pub output: PortType,
     pub params: Vec<ScriptParam>,
@@ -96,9 +100,26 @@ fn port_of(name: &str) -> Option<PortType> {
     }
 }
 
+fn unquote(s: &str) -> String {
+    let s = s.trim();
+    s.strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .or_else(|| s.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
+        .unwrap_or(s)
+        .to_string()
+}
+
 /// Reads the `lucem:` lines of a script (comments starting with `#` or `//`).
 pub fn read_header(text: &str) -> Result<Header, String> {
-    let mut h = Header { inputs: Vec::new(), output: PortType::Image, params: Vec::new() };
+    let mut h = Header {
+        name: None,
+        family: None,
+        description: None,
+        halo: 0,
+        inputs: Vec::new(),
+        output: PortType::Image,
+        params: Vec::new(),
+    };
     for (i, line) in text.lines().enumerate() {
         let l = line.trim_start();
         let l = l.strip_prefix("//").or_else(|| l.strip_prefix('#')).unwrap_or("").trim();
@@ -106,7 +127,32 @@ pub fn read_header(text: &str) -> Result<Header, String> {
         let Some(rest) = l.strip_prefix("lucem:").or_else(|| l.strip_prefix("lumen:")) else { continue };
         let rest = rest.trim();
         let bad = |what: &str| format!("line {}: {what}: {line:?}", i + 1);
-        if let Some(r) = rest.strip_prefix("input ") {
+        if let Some(r) = rest.strip_prefix("name")
+            && let Some((_, v)) = r.split_once('=')
+        {
+            let v = unquote(v);
+            if !v.is_empty() {
+                h.name = Some(v);
+            }
+        } else if let Some(r) = rest.strip_prefix("family")
+            && let Some((_, v)) = r.split_once('=')
+        {
+            let v = unquote(v);
+            if !v.is_empty() {
+                h.family = Some(v);
+            }
+        } else if let Some(r) = rest.strip_prefix("description")
+            && let Some((_, v)) = r.split_once('=')
+        {
+            let v = unquote(v);
+            if !v.is_empty() {
+                h.description = Some(v);
+            }
+        } else if let Some(r) = rest.strip_prefix("halo")
+            && let Some((_, v)) = r.split_once('=')
+        {
+            h.halo = v.trim().parse::<usize>().map_err(|_| bad("halo must be a non-negative integer"))?;
+        } else if let Some(r) = rest.strip_prefix("input ") {
             let (name, port) = r.split_once(':').ok_or_else(|| bad("an input is `input NAME: image|mask|labels`"))?;
             let port = port_of(port).ok_or_else(|| bad("the type is image, mask or labels"))?;
             h.inputs.push(ScriptPort { name: name.trim().to_string(), port });
@@ -115,11 +161,113 @@ pub fn read_header(text: &str) -> Result<Header, String> {
             h.output = port_of(t).ok_or_else(|| bad("the output is image, mask or labels"))?;
         } else if let Some(r) = rest.strip_prefix("param ") {
             let (name, value) = r.split_once('=').ok_or_else(|| bad("a number is `param NAME = VALUE`"))?;
-            let value = value.trim().parse::<f64>().map_err(|_| bad("the value is a number"))?;
+            // Allow optional trailing range/unit hint like `param sigma = 2.0 (0.2..20.0)`
+            let num_token = value.trim().split_whitespace().next().unwrap_or("");
+            let value = num_token.parse::<f64>().map_err(|_| bad("the value is a number"))?;
             h.params.push(ScriptParam { name: name.trim().to_string(), value });
         }
     }
     Ok(h)
+}
+
+/// Extracts Python package dependencies declared via PEP 723 inline script metadata
+/// (`# /// script` ... `dependencies = ["scipy", "scikit-image"]`) or `# lucem: pip <pkg>`.
+pub fn read_python_deps(text: &str) -> Vec<String> {
+    let mut deps = Vec::new();
+    let mut in_pep723 = false;
+    let mut in_deps = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(after) = trimmed.strip_prefix('#').map(str::trim) {
+            if after == "/// script" {
+                in_pep723 = true;
+                continue;
+            }
+            if after == "///" && in_pep723 {
+                in_pep723 = false;
+                in_deps = false;
+                continue;
+            }
+            if let Some(pkg) = after.strip_prefix("lucem:").map(str::trim).and_then(|r| r.strip_prefix("pip ")) {
+                let pkg = unquote(pkg);
+                if !pkg.is_empty() {
+                    deps.push(pkg);
+                }
+                continue;
+            }
+            if in_pep723 {
+                if after.starts_with("dependencies") && after.contains('[') {
+                    in_deps = true;
+                }
+                if in_deps {
+                    // Collect quoted strings inside `[...]`
+                    let mut rest = after;
+                    while let Some(start) = rest.find('"') {
+                        let tail = &rest[start + 1..];
+                        let Some(end) = tail.find('"') else { break };
+                        let pkg = tail[..end].trim();
+                        if !pkg.is_empty() && pkg != "dependencies" {
+                            deps.push(pkg.to_string());
+                        }
+                        rest = &tail[end + 1..];
+                    }
+                    if after.contains(']') {
+                        in_deps = false;
+                    }
+                }
+            }
+        }
+    }
+    deps.sort();
+    deps.dedup();
+    deps
+}
+
+/// A drop-in community or user script op discovered in a plugin `ops/` folder.
+#[derive(Debug, Clone)]
+pub struct DiscoveredScript {
+    pub path: PathBuf,
+    pub name: String,
+    pub family: String,
+    pub description: String,
+    pub header: Header,
+}
+
+/// Folders scanned for drop-in script ops (`$LUCEM_PLUGINS/ops` and `<config>/lucem/plugins/ops`).
+pub fn plugin_ops_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(env_dirs) = std::env::var("LUCEM_PLUGINS") {
+        for p in std::env::split_paths(&env_dirs) {
+            dirs.push(p.join("ops"));
+        }
+    }
+    if let Some(cfg) = crate::data::prefs::Prefs::dir() {
+        dirs.push(cfg.join("plugins").join("ops"));
+    }
+    dirs
+}
+
+/// Scans [`plugin_ops_dirs`] for `.py` and `.rs` files with valid `lucem:` headers.
+pub fn discover_plugin_ops() -> Vec<DiscoveredScript> {
+    let mut found = Vec::new();
+    for dir in plugin_ops_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if Language::of(&path).is_none() {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Ok(header) = read_header(&text) else { continue };
+            let fallback = path.file_stem().map_or_else(|| "Script".to_string(), |s| s.to_string_lossy().into_owned());
+            let name = header.name.clone().unwrap_or(fallback);
+            let family = header.family.clone().unwrap_or_else(|| "Plugin".to_string());
+            let description = header.description.clone().unwrap_or_default();
+            found.push(DiscoveredScript { path, name, family, description, header });
+        }
+    }
+    found.sort_by(|a, b| a.family.cmp(&b.family).then_with(|| a.name.cmp(&b.name)));
+    found
 }
 
 /// A new script's text: the header and one example step.
@@ -459,6 +607,10 @@ if isinstance(out, dict):
 np.save(folder + "/output.npy", np.ascontiguousarray(np.asarray(out).astype(dtype)))
 "#;
 
+pub use crate::data::python_worker::{
+    ensure_managed_venv, managed_venvs_dir, restart_python_workers, run_in_warm_worker, set_warm_workers_enabled, warm_worker_count, warm_workers_enabled,
+};
+
 /// Results of script nodes by (file, its version, inputs, numbers): a camera move does not run
 /// the script again.
 fn results_cache() -> &'static Mutex<HashMap<u64, HostArray>> {
@@ -501,9 +653,32 @@ pub fn run_node(path: &Path, inputs: &[(String, PortType, HostArray)], params: &
     let result = (|| {
         match lang {
             Language::Python => {
-                let runner = dir.join("runner.py");
-                std::fs::write(&runner, PYTHON_NODE_RUNNER).map_err(|e| e.to_string())?;
-                run_program(crate::data::tools::python_command().arg(&runner).arg(path).arg(&dir), &name)?;
+                let extra_deps = read_python_deps(&text);
+                let has_uv = Command::new(crate::data::tools::program(crate::data::tools::Tool::Uv))
+                    .arg("--version")
+                    .output()
+                    .is_ok_and(|o| o.status.success());
+                let (env_key, make_cmd): (String, Box<dyn Fn() -> Command>) = if !extra_deps.is_empty() && has_uv {
+                    let py = ensure_managed_venv(&extra_deps)?;
+                    let key = format!("venv:{}", py.display());
+                    (
+                        key,
+                        Box::new(move || {
+                            let mut c = Command::new(&py);
+                            c.arg("-I");
+                            c
+                        }),
+                    )
+                } else {
+                    ("default".to_string(), Box::new(crate::data::tools::python_command))
+                };
+                if warm_workers_enabled() {
+                    run_in_warm_worker(&env_key, make_cmd.as_ref(), path, &dir)?;
+                } else {
+                    let runner = dir.join("runner.py");
+                    std::fs::write(&runner, PYTHON_NODE_RUNNER).map_err(|e| e.to_string())?;
+                    run_program(make_cmd().arg(&runner).arg(path).arg(&dir), &name)?;
+                }
             }
             Language::Rust => {
                 let abs = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
@@ -786,6 +961,29 @@ mod tests {
         assert_eq!(read_npy(&npy_bytes(&a, false)).unwrap(), a);
         let m = HostArray { width: 2, height: 2, data: vec![0.0, 1.0, 1.0, 0.0] };
         assert_eq!(read_npy(&npy_bytes(&m, true)).unwrap(), m);
+    }
+
+    #[test]
+    fn plugin_header_and_pep723_deps_parse() {
+        let src = r#"# /// script
+# dependencies = ["numpy", "scipy", "scikit-image"]
+# ///
+# lucem: name = "Membrane Enhance"
+# lucem: family = "Filter"
+# lucem: description = "DoG membrane enhancement"
+# lucem: halo = 12
+# lucem: input image: image
+# lucem: param sigma = 1.5
+# lucem: output image
+"#;
+        let h = read_header(src).unwrap();
+        assert_eq!(h.name.as_deref(), Some("Membrane Enhance"));
+        assert_eq!(h.family.as_deref(), Some("Filter"));
+        assert_eq!(h.description.as_deref(), Some("DoG membrane enhancement"));
+        assert_eq!(h.halo, 12);
+        assert_eq!(h.inputs.len(), 1);
+        assert_eq!(h.params.len(), 1);
+        assert_eq!(read_python_deps(src), vec!["numpy", "scikit-image", "scipy"]);
     }
 }
 

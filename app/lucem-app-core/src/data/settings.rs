@@ -21,6 +21,8 @@ pub struct Settings {
     pub pasteboard: u8,
     /// `None`: automatic.
     pub runtime: Option<String>,
+    /// Host RAM cache budget (`None`: automatic = quarter of RAM; else e.g. `"8GiB"`).
+    pub memory: Option<String>,
     /// 0: the machine's cores (at most 8).
     pub tile_threads: usize,
     /// `None`: the plugin's default.
@@ -44,6 +46,7 @@ pasteboard = "grey"     # around the image: "grey" | "dark" | "light"
 
 [compute]
 runtime = "automatic"   # "automatic" | "wgpu" | "cuda" | "cpu"; takes effect at the next start
+memory = "automatic"    # RAM cache budget: "automatic" (quarter of RAM) or e.g. "8GiB"
 tile_threads = 0        # threads reading tiles; 0 is the machine's cores, at most 8
 
 [models]
@@ -51,13 +54,13 @@ segment = ""            # the Segment tool's model (a plugin's model id); "" is 
 "##;
 
 /// What `settings.toml` may hold: (section, keys).
-const KNOWN: &[(&str, &[&str])] = &[("appearance", &["theme", "accent", "font_size", "pasteboard"]), ("compute", &["runtime", "tile_threads"]), ("models", &["segment"])];
+const KNOWN: &[(&str, &[&str])] = &[("appearance", &["theme", "accent", "font_size", "pasteboard"]), ("compute", &["runtime", "memory", "tile_threads"]), ("models", &["segment"])];
 
 const PASTEBOARDS: [&str; 3] = ["grey", "dark", "light"];
 
 impl Settings {
     pub fn from_prefs(p: &Prefs) -> Self {
-        Self { theme: p.theme, accent: p.accent, font_size: p.font_size, pasteboard: p.pasteboard.min(2), runtime: p.runtime.clone().filter(|r| !r.is_empty()), tile_threads: p.tile_threads, segment_model: p.ml_model.clone().filter(|m| !m.is_empty()) }
+        Self { theme: p.theme, accent: p.accent, font_size: p.font_size, pasteboard: p.pasteboard.min(2), runtime: p.runtime.clone().filter(|r| !r.is_empty()), memory: p.memory.clone().filter(|m| !m.is_empty()), tile_threads: p.tile_threads, segment_model: p.ml_model.clone().filter(|m| !m.is_empty()) }
     }
 
     pub fn apply_to(&self, p: &mut Prefs) {
@@ -66,8 +69,11 @@ impl Settings {
         p.font_size = self.font_size;
         p.pasteboard = self.pasteboard;
         p.runtime = self.runtime.clone();
+        p.memory = self.memory.clone();
         p.tile_threads = self.tile_threads;
         p.ml_model = self.segment_model.clone();
+        let ram = self.memory.as_deref().and_then(lucem_core::memory::parse_bytes).map(|b| b as usize);
+        lucem_core::memory::set_ram_memory_limit(ram);
     }
 
     /// The settings in `text` and a notice per line that was not understood (which keeps its
@@ -128,6 +134,16 @@ impl Settings {
             None | Some("automatic") | Some("") => {}
             Some(name) => out.runtime = Some(name.to_string()),
         }
+        match text_of("compute", "memory", &mut notices).as_deref() {
+            None | Some("automatic") | Some("") => {}
+            Some(size) => {
+                if lucem_core::memory::parse_bytes(size).is_some() {
+                    out.memory = Some(size.to_string());
+                } else {
+                    notices.push(format!("settings.toml: compute.memory {size:?} is not \"automatic\" or a size like \"8GiB\""));
+                }
+            }
+        }
         if let Some(v) = get("compute", "tile_threads") {
             match v.as_integer().filter(|n| (0..=64).contains(n)) {
                 Some(n) => out.tile_threads = n as usize,
@@ -155,6 +171,7 @@ impl Settings {
         set(&mut doc, "appearance", "font_size", (self.font_size as f64).into());
         set(&mut doc, "appearance", "pasteboard", PASTEBOARDS[self.pasteboard.min(2) as usize].into());
         set(&mut doc, "compute", "runtime", self.runtime.clone().unwrap_or_else(|| "automatic".into()).into());
+        set(&mut doc, "compute", "memory", self.memory.clone().unwrap_or_else(|| "automatic".into()).into());
         set(&mut doc, "compute", "tile_threads", (self.tile_threads as i64).into());
         set(&mut doc, "models", "segment", self.segment_model.clone().unwrap_or_default().into());
         doc.to_string()
@@ -196,7 +213,7 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_keep_the_comments() {
-        let s = Settings { theme: Some(false), accent: Some(kitchen_ui::Rgb(0x2b7f86)), font_size: 14.0, pasteboard: 2, runtime: Some("cuda".into()), tile_threads: 4, segment_model: Some("sam2-tiny".into()) };
+        let s = Settings { theme: Some(false), accent: Some(kitchen_ui::Rgb(0x2b7f86)), font_size: 14.0, pasteboard: 2, runtime: Some("cuda".into()), memory: Some("8GiB".into()), tile_threads: 4, segment_model: Some("sam2-tiny".into()) };
         let text = s.write_into("");
         // The value changes; the comment after it stays
         assert!(text.contains("theme = \"light\"") && text.contains("# \"system\" | \"dark\" | \"light\""), "{text}");
