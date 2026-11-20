@@ -7,6 +7,8 @@ sidebar:
 
 The **Figure** workspace is a built-in publication composer (inspired by Photoshop artboards and QuickFigures) that turns any open slide, channel set, pipeline stage, or drawn ROI into a ready-to-submit multi-panel figure without leaving Lucem.
 
+![Figure composer workspace showing multi-channel panels, calibrated scale bars, and inspector controls](/lucem/screenshots/07_figure-maker.png)
+
 ## Quick presets
 
 Use the top toolbar to build a complete figure in one click:

@@ -149,6 +149,34 @@ impl FigureDoc {
     }
 }
 
+/// Zooms `panel.region` in (`factor < 1.0`) or out (`factor > 1.0`) around its center, clamped to
+/// the slide bounds `(iw, ih)`. Zooming all the way out resets to `Full slide`.
+pub fn zoom_panel_region(panel: &mut FigurePanel, factor: f64, iw: f64, ih: f64) {
+    let [x, y, w, h] = panel.region.unwrap_or([0.0, 0.0, iw, ih]);
+    let cx = x + w * 0.5;
+    let cy = y + h * 0.5;
+    let nw = (w * factor).clamp(64.0, iw);
+    let nh = (h * factor).clamp(64.0, ih);
+    if nw >= iw * 0.99 && nh >= ih * 0.99 {
+        panel.region = None;
+        panel.region_label = "Full slide".into();
+        return;
+    }
+    let nx = (cx - nw * 0.5).clamp(0.0, (iw - nw).max(0.0));
+    let ny = (cy - nh * 0.5).clamp(0.0, (ih - nh).max(0.0));
+    panel.region = Some([nx, ny, nw, nh]);
+    let mag = (iw / nw).max(1.0);
+    panel.region_label = format!("Custom crop ({mag:.1}×)");
+}
+
+/// Pans `panel.region` by `(dx_frac, dy_frac)` of its current crop width/height.
+pub fn pan_panel_region(panel: &mut FigurePanel, dx_frac: f64, dy_frac: f64, iw: f64, ih: f64) {
+    let Some([x, y, w, h]) = panel.region else { return };
+    let nx = (x + dx_frac * w).clamp(0.0, (iw - w).max(0.0));
+    let ny = (y + dy_frac * h).clamp(0.0, (ih - h).max(0.0));
+    panel.region = Some([nx, ny, w, h]);
+}
+
 pub fn panel_letter(idx: usize) -> String {
     if idx < 26 {
         ((b'A' + idx as u8) as char).to_string()

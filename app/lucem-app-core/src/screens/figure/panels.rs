@@ -270,6 +270,7 @@ pub fn center_artboard(view: &FigureView, pyramids: &HashMap<String, Arc<Pyramid
             let scale_info = p.show_scale_bar.then(|| panel_scale_bar(p, pyramids.get(p.source.image_id()))).flatten();
 
             let mut img_box = div()
+                .id(SharedString::from(format!("fig-img-box-{}", p.id)))
                 .relative()
                 .w_full()
                 .h(px(260.))
@@ -278,7 +279,39 @@ pub fn center_artboard(view: &FigureView, pyramids: &HashMap<String, Arc<Pyramid
                 .bg(gpui_kit::rgba(0x090b0eff))
                 .flex()
                 .items_center()
-                .justify_center();
+                .justify_center()
+                .cursor_grab()
+                .on_scroll(cx.listener(move |this, ev: &gpui_kit::ScrollEvent, _, cx| {
+                    let dy = f32::from(ev.delta.pixel_delta(px(24.)).y);
+                    if dy.abs() > 0.1 {
+                        this.doc.selected = Some(idx);
+                        let factor = if dy > 0.0 { 0.8 } else { 1.25 };
+                        this.zoom_panel(idx, factor, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(move |this, ev: &gpui_kit::MouseDownEvent, _, cx| {
+                    this.doc.selected = Some(idx);
+                    this.drag_pan = Some((idx, ev.position));
+                    cx.notify();
+                }))
+                .on_mouse_move(cx.listener(move |this, ev: &gpui_kit::MouseMoveEvent, _, cx| {
+                    if let Some((drag_idx, last)) = this.drag_pan {
+                        if drag_idx == idx && ev.pressed_button == Some(gpui_kit::MouseButton::Left) {
+                            let dx = f32::from(last.x - ev.position.x) as f64 / 260.0;
+                            let dy = f32::from(last.y - ev.position.y) as f64 / 260.0;
+                            if dx.abs() > 0.005 || dy.abs() > 0.005 {
+                                this.drag_pan = Some((idx, ev.position));
+                                this.pan_panel(idx, dx, dy, cx);
+                            }
+                        } else if ev.pressed_button.is_none() {
+                            this.drag_pan = None;
+                        }
+                    }
+                }))
+                .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, _| {
+                    this.drag_pan = None;
+                }));
 
             if let Some(tex) = rendered {
                 img_box = img_box.child(img(tex).w_full().h_full().object_fit(ObjectFit::Contain));
@@ -519,6 +552,49 @@ pub fn right_inspector(
                 .gap(px(theme::SM))
                 .child(row("Source", src_pick))
                 .child(row("Region", reg_pick))
+                .child(row(
+                    "Zoom / Pan",
+                    h_flex()
+                        .gap(px(3.))
+                        .child(
+                            Button::new("fig-zoom-out")
+                                .outline()
+                                .xsmall()
+                                .icon(IconName::ZoomOut)
+                                .tooltip("Zoom out (or scroll down on panel)")
+                                .on_click(cx.listener(move |this, _, _, cx| this.zoom_panel(sel_idx, 1.35, cx))),
+                        )
+                        .child(
+                            Button::new("fig-zoom-fit")
+                                .outline()
+                                .xsmall()
+                                .label("Fit")
+                                .tooltip("Reset to full slide")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(panel) = this.doc.panels.get_mut(sel_idx) {
+                                        panel.region = None;
+                                        panel.region_label = "Full slide".into();
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("fig-zoom-in")
+                                .outline()
+                                .xsmall()
+                                .icon(IconName::ZoomIn)
+                                .tooltip("Zoom in (or scroll up on panel, drag to pan)")
+                                .on_click(cx.listener(move |this, _, _, cx| this.zoom_panel(sel_idx, 0.72, cx))),
+                        ),
+                ))
+                .child(
+                    Button::new("fig-sync-this-crop")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Link)
+                        .label("Sync this crop to all panels")
+                        .on_click(cx.listener(move |this, _, _, cx| this.sync_crop_to_all(sel_idx, cx))),
+                )
                 .child(v_flex().gap(px(3.)).child(div().text_xs().text_color(color::text_muted()).child("Panel title")).child(Input::new(&view.panel_title_in).small()))
                 .child(v_flex().gap(px(3.)).child(div().text_xs().text_color(color::text_muted()).child("Panel subtitle")).child(Input::new(&view.panel_sub_in).small()))
                 .child(

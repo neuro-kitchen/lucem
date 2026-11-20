@@ -19,7 +19,7 @@ use kitchen_shell::MenuSpec;
 use lucem_io::Pyramid;
 
 use crate::data::store::{AppEvent, Store};
-use crate::domain::figure::{node_stage_label, panel_render_key, sanitize_filename, FigureDoc, FigurePanel, PanelSource, ScaleCorner};
+use crate::domain::figure::{node_stage_label, pan_panel_region, panel_render_key, sanitize_filename, zoom_panel_region, FigureDoc, FigurePanel, PanelSource, ScaleCorner};
 use crate::domain::project::ChannelDoc;
 use crate::screens::figure::export::{compose_artboard_rgb, compose_artboard_svg, render_image_to_rgb, render_panel_rgb, save_or_download, RenderedPanel};
 
@@ -36,6 +36,8 @@ pub struct FigureView {
     pub(crate) panel_sub_in: Entity<InputState>,
     pub(crate) last_synced_panel: Option<usize>,
     pub(crate) status_note: Option<String>,
+    /// Active drag-to-pan state on an artboard panel: `(panel_idx, last_pos)`.
+    pub(crate) drag_pan: Option<(usize, gpui_kit::Point<gpui_kit::Pixels>)>,
     _subs: Vec<Subscription>,
 }
 
@@ -95,6 +97,7 @@ impl FigureView {
             panel_sub_in,
             last_synced_panel: None,
             status_note: None,
+            drag_pan: None,
             _subs: subs,
         };
         view.fig_title_in.update(cx, |i, cx| i.set_value("Figure 1", window, cx));
@@ -197,6 +200,34 @@ impl FigureView {
         self.doc.selected = (!self.doc.panels.is_empty()).then_some(0);
         self.last_synced_panel = None;
         self.status_note = Some(format!("Added {} processing stage panels", self.doc.panels.len()));
+        cx.notify();
+    }
+
+    pub(crate) fn zoom_panel(&mut self, idx: usize, factor: f64, cx: &mut Context<Self>) {
+        let Some(img_id) = self.doc.panels.get(idx).map(|p| p.source.image_id().to_string()) else { return };
+        let Some(pyr) = self.store.read(cx).pyramids.get(&img_id).cloned() else { return };
+        if let Some(p) = self.doc.panels.get_mut(idx) {
+            zoom_panel_region(p, factor, pyr.width() as f64, pyr.height() as f64);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn pan_panel(&mut self, idx: usize, dx_frac: f64, dy_frac: f64, cx: &mut Context<Self>) {
+        let Some(img_id) = self.doc.panels.get(idx).map(|p| p.source.image_id().to_string()) else { return };
+        let Some(pyr) = self.store.read(cx).pyramids.get(&img_id).cloned() else { return };
+        if let Some(p) = self.doc.panels.get_mut(idx) {
+            pan_panel_region(p, dx_frac, dy_frac, pyr.width() as f64, pyr.height() as f64);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn sync_crop_to_all(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some((reg, lbl)) = self.doc.panels.get(idx).map(|p| (p.region, p.region_label.clone())) else { return };
+        for p in &mut self.doc.panels {
+            p.region = reg;
+            p.region_label = lbl.clone();
+        }
+        self.status_note = Some(format!("Synced all panels to {lbl}"));
         cx.notify();
     }
 

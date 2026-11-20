@@ -7,6 +7,8 @@ lastUpdated: false
 hero:
   title: GPU image analysis for slides and volumes
   tagline: Look at whole-slide and 3D OME-Zarr v0.5 volumes, preview 52 GPU operations live with Before ↔ After wipes, write Python & Rust ops in the built-in Code workspace, and run the same pipeline on a server.
+  image:
+    html: '<div class="hero-shot"><img class="light:sl-hidden" src="/lucem/screenshots/main-dark.png" alt="lucem-app in Explore: multispectral scan with channels and shapes in the Layers panel" /><img class="dark:sl-hidden" src="/lucem/screenshots/main-light.png" alt="lucem-app in Explore: multispectral scan with channels and shapes in the Layers panel" /></div>'
   actions:
     - text: Get started
       link: learn/
@@ -38,11 +40,5 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
     <br /><a href="/lucem/deploy/">Deploy Server →</a> · <a href="/lucem/reference/rust/">Rust Crates →</a>
   </Card>
 </CardGrid>
-
-<figure>
-  <img class="light:sl-hidden" src="/lucem/screenshots/main-dark.png" alt="lucem-app in Explore: a multispectral lung-cancer scan with a tissue region drawn on it, the channels and shapes in the Layers panel" />
-  <img class="dark:sl-hidden" src="/lucem/screenshots/main-light.png" alt="lucem-app in Explore: a multispectral lung-cancer scan with a tissue region drawn on it, the channels and shapes in the Layers panel" />
-  <figcaption>Explore: a whole-slide multispectral scan (5 channels) drawn from its pyramid, a tissue region drawn on it. Sample image © PerkinElmer / Akoya Biosciences, <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</figcaption>
-</figure>
 
 <EntryPoints />

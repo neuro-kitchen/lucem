@@ -947,7 +947,13 @@ impl ImageCanvas {
         // ~20 KB PNG instead of doing polygon math on the single-threaded WASM main thread.
         #[cfg(target_family = "wasm")]
         if s.hist.remote_cells.get(&v.image).copied().unwrap_or(0) > 0 || s.hist.remote_tiles.get(&v.image).copied().unwrap_or(0) > 0 {
-            if let (Some(link), Some(path)) = (crate::data::remote::page_link(), s.doc.image(&v.image).map(|i| i.path.to_string_lossy().into_owned())) {
+            let served = v
+                .pyramid
+                .path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .and_then(|p| lucem_stream::split_remote(&p).map(|(_, s)| s.to_string()));
+            if let (Some(link), Some(path)) = (crate::data::remote::page_link(), served) {
                 let alpha = ov.opacity;
                 let selected = s.sel.objects.clone();
                 self.cells_task = Some(cx.spawn(async move |this, cx| {

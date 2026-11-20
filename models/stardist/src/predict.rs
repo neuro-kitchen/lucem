@@ -36,9 +36,10 @@ pub struct Tiling {
 
 impl Default for Tiling {
     fn default() -> Self {
-        // Large tiles: less of the halo computed twice (the largest activation, 128 features at
-        // half of 2240², is ~640 MB in f32)
-        Self { tile: 2048, halo: 96 }
+        // 384 + 2 × 64 = 512: canonical 512×512 tiles batched as a 4-tile volume [4, C, 512, 512]
+        // (~5× less VRAM than a single 2304² tile, zero cold per-ROI autotune stalls, and parallel
+        // GPU throughput across tiles).
+        Self { tile: 384, halo: 64 }
     }
 }
 
@@ -90,88 +91,113 @@ pub fn normalize(pixels: &[u8], w: usize, h: usize, c: usize) -> Vec<f32> {
     out
 }
 
-/// Runs the network over `planes` (`[channels, h, w]`, normalized) tile by tile;
-/// `progress(done, total)`.
+/// Runs the network over `planes` (`[channels, h, w]`, normalized) in fixed-shape batched volumes
+/// (`[B, C, canon, canon]`, `B <= 4`) so CubeCL autotunes once and GPU SMs run tiles in parallel
+/// at a fraction of the VRAM of a monolithic tile; `progress(done, total)`.
 pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize)) -> Result<GridOutput, String> {
+    const MAX_BATCH: usize = 4;
     let (gh, gw) = (h.div_ceil(GRID), w.div_ceil(GRID));
     let mut prob = vec![0f32; gh * gw];
     let mut dist = vec![0f32; gh * gw * N_RAYS];
     let step = t.tile.max(DIVISOR);
     let (ny, nx) = (h.div_ceil(step), w.div_ceil(step));
     let total = ny * nx;
-    let mut input_buf: Vec<f32> = Vec::new();
+    // One canonical square tile shape for every tile in the run (zero cold autotune per ROI crop!)
+    let canon = (step + 2 * t.halo).div_ceil(SHAPE_STEP) * SHAPE_STEP;
+    let (ph, pw) = (canon, canon);
+    let nc = net.channels;
+    let tile_elems = nc * ph * pw;
+
+    struct TileSpec {
+        y0: usize,
+        x0: usize,
+        y1: usize,
+        x1: usize,
+        ry0: usize,
+        rx0: usize,
+        rh: usize,
+        rw: usize,
+    }
+    let mut specs = Vec::with_capacity(total);
     for ty in 0..ny {
         for tx in 0..nx {
-            // Core [y0, y1) × [x0, x1); the read window with its halo, clipped to the image
             let (y0, x0) = (ty * step, tx * step);
             let (y1, x1) = ((y0 + step).min(h), (x0 + step).min(w));
             let (ry0, rx0) = (y0.saturating_sub(t.halo), x0.saturating_sub(t.halo));
             let (ry1, rx1) = ((y1 + t.halo).min(h), (x1 + t.halo).min(w));
-            let (rh, rw) = (ry1 - ry0, rx1 - rx0);
-            // Padded to a multiple of 256 (the network needs 16): CubeCL tunes and compiles its
-            // kernels per shape, so few distinct shapes means they come from the cache instead of
-            // being tuned again for every region size
-            let (ph, pw) = (rh.div_ceil(SHAPE_STEP) * SHAPE_STEP, rw.div_ceil(SHAPE_STEP) * SHAPE_STEP);
-            let nc = net.channels;
-            input_buf.resize(nc * ph * pw, 0.0);
+            specs.push(TileSpec { y0, x0, y1, x1, ry0, rx0, rh: ry1 - ry0, rw: rx1 - rx0 });
+        }
+    }
+
+    let mut batch_buf: Vec<f32> = Vec::new();
+    let mut done = 0usize;
+    let (tgh, tgw) = (ph / GRID, pw / GRID);
+    let p_stride = tgh * tgw;
+    let d_stride = N_RAYS * tgh * tgw;
+
+    for chunk in specs.chunks(MAX_BATCH) {
+        let bsz = chunk.len();
+        batch_buf.resize(bsz * tile_elems, 0.0);
+        for (bi, sp) in chunk.iter().enumerate() {
+            let base = bi * tile_elems;
             for c in 0..nc {
                 let plane_off = c * w * h;
-                let dst_c = c * ph * pw;
+                let dst_c = base + c * ph * pw;
                 for y in 0..ph {
-                    // Past the read window: mirrored, as StarDist pads (csbdeep's `reflect`)
-                    let sy = ry0 + reflect(y, rh);
+                    let sy = sp.ry0 + reflect(y, sp.rh);
                     let src_row = plane_off + sy * w;
                     let dst_row = dst_c + y * pw;
                     for x in 0..pw {
-                        let sx = rx0 + reflect(x, rw);
-                        input_buf[dst_row + x] = planes[src_row + sx];
+                        let sx = sp.rx0 + reflect(x, sp.rw);
+                        batch_buf[dst_row + x] = planes[src_row + sx];
                     }
                 }
             }
-            let t0 = std::time::Instant::now();
-            let attempt = |buf: &[f32]| -> Result<(Vec<f32>, Vec<f32>), String> {
-                // In the network's precision on the wire: half the bytes up and back in F16
-                let x = match net.precision {
-                    crate::net::Precision::F32 => Tensor::<4>::from_data(TensorData::new(buf.to_vec(), [1, nc, ph, pw]), &net.device),
-                    crate::net::Precision::F16 => {
-                        let halfs: Vec<burn::tensor::f16> = buf.iter().map(|&v| burn::tensor::f16::from_f32(v)).collect();
-                        Tensor::<4>::from_data(TensorData::new(halfs, [1, nc, ph, pw]), (&net.device, burn::tensor::DType::F16))
-                    }
-                };
-                let (p, d) = net.forward(x);
-                let p: Vec<f32> = p.try_into_data().map_err(|e| format!("reading the probability: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
-                let d: Vec<f32> = d.try_into_data().map_err(|e| format!("reading the distances: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
-                Ok((p, d))
-            };
-            // A matrix product this device cannot launch: Burn's own convolutions from now on
-            let (p, d) = match attempt(&input_buf) {
-                Ok(r) => r,
-                Err(e) if crate::gemm_cannot_launch(&e) && crate::net::disable_gemm() => {
-                    eprintln!("stardist: the matrix-product convolutions failed on this device, using Burn's own ({e})");
-                    attempt(&input_buf).map_err(crate::explain)?
+        }
+        let t0 = std::time::Instant::now();
+        let attempt = |buf: &[f32]| -> Result<(Vec<f32>, Vec<f32>), String> {
+            let x = match net.precision {
+                crate::net::Precision::F32 => Tensor::<4>::from_data(TensorData::new(buf.to_vec(), [bsz, nc, ph, pw]), &net.device),
+                crate::net::Precision::F16 => {
+                    let halfs: Vec<burn::tensor::f16> = buf.iter().map(|&v| burn::tensor::f16::from_f32(v)).collect();
+                    Tensor::<4>::from_data(TensorData::new(halfs, [bsz, nc, ph, pw]), (&net.device, burn::tensor::DType::F16))
                 }
-                Err(e) => return Err(crate::explain(e)),
             };
-            if crate::timing() {
-                eprintln!("stardist: tile {ph}×{pw}: network and read back {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+            let (p, d) = net.forward(x);
+            let p: Vec<f32> = p.try_into_data().map_err(|e| format!("reading the probability: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+            let d: Vec<f32> = d.try_into_data().map_err(|e| format!("reading the distances: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+            Ok((p, d))
+        };
+        let (p, d) = match attempt(&batch_buf) {
+            Ok(r) => r,
+            Err(e) if crate::gemm_cannot_launch(&e) && crate::net::disable_gemm() => {
+                eprintln!("stardist: the matrix-product convolutions failed on this device, using Burn's own ({e})");
+                attempt(&batch_buf).map_err(crate::explain)?
             }
-            let (tgh, tgw) = (ph / GRID, pw / GRID);
-            // The core's grid pixels
-            for gy in y0.div_ceil(GRID)..y1.div_ceil(GRID) {
-                let ly = gy - ry0 / GRID;
-                for gx in x0.div_ceil(GRID)..x1.div_ceil(GRID) {
-                    let lx = gx - rx0 / GRID;
+            Err(e) => return Err(crate::explain(e)),
+        };
+        if crate::timing() {
+            eprintln!("stardist: batch {bsz}×{ph}×{pw}: network and read back {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+        }
+        for (bi, sp) in chunk.iter().enumerate() {
+            let p_off = bi * p_stride;
+            let d_off = bi * d_stride;
+            for gy in sp.y0.div_ceil(GRID)..sp.y1.div_ceil(GRID) {
+                let ly = gy - sp.ry0 / GRID;
+                for gx in sp.x0.div_ceil(GRID)..sp.x1.div_ceil(GRID) {
+                    let lx = gx - sp.rx0 / GRID;
                     if ly >= tgh || lx >= tgw {
                         continue;
                     }
-                    prob[gy * gw + gx] = p[ly * tgw + lx];
+                    prob[gy * gw + gx] = p[p_off + ly * tgw + lx];
                     for r in 0..N_RAYS {
-                        dist[(gy * gw + gx) * N_RAYS + r] = d[(r * tgh + ly) * tgw + lx];
+                        dist[(gy * gw + gx) * N_RAYS + r] = d[d_off + (r * tgh + ly) * tgw + lx];
                     }
                 }
             }
-            progress(ty * nx + tx + 1, total);
         }
+        done += bsz;
+        progress(done, total);
     }
     if prob.iter().all(|&p| p == 0.0) {
         // A device that failed quietly reads back zeros: never an answer
