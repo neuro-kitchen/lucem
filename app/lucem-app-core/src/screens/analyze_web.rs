@@ -26,6 +26,15 @@ enum Source {
     Server(String),
 }
 
+#[derive(Clone)]
+struct AnalyzeSideResize;
+
+impl Render for AnalyzeSideResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
 pub struct AnalyzeWebView {
     store: Entity<Store>,
     source: Source,
@@ -35,6 +44,8 @@ pub struct AnalyzeWebView {
     error: Option<String>,
     filter: Entity<InputState>,
     sort_col: Option<(usize, bool)>,
+    sidebar_open: bool,
+    sidebar_w: f32,
     _subs: Vec<Subscription>,
 }
 
@@ -62,6 +73,8 @@ impl AnalyzeWebView {
             error: None,
             filter,
             sort_col: None,
+            sidebar_open: true,
+            sidebar_w: 240.0,
             _subs: subs,
         };
         if !crate::data::remote::runs_alone() {
@@ -194,14 +207,30 @@ impl Render for AnalyzeWebView {
         let src = self.source.clone();
 
         let mut sidebar = v_flex()
+            .relative()
             .flex_none()
-            .w(px(240.))
+            .w(px(self.sidebar_w))
             .h_full()
             .p(px(theme::MD))
             .gap(px(theme::SM))
             .rounded(px(theme::RADIUS_LG))
             .bg(color::panel())
-            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child("SESSION TABLES"))
+            .child(
+                h_flex()
+                    .items_center()
+                    .child(div().flex_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child("SESSION TABLES"))
+                    .child(
+                        Button::new("an-side-collapse")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::PanelLeft))
+                            .tooltip("Collapse tables sidebar")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sidebar_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(
                 Button::new("an-src-ann")
                     .ghost()
@@ -265,6 +294,17 @@ impl Render for AnalyzeWebView {
             }
         }
 
+        sidebar = sidebar.child(
+            div()
+                .id("an-side-resize")
+                .absolute()
+                .right(px(-3.))
+                .top_0()
+                .h_full()
+                .w(px(6.))
+                .cursor(gpui_kit::CursorStyle::ResizeLeftRight)
+                .on_drag(AnalyzeSideResize, |_, _, _, cx| cx.new(|_| AnalyzeSideResize)),
+        );
         let header_row = h_flex()
             .flex_none()
             .w_full()
@@ -314,6 +354,19 @@ impl Render for AnalyzeWebView {
                     .items_center()
                     .border_b_1()
                     .border_color(color::border())
+                    .when(!self.sidebar_open, |h| {
+                        h.child(
+                            Button::new("an-side-expand")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::PanelLeft))
+                                .tooltip("Show tables sidebar")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sidebar_open = true;
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(Icon::new(IconName::Table2).small().text_color(color::accent_mark()))
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(color::text()).child(title))
                     .child(div().text_xs().text_color(color::text_muted()).child(format!("{shown} / {total_rows} rows · {} cols", cols.len())))
@@ -361,7 +414,12 @@ impl Render for AnalyzeWebView {
             .p(px(theme::PANE_GAP))
             .gap(px(theme::PANE_GAP))
             .bg(color::chrome())
-            .child(sidebar)
+            .on_drag_move(cx.listener(|this, e: &gpui_kit::DragMoveEvent<AnalyzeSideResize>, _, cx| {
+                let w = f32::from(e.event.position.x - e.bounds.left()) - theme::PANE_GAP;
+                this.sidebar_w = w.clamp(160., 420.);
+                cx.notify();
+            }))
+            .when(self.sidebar_open, |h| h.child(sidebar))
             .child(main)
     }
 }

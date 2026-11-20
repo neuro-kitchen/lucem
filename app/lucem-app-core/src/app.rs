@@ -279,6 +279,20 @@ impl LucemApp {
         // Model plugins are looked for once, in the background
         store.update(cx, |s, cx| s.scan_plugins(cx));
 
+        // On wasm32 connected to `lucem serve`, populate server-discovered plugin ops for Pipeline › Script
+        #[cfg(target_family = "wasm")]
+        if !crate::data::remote::runs_alone() {
+            let st_env = store.clone();
+            cx.spawn(async move |_, cx| {
+                if let Ok(info) = crate::data::server_api::fetch_env().await {
+                    let _ = st_env.update(cx, |s, cx| {
+                        s.server_plugin_ops = info.plugin_ops;
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
         // The commands, then the frame that draws them
         let registry = Registry::default();
         let shell_cell: Rc<std::cell::OnceCell<gpui_kit::WeakEntity<Shell>>> = Rc::default();

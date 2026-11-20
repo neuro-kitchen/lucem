@@ -407,8 +407,8 @@ impl Render for OpGallery {
                                         .gap(px(4.))
                                         .rounded(px(12.))
                                         .border_1()
-                                        .border_color(if is_sel || is_hov { color::accent_mark() } else { color::border() })
-                                        .bg(if is_sel { color::control() } else { color::panel() })
+                                        .border_color(color::border())
+                                        .bg(if is_sel || is_hov { color::control() } else { color::panel() })
                                         .cursor_pointer()
                                         .on_hover(move |enter, _, cx| {
                                             let enter = *enter;
@@ -626,7 +626,7 @@ impl Render for OpHoverPreview {
             .gap(px(theme::XS))
             .rounded(px(16.))
             .border_1()
-            .border_color(color::accent_mark())
+            .border_color(color::border())
             .bg(color::raised())
             .child(
                 div()

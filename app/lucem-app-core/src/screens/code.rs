@@ -65,6 +65,7 @@ pub struct CodeWorkspaceView {
     console_open: bool,
     sidebar_open: bool,
     logs: Vec<String>,
+    _store_sub: Subscription,
     _subs: Vec<Subscription>,
 }
 
@@ -74,6 +75,12 @@ impl CodeWorkspaceView {
         let sub = cx.subscribe(&editor, |this, _, e: &CodeChanged, cx| {
             this.dirty = e.0 != this.saved_text;
             cx.notify();
+        });
+        let store_sub = cx.subscribe_in(&store, window, |this, _, e: &crate::data::store::AppEvent, window, cx| {
+            if let crate::data::store::AppEvent::OpenScriptInCode(path) = e {
+                let name = std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or("script").to_string();
+                this.open_file(path.clone(), name, window, cx);
+            }
         });
         let mut this = Self {
             store,
@@ -86,6 +93,7 @@ impl CodeWorkspaceView {
             console_open: true,
             sidebar_open: true,
             logs: vec!["Ready. Select a script from the right file tree or create a new .py / .rs op.".into()],
+            _store_sub: store_sub,
             _subs: vec![sub],
         };
         this.refresh_files(window, cx);
@@ -301,6 +309,9 @@ impl CodeWorkspaceView {
         {
             let name = self.active_name.clone();
             let store = self.store.clone();
+            let ed = self.editor.clone();
+            let text_check = text.clone();
+            let is_py = !path.ends_with(".rs");
             cx.spawn(async move |this, cx| {
                 match crate::data::server_api::write_server_script(&path, &text).await {
                     Ok(()) => {
@@ -311,6 +322,20 @@ impl CodeWorkspaceView {
                             cx.notify();
                         });
                         store.update(cx, |s, cx| s.set_status(format!("Saved {name} on server"), cx));
+                        if is_py
+                            && let Ok(diags) = crate::data::server_api::check_server_script("py", &text_check).await
+                        {
+                            let n = diags.len();
+                            let _ = ed.update(cx, |e, cx| e.set_errors(diags, cx));
+                            let _ = this.update(cx, |v, cx| {
+                                if n == 0 {
+                                    v.log("Syntax check: OK (0 errors)");
+                                } else {
+                                    v.log(format!("Syntax check: {n} error(s) marked in editor"));
+                                }
+                                cx.notify();
+                            });
+                        }
                     }
                     Err(e) => {
                         let _ = this.update(cx, |v, cx| {

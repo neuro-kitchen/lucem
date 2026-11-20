@@ -46,8 +46,155 @@ impl PipelineTiles {
     }
 }
 
+struct ScriptTileSpec {
+    path: String,
+    source_channel: usize,
+    input_name: String,
+    params: Vec<(String, f64)>,
+    enabled: bool,
+    halo: usize,
+    normalize: bool,
+}
+
+fn parse_script_tile(spec_json: &str) -> Option<ScriptTileSpec> {
+    let v: serde_json::Value = serde_json::from_str(spec_json).ok()?;
+    let n = v.get("script_node")?;
+    let path = n.get("path")?.as_str()?.to_string();
+    let source_channel = n.get("source_channel")?.as_u64()? as usize;
+    let input_name = n.get("input_name").and_then(|s| s.as_str()).unwrap_or("image").to_string();
+    let enabled = n.get("enabled").and_then(|b| b.as_bool()).unwrap_or(true);
+    let halo = n.get("halo").and_then(|h| h.as_u64()).unwrap_or(0) as usize;
+    let normalize = n.get("normalize").and_then(|b| b.as_bool()).unwrap_or(true);
+    let mut params = Vec::new();
+    if let Some(arr) = n.get("params").and_then(|p| p.as_array()) {
+        for item in arr {
+            if let Some(pair) = item.as_array()
+                && let (Some(k), Some(val)) = (pair.first().and_then(|s| s.as_str()), pair.get(1).and_then(|f| f.as_f64()))
+            {
+                params.push((k.to_string(), val));
+            }
+        }
+    }
+    Some(ScriptTileSpec { path, source_channel, input_name, params, enabled, halo, normalize })
+}
+
+fn run_script_tile(image: &Pyramid, spec: &ScriptTileSpec, level: usize, z: usize, tx: usize, ty: usize) -> Result<(usize, usize, Vec<f32>), String> {
+    let l = image.levels.get(level).ok_or_else(|| format!("no level {level}"))?.clone();
+    let (x0, y0) = (tx * l.tile_w, ty * l.tile_h);
+    if x0 >= l.width || y0 >= l.height || z >= l.depth {
+        return Err(format!("tile {tx},{ty} (plane {z}) is outside level {level}"));
+    }
+    let (w, h) = ((l.width - x0).min(l.tile_w), (l.height - y0).min(l.tile_h));
+    let reach = if spec.enabled { spec.halo } else { 0 };
+    let rx0 = x0.saturating_sub(reach);
+    let ry0 = y0.saturating_sub(reach);
+    let rw = (x0 + w + reach).min(l.width) - rx0;
+    let rh = (y0 + h + reach).min(l.height) - ry0;
+    let mut values = image.read_region_at(level, spec.source_channel, z, rx0, ry0, rw, rh).map_err(|e| e.to_string())?;
+    let top = image.channels.get(spec.source_channel).map_or(1.0, |c| c.range.1);
+    if spec.normalize && top > 1.0 {
+        let k = 1.0 / top;
+        values.iter_mut().for_each(|v| *v *= k);
+    }
+    if !spec.enabled {
+        return Ok((w, h, values));
+    }
+    // Use RAM-backed /dev/shm on Linux for zero-disk-I/O transfer
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base = if std::path::Path::new("/dev/shm").is_dir() {
+        std::path::PathBuf::from("/dev/shm/lucem-serve-scripts")
+    } else {
+        std::env::temp_dir().join("lucem-serve-scripts")
+    };
+    let dir = base.join(format!("run-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let in_path = dir.join("in.bin");
+    let out_path = dir.join("out.bin");
+    let raw_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    std::fs::write(&in_path, &raw_bytes).map_err(|e| e.to_string())?;
+    let script_src = std::fs::read_to_string(&spec.path).map_err(|e| format!("{}: {e}", spec.path))?;
+    let has_pep723 = script_src.lines().any(|l| l.trim() == "# /// script");
+    let params_json = serde_json::to_string(&spec.params).unwrap_or_else(|_| "[]".into());
+    let runner = r#"import importlib.util, json, sys, types
+import numpy as np
+
+class _LucemShim:
+    @staticmethod
+    def op(**_kw): return lambda fn: fn
+    @staticmethod
+    def input(*_a, **_kw): return lambda fn: fn
+    @staticmethod
+    def param(*_a, **_kw): return lambda fn: fn
+
+if "lucem" not in sys.modules:
+    _m = types.ModuleType("lucem")
+    _m.op, _m.input, _m.param = _LucemShim.op, _LucemShim.input, _LucemShim.param
+    sys.modules["lucem"] = _m
+
+script_path, in_path, out_path, rh, rw, in_name, params_json = sys.argv[1:8]
+arr = np.memmap(in_path, dtype=np.float32, mode="r", shape=(int(rh), int(rw)))
+spec = importlib.util.spec_from_file_location("lucem_srv_op", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+kwargs = {in_name: arr}
+for k, v in json.loads(params_json):
+    kwargs[k] = float(v)
+res = mod.run(**kwargs)
+if isinstance(res, dict):
+    res = next(iter(res.values()))
+out = np.ascontiguousarray(np.asarray(res, dtype=np.float32))
+out.tofile(out_path)
+"#;
+    let runner_path = dir.join("runner.py");
+    std::fs::write(&runner_path, runner).map_err(|e| e.to_string())?;
+    let mut cmd = if has_pep723 {
+        let mut c = std::process::Command::new("uv");
+        c.args(["run", "--quiet", "--with", "numpy", "--with", "scipy", "python"]);
+        c
+    } else {
+        let py = std::env::var("LUCEM_PYTHON").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "python3".into());
+        std::process::Command::new(py)
+    };
+    let output = cmd
+        .arg(&runner_path)
+        .arg(&spec.path)
+        .arg(&in_path)
+        .arg(&out_path)
+        .arg(rh.to_string())
+        .arg(rw.to_string())
+        .arg(&spec.input_name)
+        .arg(&params_json)
+        .output()
+        .map_err(|e| format!("could not run Python script: {e}"))?;
+    if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = String::from_utf8_lossy(&output.stderr);
+        let tail: Vec<&str> = err.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+        return Err(tail.join("\n"));
+    }
+    let out_bytes = std::fs::read(&out_path).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let full: Vec<f32> = out_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    if full.len() != rw * rh {
+        return Err(format!("script returned {} pixels, expected {} ({rw}×{rh})", full.len(), rw * rh));
+    }
+    // Crop halo back to the requested w x h tile
+    let ox = x0 - rx0;
+    let oy = y0 - ry0;
+    let mut cropped = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let start = (oy + y) * rw + ox;
+        cropped.extend_from_slice(&full[start..start + w]);
+    }
+    Ok((w, h, cropped))
+}
+
 impl TileProcessor for PipelineTiles {
     fn tile(&self, image: &Pyramid, spec_json: &str, level: usize, z: usize, tx: usize, ty: usize) -> Result<(usize, usize, Vec<f32>), String> {
+        if let Some(spec) = parse_script_tile(spec_json) {
+            return run_script_tile(image, &spec, level, z, tx, ty);
+        }
         let spec: PipelineSpec = serde_json::from_str(spec_json).map_err(|e| format!("the pipeline: {e}"))?;
         spec.validate()?;
         let l = image.levels.get(level).ok_or_else(|| format!("no level {level}"))?.clone();

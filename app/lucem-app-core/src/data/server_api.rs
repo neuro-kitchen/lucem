@@ -123,6 +123,21 @@ pub async fn write_server_script(path: &str, content: &str) -> Result<(), String
 }
 
 #[cfg(target_family = "wasm")]
+pub async fn check_server_script(lang: &str, content: &str) -> Result<Vec<(usize, String)>, String> {
+    let body = serde_json::json!({ "lang": lang, "content": content }).to_string();
+    let v = fetch_json("/api/scripts/check", "POST", Some(body)).await?;
+    let mut out = Vec::new();
+    if let Some(arr) = v.get("diagnostics").and_then(|d| d.as_array()) {
+        for item in arr {
+            let line = item.get("line").and_then(|l| l.as_u64()).unwrap_or(1) as usize;
+            let msg = item.get("message").and_then(|m| m.as_str()).unwrap_or("syntax error").to_string();
+            out.push((line, msg));
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(target_family = "wasm")]
 pub async fn list_server_tables() -> Result<Vec<ServerTableSummary>, String> {
     let v = fetch_json("/api/analyze/tables", "GET", None).await?;
     let list = v.get("tables").cloned().unwrap_or(serde_json::Value::Array(vec![]));

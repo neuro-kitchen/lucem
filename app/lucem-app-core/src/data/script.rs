@@ -122,6 +122,67 @@ pub fn read_header(text: &str) -> Result<Header, String> {
     };
     for (i, line) in text.lines().enumerate() {
         let l = line.trim_start();
+        // Also support Pythonic `@lucem.param("sigma", 3.0)`, `@lucem.input("image", "image")`,
+        // and `@lucem.op(name="...", family="...", halo=12, output="image")` decorators!
+        if let Some(dec) = l.strip_prefix("@lucem.") {
+            if let Some(args) = dec.strip_prefix("param(").and_then(|s| s.trim_end().strip_suffix(')')) {
+                let parts: Vec<&str> = args.split(',').map(str::trim).collect();
+                if let Some(raw_name) = parts.first() {
+                    let name = unquote(raw_name);
+                    let mut val = None;
+                    for p in parts.iter().skip(1) {
+                        if let Some((_, v)) = p.split_once('=') {
+                            if p.trim_start().starts_with("default") {
+                                val = v.trim().parse::<f64>().ok();
+                            }
+                        } else if val.is_none() {
+                            val = p.parse::<f64>().ok();
+                        }
+                    }
+                    if !name.is_empty()
+                        && let Some(value) = val
+                        && !h.params.iter().any(|p| p.name == name)
+                    {
+                        h.params.push(ScriptParam { name, value });
+                    }
+                }
+            } else if let Some(args) = dec.strip_prefix("input(").and_then(|s| s.trim_end().strip_suffix(')')) {
+                let parts: Vec<&str> = args.split(',').map(str::trim).collect();
+                if let (Some(n), Some(t)) = (parts.first(), parts.get(1)) {
+                    let name = unquote(n);
+                    if !name.is_empty()
+                        && let Some(port) = port_of(&unquote(t))
+                        && !h.inputs.iter().any(|p| p.name == name)
+                    {
+                        h.inputs.push(ScriptPort { name, port });
+                    }
+                }
+            } else if let Some(args) = dec.strip_prefix("op(").and_then(|s| s.trim_end().strip_suffix(')')) {
+                for kv in args.split(',') {
+                    if let Some((k, v)) = kv.split_once('=') {
+                        let k = k.trim();
+                        let v_str = unquote(v);
+                        match k {
+                            "name" if !v_str.is_empty() => h.name = Some(v_str),
+                            "family" if !v_str.is_empty() => h.family = Some(v_str),
+                            "description" if !v_str.is_empty() => h.description = Some(v_str),
+                            "halo" => {
+                                if let Ok(n) = v.trim().parse::<usize>() {
+                                    h.halo = n;
+                                }
+                            }
+                            "output" => {
+                                if let Some(p) = port_of(&v_str) {
+                                    h.output = p;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         let l = l.strip_prefix("//").or_else(|| l.strip_prefix('#')).unwrap_or("").trim();
         // `lumen:` is the old name's header
         let Some(rest) = l.strip_prefix("lucem:").or_else(|| l.strip_prefix("lumen:")) else { continue };

@@ -52,6 +52,8 @@ pub enum AppEvent {
     ServerImages,
     /// Open the live 128 × 128 Visual Operation Gallery overlay.
     OpenOpGallery,
+    /// Switch to the Zed-style Code workspace and open the given script path.
+    OpenScriptInCode(String),
 }
 
 /// What a pane of Explore shows.
@@ -205,6 +207,9 @@ pub struct Store {
     pub hovered_op: Option<Op>,
     /// Whether the Instagram Edits-style non-blocking bottom Visual Effect Strip is open.
     pub visual_strip_open: bool,
+    /// Server-discovered plugin script ops (populated on wasm32 when connected to `lucem serve`).
+    #[cfg(target_family = "wasm")]
+    pub server_plugin_ops: Vec<crate::data::server_api::ServerPluginOp>,
     /// Names of images being opened.
     pub opening: Vec<String>,
     /// Images open for tile reads, by image id.
@@ -293,6 +298,8 @@ impl Store {
             walkthrough_explored_views: false,
             hovered_op: None,
             visual_strip_open: false,
+            #[cfg(target_family = "wasm")]
+            server_plugin_ops: Vec::new(),
             opening: Vec::new(),
             pyramids: HashMap::new(),
             opening_ids: HashSet::new(),

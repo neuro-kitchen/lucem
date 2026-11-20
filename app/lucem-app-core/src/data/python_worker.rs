@@ -34,8 +34,28 @@ pub fn shm_scratch_root() -> PathBuf {
 /// and user ML frameworks (PyTorch/ONNX/SciPy) warm between tile runs, maps shared-memory inputs
 /// zero-copy via `mmap_mode="r"`, calls optional `init()` once per script version, and reloads
 /// the module automatically when the script changes on disk.
-const PYTHON_WARM_WORKER: &str = r#"import hashlib, importlib.util, json, sys, traceback
+const PYTHON_WARM_WORKER: &str = r#"import hashlib, importlib.util, json, sys, traceback, types
 import numpy as np
+
+# Lightweight decorator shim so scripts can write `@lucem.op(...)` / `@lucem.param(...)`
+# even when the full `lucem` wheel is not installed in the script's venv.
+class _LucemShim:
+    @staticmethod
+    def op(**_kw):
+        return lambda fn: fn
+    @staticmethod
+    def input(*_a, **_kw):
+        return lambda fn: fn
+    @staticmethod
+    def param(*_a, **_kw):
+        return lambda fn: fn
+
+if "lucem" not in sys.modules:
+    _m = types.ModuleType("lucem")
+    _m.op = _LucemShim.op
+    _m.input = _LucemShim.input
+    _m.param = _LucemShim.param
+    sys.modules["lucem"] = _m
 
 loaded = {}  # script_path -> (sha, module)
 

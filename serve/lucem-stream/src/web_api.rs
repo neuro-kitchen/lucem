@@ -249,6 +249,30 @@ fn read_delimited_table(root: &Path, rel: &str) -> Result<Value, String> {
     }))
 }
 
+fn check_script_diagnostics(lang: &str, content: &str) -> Vec<Value> {
+    if lang != "py" {
+        return Vec::new();
+    }
+    let override_path = python_override().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let py = override_path.as_deref().unwrap_or("python3");
+    let checker = "import ast, json, sys\nsrc = sys.stdin.read()\ntry:\n    ast.parse(src)\n    print('[]')\nexcept SyntaxError as e:\n    print(json.dumps([{'line': e.lineno or 1, 'message': e.msg}]))\n";
+    let Ok(mut child) = Command::new(py)
+        .args(["-c", checker])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write as _;
+        let _ = stdin.write_all(content.as_bytes());
+    }
+    let Ok(out) = child.wait_with_output() else { return Vec::new() };
+    serde_json::from_slice::<Vec<Value>>(&out.stdout).unwrap_or_default()
+}
+
 pub async fn handle(request: hyper::Request<Incoming>, data_root: &Path) -> Reply {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
@@ -334,6 +358,19 @@ pub async fn handle(request: hyper::Request<Incoming>, data_root: &Path) -> Repl
             }
             let header = parse_script_header(&file_path);
             json_reply(StatusCode::OK, json!({"path": file_path.to_string_lossy(), "content": starter, "header": header}))
+        }
+        (Method::POST, "/api/scripts/check") => {
+            let body = match request.into_body().collect().await {
+                Ok(b) => b.to_bytes(),
+                Err(e) => return json_reply(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+            };
+            let req: Value = serde_json::from_slice(&body).unwrap_or_default();
+            let lang = req.get("lang").and_then(|v| v.as_str()).unwrap_or("py").to_string();
+            let content = req.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let diags = tokio::task::spawn_blocking(move || check_script_diagnostics(&lang, &content))
+                .await
+                .unwrap_or_default();
+            json_reply(StatusCode::OK, json!({"diagnostics": diags}))
         }
         (Method::GET, "/api/analyze/tables") => {
             let root = data_root.to_path_buf();

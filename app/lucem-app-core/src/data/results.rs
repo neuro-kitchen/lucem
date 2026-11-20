@@ -622,6 +622,35 @@ pub fn spec_for(doc: &ProjectDoc, image: &str, target: &str) -> Result<lucem_pip
     Ok(spec)
 }
 
+/// If `target` is a `NodeKind::Script` fed by a channel source of `image`, encodes a
+/// `{"script_node": ...}` tile spec for `lucem serve --web` to execute on the server.
+#[cfg(target_family = "wasm")]
+fn remote_script_spec(doc: &ProjectDoc, image: &str, target: &str) -> Option<Result<String, String>> {
+    let node = doc.graph.node(target)?;
+    let NodeKind::Script { path, inputs, params, enabled, .. } = &node.kind else {
+        return None;
+    };
+    let src_id = doc.graph.input(target, 0)?;
+    let channel = match doc.graph.node(src_id).map(|n| &n.kind) {
+        Some(NodeKind::Source { image: i, channel }) if i == image => *channel,
+        _ => return Some(Err("Connect a channel Source node directly into this script node on the server".into())),
+    };
+    let input_name = inputs.first().map(|i| i.name.clone()).unwrap_or_else(|| "image".into());
+    let param_pairs: Vec<(&str, f64)> = params.iter().map(|p| (p.name.as_str(), p.value)).collect();
+    let payload = serde_json::json!({
+        "script_node": {
+            "path": path,
+            "source_channel": channel,
+            "input_name": input_name,
+            "params": param_pairs,
+            "enabled": enabled,
+            "halo": 12usize,
+            "normalize": true,
+        }
+    });
+    Some(serde_json::to_string(&payload).map_err(|e| e.to_string()))
+}
+
 /// Each raster view of `req.image`, computed by the page's server: the view's chain as a
 /// pipeline the server runs on the tiles of the region (their halo read there), drawn here as
 /// the desktop draws its own results. A browser page has no compute of its own.
@@ -653,12 +682,19 @@ pub fn compute_remote(doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest) 
         if port == PortType::Table || !style.visible {
             continue;
         }
-        let spec = match spec_for(doc, &req.image, &target).and_then(|s| serde_json::to_string(&s).map_err(|e| e.to_string())) {
-            Ok(s) => s,
-            Err(e) => {
+        let spec = match remote_script_spec(doc, &req.image, &target) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => {
                 out.push(LayerResult { error: Some(e), ..base });
                 continue;
             }
+            None => match spec_for(doc, &req.image, &target).and_then(|s| serde_json::to_string(&s).map_err(|e| e.to_string())) {
+                Ok(s) => s,
+                Err(e) => {
+                    out.push(LayerResult { error: Some(e), ..base });
+                    continue;
+                }
+            },
         };
         let mut level = pyramid.level_for_zoom(req.zoom);
         while level < pyramid.coarsest() && ((req.rect[2] / pyramid.levels[level].downsample) as usize).max((req.rect[3] / pyramid.levels[level].downsample) as usize) > MAX_SIDE {
