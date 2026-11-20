@@ -1465,9 +1465,9 @@ impl Store {
             }
             return;
         }
-        // A page served by `lucem serve`: its server computes (a page has no compute of its own)
+        // A page served by `lucem serve`: its server computes (even if WebGPU was also opened).
         #[cfg(target_family = "wasm")]
-        if self.device.is_none() && super::remote::page_link().is_some() && !super::remote::runs_alone() {
+        if super::remote::page_link().is_some() && !super::remote::runs_alone() {
             return self.recompute_on_server(req, cx);
         }
         let Some(device) = self.device.clone() else {

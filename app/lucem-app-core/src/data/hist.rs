@@ -593,9 +593,10 @@ impl Store {
     /// as `lucem session run` and an agent), in the background as one job; the results come
     /// back into the project and each step done is recorded in the session.
     pub fn hist_run(&mut self, actions: Vec<Action>, what: &str, cx: &mut Context<Self>) {
-        // The page a container serves: the steps run on the server's GPU (its `hist` plugin)
+        // The page a server serves: histology & ML models ALWAYS run on the server's GPU (its
+        // `hist` plugin), even if the browser also initialized a local WebGPU device.
         #[cfg(target_family = "wasm")]
-        if self.device.is_none() && super::remote::page_link().is_some() && !super::remote::runs_alone() {
+        if super::remote::page_link().is_some() && !super::remote::runs_alone() {
             return self.hist_run_on_server(actions, what, cx);
         }
         let z = self.hist_selected_regions().first().map_or(0, |r| r.1);

@@ -283,6 +283,7 @@ impl Service {
     pub fn call(&self, method: &str, body: Value, resolve: &dyn Fn(&str) -> Result<PathBuf, String>, _caller: Caller) -> Result<Value, String> {
         match method {
             "apply" => {
+                let t0 = std::time::Instant::now();
                 let call: ApplyCall = serde_json::from_value(body).map_err(bad("apply"))?;
                 let path = resolve(&call.path)?;
                 let pyramid = lucem_io::Pyramid::open(&path).map_err(|e| format!("{}: {e}", call.path))?;
@@ -300,8 +301,10 @@ impl Service {
                 let mut answer = counts(&analysis);
                 // The regions themselves (few, small): the caller shows them as annotations
                 answer["regions"] = json!(analysis.tissue);
+                let n_cells = analysis.cells.len();
                 self.analyses.lock().unwrap_or_else(|e| e.into_inner()).insert(path, analysis);
                 answer["outcome"] = serde_json::to_value(outcome.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                eprintln!("hist::service: apply finished in {:.0} ms (cells={n_cells})", t0.elapsed().as_secs_f64() * 1e3);
                 Ok(answer)
             }
             "summary" => {
@@ -330,13 +333,16 @@ impl Service {
                 }
             }
             "raster" => {
+                let t0 = std::time::Instant::now();
                 let call: RasterCall = serde_json::from_value(body).map_err(bad("raster"))?;
                 let path = resolve(&call.path)?;
                 let analyses = self.analyses.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(analysis) = analyses.get(&path) else {
                     return Ok(json!({"empty": true}));
                 };
-                raster_viewport_png(analysis, &call)
+                let res = raster_viewport_png(analysis, &call);
+                eprintln!("hist::service: raster finished in {:.0} ms (total_cells={})", t0.elapsed().as_secs_f64() * 1e3, analysis.cells.len());
+                res
             }
             "reset" => {
                 let call: PathCall = serde_json::from_value(body).map_err(bad("reset"))?;
