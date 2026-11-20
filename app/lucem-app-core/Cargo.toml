@@ -41,6 +41,8 @@ image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+anyhow = "1"
+lsp-types = "0.97"
 
 # A computer: every compute runtime; images on paired servers over QUIC (lucem:// paths)
 [target.'cfg(not(target_family = "wasm"))'.dependencies]

@@ -834,14 +834,23 @@ impl ImageCanvas {
         self.store.update(cx, |s, cx| s.segment(job, through, cx));
     }
 
-    /// Starts a wand stroke at `p`: reads the visible region of the visible channels.
+    /// Starts a wand stroke at `p`: reads the visible region of the visible channels from cache
+    /// (falling back to cached coarser LOD tiles so it never blocks the UI thread on wasm32).
     fn start_wand(&mut self, p: [f64; 2], cx: &mut Context<Self>) -> Option<Wand> {
         let v = self.viewer.as_ref()?;
         let py = v.pyramid.clone();
-        let level = py.level_for_zoom(self.zoom * self.scale as f64);
+        let rect = self.visible();
+        let mut level = py.level_for_zoom(self.zoom * self.scale as f64);
+        // Keep the wand's working buffer <= 1024 px on a side so flood-fill is always instant
+        while level < py.coarsest()
+            && ((rect[2] / py.levels[level].downsample) as usize)
+                .max((rect[3] / py.levels[level].downsample) as usize)
+                > 1024
+        {
+            level += 1;
+        }
         let l = py.levels[level].clone();
         let ds = l.downsample;
-        let rect = self.visible();
         let x0 = (rect[0] / ds).floor().max(0.0) as usize;
         let y0 = (rect[1] / ds).floor().max(0.0) as usize;
         let x1 = (((rect[0] + rect[2]) / ds).ceil().max(0.0) as usize).min(l.width);
@@ -853,12 +862,24 @@ impl ImageCanvas {
         let plane = self.plane_at(level);
         let mut channels = Vec::new();
         for (c, d) in v.display_docs.iter().enumerate().filter(|(_, d)| d.visible) {
-            let mut raw = v.service.read_region(level, plane, c, x0, y0, w, h).ok()?;
+            let cached = v.service.read_region_cached(level, plane, c, x0, y0, w, h);
+            #[cfg(not(target_family = "wasm"))]
+            let mut raw = match cached {
+                Some(buf) => buf,
+                None => v.service.read_region(level, plane, c, x0, y0, w, h).ok()?,
+            };
+            #[cfg(target_family = "wasm")]
+            let Some(mut raw) = cached else {
+                continue;
+            };
             let span = (d.max - d.min).max(1e-12);
             raw.iter_mut().for_each(|x| *x = ((*x - d.min) / span).clamp(0.0, 1.0));
             channels.push(raw);
         }
         if channels.is_empty() {
+            self.store.update(cx, |s, cx| {
+                s.set_status("Wand: waiting for visible tiles to load (try again in a moment).", cx);
+            });
             return None;
         }
         let s = self.store.read(cx);

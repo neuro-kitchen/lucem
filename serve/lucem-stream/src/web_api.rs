@@ -318,6 +318,33 @@ fn check_script_diagnostics(lang: &str, content: &str) -> Vec<Value> {
     if lang != "py" {
         return Vec::new();
     }
+    // Prefer Astral's `ruff` for fast lint + syntax diagnostics when installed
+    if let Ok(mut child) = Command::new("ruff")
+        .args(["check", "--stdin-filename", "script.py", "--output-format", "json", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write as _;
+            let _ = stdin.write_all(content.as_bytes());
+        }
+        if let Ok(out) = child.wait_with_output()
+            && let Ok(items) = serde_json::from_slice::<Vec<Value>>(&out.stdout)
+        {
+            return items
+                .into_iter()
+                .map(|it| {
+                    let line = it.pointer("/location/row").and_then(|v| v.as_u64()).unwrap_or(1);
+                    let code = it.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                    let msg = it.get("message").and_then(|v| v.as_str()).unwrap_or("lint issue");
+                    let full = if code.is_empty() { msg.to_string() } else { format!("[{code}] {msg}") };
+                    json!({"line": line, "message": full})
+                })
+                .collect();
+        }
+    }
     let override_path = python_override().lock().unwrap_or_else(|e| e.into_inner()).clone();
     let py = override_path.as_deref().unwrap_or("python3");
     let checker = "import ast, json, sys\nsrc = sys.stdin.read()\ntry:\n    ast.parse(src)\n    print('[]')\nexcept SyntaxError as e:\n    print(json.dumps([{'line': e.lineno or 1, 'message': e.msg}]))\n";

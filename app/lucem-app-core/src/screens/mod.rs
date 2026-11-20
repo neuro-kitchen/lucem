@@ -6,6 +6,7 @@ pub mod analyze;
 #[cfg(target_family = "wasm")]
 pub mod analyze_web;
 pub mod code;
+pub mod code_lsp;
 pub mod explore;
 pub mod home;
 pub mod pipeline;

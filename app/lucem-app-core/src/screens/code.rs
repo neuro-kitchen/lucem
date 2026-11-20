@@ -26,20 +26,18 @@ use crate::ui::theme::{self, color};
 const SCRATCHPAD_PY: &str = r#"# /// script
 # dependencies = ["numpy", "scipy"]
 # ///
-# lucem: name = "Local Contrast Boost"
-# lucem: family = "Filter"
-# lucem: description = "Enhances fine cellular structures by subtracting a blurred local background"
-# lucem: halo = 12
-# lucem: input image: image
-# lucem: param sigma = 3.0
-# lucem: param strength = 1.8
-# lucem: output image
-
 import numpy as np
 from scipy.ndimage import gaussian_filter
+import lucem
 
 
-def run(image: np.ndarray, sigma: float, strength: float) -> np.ndarray:
+@lucem.op(family="Filter", halo=12)
+def local_contrast_boost(
+    image: np.ndarray,
+    sigma: float = 3.0,
+    strength: float = 1.8,
+) -> np.ndarray:
+    """Enhances fine cellular structures by subtracting a blurred local background."""
     img = image.astype(np.float32, copy=False)
     bg = gaussian_filter(img, sigma=max(float(sigma), 0.2))
     enhanced = img + float(strength) * (img - bg)
@@ -72,6 +70,7 @@ pub struct CodeWorkspaceView {
 impl CodeWorkspaceView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| CodeView::new(CodeLanguage::from_name("py"), SCRATCHPAD_PY.to_string(), window, cx).editable(true));
+        crate::screens::code_lsp::attach(&editor, cx);
         let sub = cx.subscribe(&editor, |this, _, e: &CodeChanged, cx| {
             this.dirty = e.0 != this.saved_text;
             cx.notify();
@@ -184,6 +183,7 @@ impl CodeWorkspaceView {
             self.saved_text = text.clone();
             self.dirty = false;
             self.editor = cx.new(|cx| CodeView::new(lang, text, window, cx).editable(true));
+            crate::screens::code_lsp::attach(&self.editor, cx);
             let sub = cx.subscribe(&self.editor, |this, _, e: &CodeChanged, cx| {
                 this.dirty = e.0 != this.saved_text;
                 cx.notify();
@@ -195,6 +195,7 @@ impl CodeWorkspaceView {
         #[cfg(target_family = "wasm")]
         {
             self.editor = cx.new(|cx| CodeView::new(lang, "# Loading from server…\n".to_string(), window, cx).editable(true));
+            crate::screens::code_lsp::attach(&self.editor, cx);
             let sub = cx.subscribe(&self.editor, |this, _, e: &CodeChanged, cx| {
                 this.dirty = e.0 != this.saved_text;
                 cx.notify();
@@ -264,6 +265,7 @@ impl CodeWorkspaceView {
                             v.dirty = false;
                             let lang_code = CodeLanguage::from_name(ext);
                             v.editor = cx.new(|cx| CodeView::new(lang_code, content, window, cx).editable(true));
+                            crate::screens::code_lsp::attach(&v.editor, cx);
                             let sub = cx.subscribe(&v.editor, |this, _, e: &CodeChanged, cx| {
                                 this.dirty = e.0 != this.saved_text;
                                 cx.notify();
