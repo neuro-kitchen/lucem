@@ -250,6 +250,8 @@ pub fn cells_from_nuclei(client: &Client, img: &CellImage, nuclei: &[u32], s: &C
     if nuclei.len() != w * h {
         return Err(invalid("the nucleus labels do not cover the region"));
     }
+    #[cfg(not(target_family = "wasm"))]
+    let t0 = std::time::Instant::now();
     // Areas, then the kept labels renumbered
     let max = nuclei.iter().copied().max().unwrap_or(0) as usize;
     let mut count = vec![0usize; max + 1];
@@ -273,7 +275,15 @@ pub fn cells_from_nuclei(client: &Client, img: &CellImage, nuclei: &[u32], s: &C
     } else {
         nuclei.clone()
     };
+    #[cfg(not(target_family = "wasm"))]
+    let expand_ms = t0.elapsed().as_millis();
+    #[cfg(not(target_family = "wasm"))]
+    let t1 = std::time::Instant::now();
     let objects = measure(img, &nuclei, &cells, n, s.cell_expansion_um > 0.0);
+    #[cfg(not(target_family = "wasm"))]
+    if n >= 500 {
+        eprintln!("hist::cells: tile {w}×{h} ({n} cells): GPU expand {expand_ms} ms, measure+trace {} ms", t1.elapsed().as_millis());
+    }
     Ok(DetectedCells { objects, nuclei, cells })
 }
 

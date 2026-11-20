@@ -37,10 +37,19 @@ pub fn superpixels(client: &Client, channels: &[(String, &[f32])], grid: Grid, p
         return Err(invalid(format!("superpixels need channels of {w} × {h} values")));
     }
     let n = w * h;
-    let mean: Vec<f32> = (0..n).map(|i| channels.iter().map(|(_, c)| c[i]).sum::<f32>() / channels.len() as f32).collect();
+    let shape = Shape::new([h, w]);
+    let w_ch = 1.0 / channels.len() as f64;
+    let mut dev = DeviceArray::<f32>::empty(client, shape.clone())?;
+    let first = DeviceArray::from_host(client, shape.clone(), channels[0].1.to_vec())?;
+    lucem_ops::core::elementwise::scale_offset_into(client, &first, &dev, w_ch, 0.0)?;
+    for (_, ch) in &channels[1..] {
+        let ch_dev = DeviceArray::from_host(client, shape.clone(), ch.to_vec())?;
+        let next = DeviceArray::<f32>::empty(client, shape.clone())?;
+        lucem_ops::core::elementwise::linear_combination_into(client, &dev, &ch_dev, &next, 1.0, w_ch, 0.0)?;
+        dev = next;
+    }
     let spacing_px = (s.spacing_um / (pixel_um * ds)).max(2.0);
     let segments = ((n as f64) / (spacing_px * spacing_px)).round().max(1.0) as usize;
-    let dev = DeviceArray::from_host(client, Shape::new([h, w]), mean)?;
     let raw = slic(client, &dev, &SlicOptions { n_segments: segments, compactness: s.compactness, max_iter: s.iterations })?.to_host(client);
     // Labels from 1, in order of appearance
     let mut map = std::collections::HashMap::new();

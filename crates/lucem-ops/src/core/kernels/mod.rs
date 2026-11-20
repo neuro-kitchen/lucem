@@ -20,7 +20,8 @@ pub use distance::{edt_axis_1d_kernel, edt_init_kernel, sqrt_kernel};
 pub use eigen::{sym_eigvals_2x2_kernel, sym_eigvals_3x3_kernel};
 pub use elementwise::{
     affine_kernel, cast_kernel, clip_kernel, copy_kernel, float_to_uint_kernel, hypot_kernel,
-    linear_comb_kernel, lut_kernel, rescale_clip_kernel, threshold_device_kernel,
+    linear_comb_kernel, lut_kernel, mask_image_kernel, mask_invert_kernel, mask_pair_kernel,
+    mul_kernel, norm_diff_kernel, ratio_kernel, rescale_clip_kernel, threshold_device_kernel,
     threshold_scalar_kernel, uint_to_float_kernel,
 };
 pub use fft::{complex_mul_kernel, dft_axis_kernel};

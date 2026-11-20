@@ -883,23 +883,23 @@ impl Op {
             Op::ExpandLabels { distance } => Value::Labels(expand_labels(client, labels(0)?, *distance, None).map_err(e)?),
             Op::ClearBorder { buffer_size } => Value::Labels(clear_border(client, labels(0)?, *buffer_size, 0).map_err(e)?),
             Op::FindBoundaries {} => Value::Mask(find_boundaries(client, labels(0)?, 1, BoundaryMode::Thick, 0).map_err(e)?),
-            Op::MaskUnion {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), |a, b| a | b)?),
-            Op::MaskIntersect {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), |a, b| a & b)?),
-            Op::MaskSubtract {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), |a, b| a & !b)?),
+            Op::MaskUnion {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), 0)?),
+            Op::MaskIntersect {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), 1)?),
+            Op::MaskSubtract {} => Value::Mask(mask_pair(client, mask(0)?, mask(1)?, self.title(), 2)?),
             Op::MaskInvert {} => {
                 let m = mask(0)?;
-                let out: Vec<u32> = m.to_host(client).into_iter().map(|v| (v == 0) as u32).collect();
-                Value::Mask(DeviceArray::from_host(client, m.shape().clone(), out).map_err(|err| err.to_string())?)
+                let out = DeviceArray::<u32>::empty(client, m.shape().clone()).map_err(|err| err.to_string())?;
+                elementwise::mask_invert_into(client, m, &out).map_err(e)?;
+                Value::Mask(out)
             }
             Op::MaskImage {} => {
-                // No device product kernel yet: the region is small, multiply on the host
                 let (a, m) = (image(0)?, mask(1)?);
                 if a.dims() != m.dims() {
                     return Err("Mask image: the image and the mask differ in size".into());
                 }
-                let (va, vm) = (a.to_host(client), m.to_host(client));
-                let out: Vec<f32> = va.iter().zip(vm.iter()).map(|(v, &k)| if k != 0 { *v } else { 0.0 }).collect();
-                Value::Image(DeviceArray::from_host(client, a.shape().clone(), out).map_err(|err| err.to_string())?)
+                let out = DeviceArray::<f32>::empty(client, a.shape().clone()).map_err(|err| err.to_string())?;
+                elementwise::mask_image_into(client, a, m, &out).map_err(e)?;
+                Value::Image(out)
             }
             Op::Combine { a, b } => {
                 let (x, y) = (image(0)?, image(1)?);
@@ -915,43 +915,41 @@ impl Op {
                 if x.dims() != y.dims() {
                     return Err("Channel ratio: A and B differ in size".into());
                 }
-                let eps = *eps as f32;
-                let (vx, vy) = (x.to_host(client), y.to_host(client));
-                let out: Vec<f32> = vx.iter().zip(vy.iter()).map(|(&a, &b)| a / (b.max(0.0) + eps)).collect();
-                Value::Image(DeviceArray::from_host(client, x.shape().clone(), out).map_err(|err| err.to_string())?)
+                let out = DeviceArray::<f32>::empty(client, x.shape().clone()).map_err(|err| err.to_string())?;
+                elementwise::ratio_into(client, x, y, &out, *eps).map_err(e)?;
+                Value::Image(out)
             }
             Op::NormalizedDiff { eps } => {
                 let (x, y) = (image(0)?, image(1)?);
                 if x.dims() != y.dims() {
                     return Err("Normalized diff: A and B differ in size".into());
                 }
-                let eps = *eps as f32;
-                let (vx, vy) = (x.to_host(client), y.to_host(client));
-                let out: Vec<f32> = vx.iter().zip(vy.iter()).map(|(&a, &b)| (a - b) / (a.abs() + b.abs() + eps)).collect();
-                Value::Image(DeviceArray::from_host(client, x.shape().clone(), out).map_err(|err| err.to_string())?)
+                let out = DeviceArray::<f32>::empty(client, x.shape().clone()).map_err(|err| err.to_string())?;
+                elementwise::norm_diff_into(client, x, y, &out, *eps).map_err(e)?;
+                Value::Image(out)
             }
             Op::ChannelProduct {} => {
                 let (x, y) = (image(0)?, image(1)?);
                 if x.dims() != y.dims() {
                     return Err("Channel product: A and B differ in size".into());
                 }
-                let (vx, vy) = (x.to_host(client), y.to_host(client));
-                let out: Vec<f32> = vx.iter().zip(vy.iter()).map(|(&a, &b)| a * b).collect();
-                Value::Image(DeviceArray::from_host(client, x.shape().clone(), out).map_err(|err| err.to_string())?)
+                let out = DeviceArray::<f32>::empty(client, x.shape().clone()).map_err(|err| err.to_string())?;
+                elementwise::mul_into(client, x, y, &out).map_err(e)?;
+                Value::Image(out)
             }
             Op::Measure {} => Value::Table(region_features(client, labels(0)?, Some(image(1)?)).map_err(e)?),
         })
     }
 }
 
-/// A pixel-by-pixel combination of two masks (0 / 1).
-fn mask_pair(client: &Client, a: &DeviceArray<u32>, b: &DeviceArray<u32>, name: &str, f: impl Fn(bool, bool) -> bool) -> Result<DeviceArray<u32>, String> {
+/// A pixel-by-pixel device combination of two masks (0 / 1): `op` `0` = union, `1` = intersect, `2` = subtract.
+fn mask_pair(client: &Client, a: &DeviceArray<u32>, b: &DeviceArray<u32>, name: &str, op: u32) -> Result<DeviceArray<u32>, String> {
     if a.dims() != b.dims() {
         return Err(format!("{name}: the masks differ in size"));
     }
-    let (va, vb) = (a.to_host(client), b.to_host(client));
-    let out: Vec<u32> = va.iter().zip(vb.iter()).map(|(x, y)| f(*x != 0, *y != 0) as u32).collect();
-    DeviceArray::from_host(client, a.shape().clone(), out).map_err(|e| e.to_string())
+    let out = DeviceArray::<u32>::empty(client, a.shape().clone()).map_err(|e| e.to_string())?;
+    elementwise::mask_pair_into(client, a, b, &out, op).map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 fn threshold(client: &Client, a: &DeviceArray<f32>, t: f64) -> Result<DeviceArray<u32>, String> {

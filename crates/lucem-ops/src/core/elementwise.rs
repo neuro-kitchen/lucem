@@ -8,7 +8,8 @@ use lucem_core::memory::DeviceArray;
 use super::check;
 use super::kernels::{
     affine_kernel, cast_kernel, clip_kernel, copy_kernel, float_to_uint_kernel, hypot_kernel,
-    linear_comb_kernel, lut_kernel, rescale_clip_kernel, threshold_device_kernel,
+    linear_comb_kernel, lut_kernel, mask_image_kernel, mask_invert_kernel, mask_pair_kernel,
+    mul_kernel, norm_diff_kernel, ratio_kernel, rescale_clip_kernel, threshold_device_kernel,
     threshold_scalar_kernel, uint_to_float_kernel,
 };
 use crate::error::OpsResult;
@@ -401,6 +402,181 @@ pub fn hypot_into<F: ImageFloat>(
             b.binding(),
             output.binding(),
             a.len() as u32,
+        );
+    }
+    Ok(())
+}
+
+/// Computes `output = a * b` on the device.
+pub fn mul_into<F: ImageFloat>(
+    client: &Client,
+    a: &DeviceArray<F>,
+    b: &DeviceArray<F>,
+    output: &DeviceArray<F>,
+) -> OpsResult<()> {
+    check::same_shape("a", a, "b", b)?;
+    check::same_shape("a", a, "output", output)?;
+    check::not_aliased(a, output)?;
+    check::not_aliased(b, output)?;
+    if a.is_empty() {
+        return Ok(());
+    }
+    let geom = LaunchGeometry::elementwise(client, a.len());
+    unsafe {
+        mul_kernel::launch::<F>(
+            client,
+            geom.cube_count,
+            geom.cube_dim,
+            a.binding(),
+            b.binding(),
+            output.binding(),
+            a.len() as u32,
+        );
+    }
+    Ok(())
+}
+
+/// Computes `output = a / (max(b, 0) + eps)` on the device.
+pub fn ratio_into<F: ImageFloat>(
+    client: &Client,
+    a: &DeviceArray<F>,
+    b: &DeviceArray<F>,
+    output: &DeviceArray<F>,
+    eps: f64,
+) -> OpsResult<()> {
+    check::same_shape("a", a, "b", b)?;
+    check::same_shape("a", a, "output", output)?;
+    check::not_aliased(a, output)?;
+    check::not_aliased(b, output)?;
+    if a.is_empty() {
+        return Ok(());
+    }
+    let geom = LaunchGeometry::elementwise(client, a.len());
+    unsafe {
+        ratio_kernel::launch::<F>(
+            client,
+            geom.cube_count,
+            geom.cube_dim,
+            a.binding(),
+            b.binding(),
+            output.binding(),
+            scalar_cast::<F>(eps),
+            a.len() as u32,
+        );
+    }
+    Ok(())
+}
+
+/// Computes `output = (a - b) / (|a| + |b| + eps)` on the device.
+pub fn norm_diff_into<F: ImageFloat>(
+    client: &Client,
+    a: &DeviceArray<F>,
+    b: &DeviceArray<F>,
+    output: &DeviceArray<F>,
+    eps: f64,
+) -> OpsResult<()> {
+    check::same_shape("a", a, "b", b)?;
+    check::same_shape("a", a, "output", output)?;
+    check::not_aliased(a, output)?;
+    check::not_aliased(b, output)?;
+    if a.is_empty() {
+        return Ok(());
+    }
+    let geom = LaunchGeometry::elementwise(client, a.len());
+    unsafe {
+        norm_diff_kernel::launch::<F>(
+            client,
+            geom.cube_count,
+            geom.cube_dim,
+            a.binding(),
+            b.binding(),
+            output.binding(),
+            scalar_cast::<F>(eps),
+            a.len() as u32,
+        );
+    }
+    Ok(())
+}
+
+/// Computes `output = if mask != 0 { a } else { 0.0 }` on the device.
+pub fn mask_image_into<F: ImageFloat>(
+    client: &Client,
+    a: &DeviceArray<F>,
+    mask: &DeviceArray<u32>,
+    output: &DeviceArray<F>,
+) -> OpsResult<()> {
+    check::same_shape("a", a, "mask", mask)?;
+    check::same_shape("a", a, "output", output)?;
+    check::not_aliased(a, output)?;
+    if a.is_empty() {
+        return Ok(());
+    }
+    let geom = LaunchGeometry::elementwise(client, a.len());
+    unsafe {
+        mask_image_kernel::launch::<F>(
+            client,
+            geom.cube_count,
+            geom.cube_dim,
+            a.binding(),
+            mask.binding(),
+            output.binding(),
+            a.len() as u32,
+        );
+    }
+    Ok(())
+}
+
+/// Inverts a boolean `u32` mask on the device (`0 -> 1`, `!= 0 -> 0`).
+pub fn mask_invert_into(
+    client: &Client,
+    mask: &DeviceArray<u32>,
+    output: &DeviceArray<u32>,
+) -> OpsResult<()> {
+    check::same_shape("mask", mask, "output", output)?;
+    check::not_aliased(mask, output)?;
+    if mask.is_empty() {
+        return Ok(());
+    }
+    let geom = LaunchGeometry::elementwise(client, mask.len());
+    unsafe {
+        mask_invert_kernel::launch(
+            client,
+            geom.cube_count,
+            geom.cube_dim,
+            mask.binding(),
+            output.binding(),
+            mask.len() as u32,
+        );
+    }
+    Ok(())
+}
+
+/// Combines two boolean `u32` masks on the device (`op`: `0` = union, `1` = intersect, `2` = subtract).
+pub fn mask_pair_into(
+    client: &Client,
+    a: &DeviceArray<u32>,
+    b: &DeviceArray<u32>,
+    output: &DeviceArray<u32>,
+    op: u32,
+) -> OpsResult<()> {
+    check::same_shape("a", a, "b", b)?;
+    check::same_shape("a", a, "output", output)?;
+    check::not_aliased(a, output)?;
+    check::not_aliased(b, output)?;
+    if a.is_empty() {
+        return Ok(());
+    }
+    let geom = LaunchGeometry::elementwise(client, a.len());
+    unsafe {
+        mask_pair_kernel::launch(
+            client,
+            geom.cube_count,
+            geom.cube_dim,
+            a.binding(),
+            b.binding(),
+            output.binding(),
+            a.len() as u32,
+            op,
         );
     }
     Ok(())
