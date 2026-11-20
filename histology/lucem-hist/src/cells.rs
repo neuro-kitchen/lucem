@@ -109,15 +109,13 @@ pub fn detect_cells(client: &Client, img: &CellImage, s: &CellDetection) -> Hist
     img.check()?;
     let (w, h, px) = (img.width, img.height, img.um_per_px());
     let shape = Shape::new([h, w]);
-    let mut values = img.detection.to_vec();
+    let mut dev = DeviceArray::from_host(client, shape.clone(), img.detection.to_vec())?;
     if s.background_radius_um > 0.0 {
-        let dev = DeviceArray::from_host(client, shape.clone(), values.clone())?;
-        let bg = rolling_ball(client, &dev, &RollingBall { radius: s.background_radius_um / px, ..RollingBall::default() })?.to_host(client);
-        for (v, b) in values.iter_mut().zip(bg) {
-            *v -= b;
-        }
+        let bg = rolling_ball(client, &dev, &RollingBall { radius: s.background_radius_um / px, ..RollingBall::default() })?;
+        let sub = DeviceArray::<f32>::empty(client, shape.clone())?;
+        lucem_ops::core::elementwise::linear_combination_into(client, &dev, &bg, &sub, 1.0, -1.0, 0.0)?;
+        dev = sub;
     }
-    let mut dev = DeviceArray::from_host(client, shape.clone(), values)?;
     let median_px = (s.median_radius_um / px).round() as usize;
     if median_px >= 1 {
         dev = median_filter(client, &dev, &StructuringElement::disk(median_px), &OrderFilter::default())?;
@@ -133,7 +131,7 @@ pub fn detect_cells(client: &Client, img: &CellImage, s: &CellDetection) -> Hist
     } else if s.split_by_intensity {
         // Seeds about a typical nucleus' radius apart (from the area range's geometric mean)
         let typical_radius_px = ((s.min_area_um2 * s.max_area_um2).sqrt() / std::f64::consts::PI).sqrt() / px;
-        split_by_intensity(client, &smooth, &mask, w, h, typical_radius_px, s.threshold)?
+        split_by_intensity(client, &dev, &smooth, &mask, w, h, typical_radius_px, s.threshold)?
     } else if s.split_by_shape {
         let min_radius_px = (s.min_area_um2 / std::f64::consts::PI).sqrt() / px;
         split_by_shape(client, &mask, w, h, min_radius_px)?
@@ -147,7 +145,8 @@ pub fn detect_cells(client: &Client, img: &CellImage, s: &CellDetection) -> Hist
 /// Touching nuclei apart at the dark gaps between them: the peaks of the smoothed image inside
 /// the mask (at least `0.6 ×` a typical radius apart, above the threshold) seed a watershed of the
 /// inverted image inside the mask.
-fn split_by_intensity(client: &Client, smooth: &[f32], mask: &[u32], w: usize, h: usize, typical_radius_px: f64, threshold: f64) -> HistResult<Vec<u32>> {
+#[allow(clippy::too_many_arguments)]
+fn split_by_intensity(client: &Client, smooth_dev: &DeviceArray<f32>, smooth: &[f32], mask: &[u32], w: usize, h: usize, typical_radius_px: f64, threshold: f64) -> HistResult<Vec<u32>> {
     let shape = Shape::new([h, w]);
     let inside: Vec<f32> = smooth.iter().zip(mask).map(|(&v, &m)| if m != 0 { v } else { f32::MIN }).collect();
     let dev = DeviceArray::from_host(client, shape.clone(), inside)?;
@@ -165,8 +164,8 @@ fn split_by_intensity(client: &Client, smooth: &[f32], mask: &[u32], w: usize, h
         let m8: Vec<u8> = mask.iter().map(|&m| m as u8).collect();
         return Ok(raster::components(&m8, w, h).0);
     }
-    let relief: Vec<f32> = smooth.iter().map(|v| -v).collect();
-    let relief = DeviceArray::from_host(client, shape.clone(), relief)?;
+    let relief = DeviceArray::<f32>::empty(client, shape.clone())?;
+    lucem_ops::core::elementwise::scale_offset_into(client, smooth_dev, &relief, -1.0, 0.0)?;
     let markers = DeviceArray::from_host(client, shape.clone(), markers)?;
     let mask_dev = DeviceArray::from_host(client, shape, mask.to_vec())?;
     let mut labels = watershed(client, &relief, &markers, None, Some(&mask_dev), &WatershedOptions::default())?.to_host(client);
@@ -200,8 +199,8 @@ fn split_by_shape(client: &Client, mask: &[u32], w: usize, h: usize, min_radius_
     let shape = Shape::new([h, w]);
     let mask_dev = DeviceArray::from_host(client, shape.clone(), mask.to_vec())?;
     let dist: DeviceArray<f32> = euclidean_distance::<u32, f32>(client, &mask_dev, None)?;
-    let dist_host = raster::gaussian(&dist.to_host(client), w, h, 1.0);
-    let dist_dev = DeviceArray::from_host(client, shape.clone(), dist_host.clone())?;
+    // Keep distance map on the GPU: blur and invert on-device without host round-trips
+    let dist_dev = gaussian_blur(client, &dist, &[1.0, 1.0], &GaussianBlur::default())?;
     let peaks = local_peaks(client, &dist_dev, &LocalPeaks { min_distance: (min_radius_px * 0.8).round().max(1.0) as usize, threshold_abs: Some(0.5), exclude_border: Some(0), ..LocalPeaks::default() })?;
     let mut markers = vec![0u32; w * h];
     let mut n = 0u32;
@@ -215,8 +214,8 @@ fn split_by_shape(client: &Client, mask: &[u32], w: usize, h: usize, min_radius_
     let mut labels = if n == 0 {
         vec![0u32; w * h]
     } else {
-        let relief: Vec<f32> = dist_host.iter().map(|d| -d).collect();
-        let relief = DeviceArray::from_host(client, shape.clone(), relief)?;
+        let relief = DeviceArray::<f32>::empty(client, shape.clone())?;
+        lucem_ops::core::elementwise::scale_offset_into(client, &dist_dev, &relief, -1.0, 0.0)?;
         let markers = DeviceArray::from_host(client, shape.clone(), markers)?;
         watershed(client, &relief, &markers, None, Some(&mask_dev), &WatershedOptions::default())?.to_host(client)
     };

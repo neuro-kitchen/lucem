@@ -715,15 +715,15 @@ impl Store {
                         s.hist.remote_tiles.remove(&image);
                     }
                 });
-                // Fetch a compact simplified sample (1 single fast RPC, <= 400 objects) for
+                // Fetch a compact simplified sample (1 single fast RPC, <= 2,500 objects) for
                 // instant Analyze Region LOD summaries & quick readout inspection.
                 if cell_count > 0 {
-                    if let Ok(found) = server_objects_sample(&link, &path, "cells", 400).await {
+                    if let Ok(found) = server_objects_sample(&link, &path, "cells", 2_500).await {
                         a.cells = found;
                     }
                 }
                 if tile_count > 0 {
-                    if let Ok(found) = server_objects_sample(&link, &path, "tiles", 400).await {
+                    if let Ok(found) = server_objects_sample(&link, &path, "tiles", 2_500).await {
                         a.tiles = found;
                     }
                 }

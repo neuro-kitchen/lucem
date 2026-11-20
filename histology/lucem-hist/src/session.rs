@@ -133,7 +133,10 @@ impl Session {
 
     /// Records a step on `image` now.
     pub fn push(&mut self, image: &str, action: Action) {
+        #[cfg(not(target_family = "wasm"))]
         let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        #[cfg(target_family = "wasm")]
+        let at = 0;
         self.steps.push(Step { at, image: image.to_string(), action });
     }
 

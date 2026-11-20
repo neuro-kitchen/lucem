@@ -151,7 +151,12 @@ pub fn model_nuclei(send: &mut dyn FnMut(&lucem_ml::Request) -> Result<serde_jso
         (0..w * h).flat_map(|i| (0..3).map(move |c| (i, c))).map(|(i, c)| (raw[c][i] * scale[c]).round().clamp(0.0, 255.0) as u8).collect()
     };
     let channels = if channels == 1 { 1 } else { 3 };
-    let dir = std::env::temp_dir().join(format!("lucem-nuclei-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
+    // Prefer `/dev/shm` RAM disk on Linux so tile rasters & label maps never touch physical disk
+    let base_tmp = {
+        let shm = std::path::Path::new("/dev/shm");
+        if shm.is_dir() { shm.to_path_buf() } else { std::env::temp_dir() }
+    };
+    let dir = base_tmp.join(format!("lucem-nuclei-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
     std::fs::create_dir_all(&dir).map_err(|e| invalid(e.to_string()))?;
     let path = dir.join("tile.rgb");
     std::fs::write(&path, &rgb).map_err(|e| invalid(e.to_string()))?;
@@ -161,12 +166,22 @@ pub fn model_nuclei(send: &mut dyn FnMut(&lucem_ml::Request) -> Result<serde_jso
         pixel_um: Some(pixel_um),
         out_dir: dir.to_string_lossy().into_owned(),
     };
-    let value = send(&req).map_err(invalid)?;
-    let r: lucem_ml::InstancesResult = serde_json::from_value(value).map_err(|e| invalid(format!("the plugin's answer does not read: {e}")))?;
+    let value = send(&req).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&dir);
+        invalid(e)
+    })?;
+    let r: lucem_ml::InstancesResult = serde_json::from_value(value).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&dir);
+        invalid(format!("the plugin's answer does not read: {e}"))
+    })?;
     if r.classes.is_empty() {
+        let _ = std::fs::remove_dir_all(&dir);
         return Ok(vec![0; w * h]);
     }
-    let (labels, lw, lh) = labels_from_result(&r)?;
+    let (labels, lw, lh) = labels_from_result(&r).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&dir);
+    })?;
+    let _ = std::fs::remove_dir_all(&dir);
     if (lw, lh) != (w, h) {
         return Err(invalid(format!("the model answered {lw} × {lh} labels for a {w} × {h} tile")));
     }

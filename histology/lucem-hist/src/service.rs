@@ -261,10 +261,11 @@ fn objects_max() -> usize {
     OBJECTS_MAX
 }
 
-/// The images' analyses and warm ML model plugins, kept between calls.
+/// The images' analyses, cached pyramid handles, and warm ML model plugins, kept between calls.
 #[derive(Default)]
 pub struct Service {
     analyses: Mutex<HashMap<PathBuf, Analysis>>,
+    pyramids: Mutex<HashMap<PathBuf, std::sync::Arc<lucem_io::Pyramid>>>,
     models: Mutex<PluginModels>,
 }
 
@@ -283,10 +284,20 @@ impl Service {
     pub fn call(&self, method: &str, body: Value, resolve: &dyn Fn(&str) -> Result<PathBuf, String>, _caller: Caller) -> Result<Value, String> {
         match method {
             "apply" => {
+                #[cfg(not(target_family = "wasm"))]
                 let t0 = std::time::Instant::now();
                 let call: ApplyCall = serde_json::from_value(body).map_err(bad("apply"))?;
                 let path = resolve(&call.path)?;
-                let pyramid = lucem_io::Pyramid::open(&path).map_err(|e| format!("{}: {e}", call.path))?;
+                let pyramid = {
+                    let mut cache = self.pyramids.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(p) = cache.get(&path) {
+                        p.clone()
+                    } else {
+                        let p = std::sync::Arc::new(lucem_io::Pyramid::open(&path).map_err(|e| format!("{}: {e}", call.path))?);
+                        cache.insert(path.clone(), p.clone());
+                        p
+                    }
+                };
                 let client = lucem_core::ComputeTarget::from_env().and_then(|t| t.client()).map_err(|e| e.to_string())?;
                 // The analysis is taken out while the step runs: other images go on meanwhile
                 let mut analysis = self.analyses.lock().unwrap_or_else(|e| e.into_inner()).remove(&path).unwrap_or_default();
@@ -304,6 +315,7 @@ impl Service {
                 let n_cells = analysis.cells.len();
                 self.analyses.lock().unwrap_or_else(|e| e.into_inner()).insert(path, analysis);
                 answer["outcome"] = serde_json::to_value(outcome.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                #[cfg(not(target_family = "wasm"))]
                 eprintln!("hist::service: apply finished in {:.0} ms (cells={n_cells})", t0.elapsed().as_secs_f64() * 1e3);
                 Ok(answer)
             }
@@ -333,6 +345,7 @@ impl Service {
                 }
             }
             "raster" => {
+                #[cfg(not(target_family = "wasm"))]
                 let t0 = std::time::Instant::now();
                 let call: RasterCall = serde_json::from_value(body).map_err(bad("raster"))?;
                 let path = resolve(&call.path)?;
@@ -341,6 +354,7 @@ impl Service {
                     return Ok(json!({"empty": true}));
                 };
                 let res = raster_viewport_png(analysis, &call);
+                #[cfg(not(target_family = "wasm"))]
                 eprintln!("hist::service: raster finished in {:.0} ms (total_cells={})", t0.elapsed().as_secs_f64() * 1e3, analysis.cells.len());
                 res
             }

@@ -69,5 +69,5 @@ rm -rf "$dist/engine"
 "$wasm_opt" -O2 --enable-bulk-memory --enable-simd --enable-nontrapping-float-to-int --enable-sign-ext "$dist/engine/lucem_engine_web_bg.wasm" -o "$dist/engine/lucem_engine_web_bg.wasm"
 cp "$root/engine/lucem-engine-web/engine-worker.js" "$dist/engine/"
 du -h "$dist/engine/lucem_engine_web_bg.wasm" | sed 's/^/   /'
-find "$dist" \( -name '*.wasm' -o -name '*.js' \) | while read -r f; do brotli -f -q 11 "$f" -o "$f.br"; done
+find "$dist" \( -name '*.wasm' -o -name '*.js' \) | while read -r f; do brotli -f -q "${LUCEM_BROTLI_Q:-5}" "$f" -o "$f.br"; done
 echo "Built into $dist (serve it: lucem serve --data <images> --web $dist)"
