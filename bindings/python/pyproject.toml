@@ -18,11 +18,12 @@ dependencies = ["numpy>=2.5"]
 # Pinned to this release; .github/workflows/release.yml checks them against the workspace version
 hist = ["lucem-hist==0.0.4"]
 app = ["lucem-app==0.0.4"]
+web = ["lucem-web==0.0.4"]
 stardist = ["lucem-ml-stardist==0.0.4"]
 sam = ["lucem-ml-sam==0.0.4"]
 instanseg = ["lucem-ml-instanseg==0.0.4"]
 ml = ["lucem-ml-stardist==0.0.4", "lucem-ml-sam==0.0.4", "lucem-ml-instanseg==0.0.4"]
-all = ["lucem-hist==0.0.4", "lucem-app==0.0.4", "lucem-ml-stardist==0.0.4", "lucem-ml-sam==0.0.4", "lucem-ml-instanseg==0.0.4"]
+all = ["lucem-hist==0.0.4", "lucem-app==0.0.4", "lucem-web==0.0.4", "lucem-ml-stardist==0.0.4", "lucem-ml-sam==0.0.4", "lucem-ml-instanseg==0.0.4"]
 
 [project.scripts]
 lucem = "lucem._cli:main"

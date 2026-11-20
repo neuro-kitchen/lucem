@@ -14,25 +14,23 @@ required.
 ## Complete example
 
 <Tabs>
-  <TabItem label="Python (PEP 723 + SciPy)">
+  <TabItem label="Python (@lucem.op + PEP 723)">
     ```python title="~/.config/lucem/plugins/ops/local_contrast_boost.py"
     # /// script
     # dependencies = ["numpy", "scipy"]
     # ///
-    # lucem: name = "Local Contrast Boost"
-    # lucem: family = "Filter"
-    # lucem: description = "Enhances fine cellular structures by subtracting a blurred local background"
-    # lucem: halo = 12
-    # lucem: input image: image
-    # lucem: param sigma = 3.0
-    # lucem: param strength = 1.8
-    # lucem: output image
-
     import numpy as np
     from scipy.ndimage import gaussian_filter
+    import lucem
 
 
-    def run(image: np.ndarray, sigma: float, strength: float) -> np.ndarray:
+    @lucem.op(family="Filter", halo=12)
+    def local_contrast_boost(
+        image: np.ndarray,
+        sigma: float = 3.0,
+        strength: float = 1.8,
+    ) -> np.ndarray:
+        """Enhances fine cellular structures by subtracting a blurred local background."""
         img = image.astype(np.float32, copy=False)
         background = gaussian_filter(img, sigma=max(float(sigma), 0.2))
         enhanced = img + float(strength) * (img - background)

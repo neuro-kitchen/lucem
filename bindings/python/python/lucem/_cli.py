@@ -11,7 +11,7 @@ import sys
 
 import lucem
 
-_COMMANDS = ("app", "autotune", "plugins", "version")
+_COMMANDS = ("app", "web", "autotune", "plugins", "version")
 
 
 def _plugins() -> None:
@@ -35,6 +35,11 @@ def main(argv: list[str] | None = None) -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     app = commands.add_parser("app", help="open the desktop app")
     app.add_argument("path", nargs="?", help="an image or project to open")
+    web_cmd = commands.add_parser("web", help="serve the browser web app (pip install 'lucem[web]')")
+    web_cmd.add_argument("--data", help="folder of images to serve with GPU backend (when native lucem CLI is installed)")
+    web_cmd.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
+    web_cmd.add_argument("--port", type=int, default=8080, help="HTTP port (default: 8080)")
+    web_cmd.add_argument("--open", action="store_true", help="open in the default browser")
     tune = commands.add_parser("autotune", help="tune this device once: lucem's operators and every model plugin")
     tune.add_argument("--runtime", help="wgpu, cuda or cpu (default: every usable runtime)")
     commands.add_parser("plugins", help="list the model plugins found")
@@ -43,6 +48,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "app":
         try:
             lucem.app.open(args.path)
+        except FileNotFoundError as e:
+            sys.exit(str(e))
+    elif args.command == "web":
+        try:
+            lucem.web.serve(args.data, host=args.host, port=args.port, open_browser=args.open)
         except FileNotFoundError as e:
             sys.exit(str(e))
     elif args.command == "autotune":

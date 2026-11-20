@@ -14,23 +14,17 @@ writing and iterating on custom **Python** and **Rust** operations.
 
 - **Top tab bar** — active script tab (with unsaved dot `•`), `+ New .py`, `+ New .rs`, **Save**,
   **Add to Pipeline**, and toggles for the bottom **Output** drawer and right **Scripts** tree.
-- **Center editor** — full-height syntax-highlighted code editor (`kitchen-ui`'s `CodeView`) for
-  Python and Rust.
-- **Bottom Output drawer** — live `# lucem:` header validator (shows parsed `inputs`, `params`,
-  `output`, and `halo` as you type) plus save/load logs.
-- **Right Scripts tree** — browses `~/.config/lucem/plugins/ops` (**Plugin Ops**) and
-  `~/.config/lucem/scripts` (**Project Scripts**).
+- **Center editor** — full-height syntax-highlighted code editor (`kitchen-ui`'s `CodeView` powered by pure-Rust `syntect` on both desktop and WebAssembly) with built-in **LSP autocompletion** (`lucem.*`, `np.*`, `scipy.ndimage.*`, `@lucem.*` decorators, and local symbols), **Markdown hover popovers**, and **inline diagnostics** (Astral `ruff check` when installed, falling back to Python `ast.parse`).
+- **Bottom Output drawer** — live `@lucem.op` / `# lucem:` header validator (shows parsed `inputs`, `params`, `output`, and `halo` as you type) plus save/load logs.
+- **Right Scripts tree** — browses `~/.config/lucem/plugins/ops` (**Plugin Ops**) and `~/.config/lucem/scripts` (**Project Scripts**).
 
 ## Zero-copy warm Python workers
 
 When a Python script runs on image tiles:
 
-1. Lucem reads the `# /// script` (PEP 723) dependency header and auto-provisions a cached `uv`
-   virtual environment once per dependency set.
-2. A persistent warm Python worker stays alive between tile runs so heavy imports (`numpy`, `scipy`,
-   `torch`, `onnxruntime`) are paid only once.
-3. Tile buffers are exchanged through **RAM-backed `/dev/shm` shared memory** (`mmap_mode="r"` in
-   NumPy), avoiding disk I/O and buffer copies.
+1. Lucem reads the `# /// script` (PEP 723) dependency header and launches an isolated cached `uv run --no-project` virtual environment once per dependency set.
+2. A persistent warm Python worker stays alive between tile runs (hot-reloading edited files by SHA-256) so heavy imports (`numpy`, `scipy`, `torch`, `onnxruntime`) are paid only once.
+3. Tile buffers are exchanged through **RAM-backed `/dev/shm` shared memory** (`np.memmap(..., mode="r")`), avoiding disk I/O and buffer copies.
 
 ## Desktop vs. `lucem serve --web` vs. GitHub Pages
 
