@@ -10,6 +10,8 @@ keeps what differs from the background: on brightfield slides, the stained areas
 bright glass; on fluorescence, the signal against the dark. The regions become shapes of class
 **Tissue**, undoable as one change.
 
+![Automatic tissue segmentation outline in Lucem](/lucem/screenshots/05_tooling_tissue-seg.png)
+
 Later steps can look in the tissue instead of a region you draw: a recorded session run on other
 images does so.
 

@@ -99,6 +99,7 @@ pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Ti
     let step = t.tile.max(DIVISOR);
     let (ny, nx) = (h.div_ceil(step), w.div_ceil(step));
     let total = ny * nx;
+    let mut input_buf: Vec<f32> = Vec::new();
     for ty in 0..ny {
         for tx in 0..nx {
             // Core [y0, y1) × [x0, x1); the read window with its halo, clipped to the image
@@ -112,24 +113,30 @@ pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Ti
             // being tuned again for every region size
             let (ph, pw) = (rh.div_ceil(SHAPE_STEP) * SHAPE_STEP, rw.div_ceil(SHAPE_STEP) * SHAPE_STEP);
             let nc = net.channels;
-            let mut input = vec![0f32; nc * ph * pw];
+            input_buf.resize(nc * ph * pw, 0.0);
             for c in 0..nc {
+                let plane_off = c * w * h;
+                let dst_c = c * ph * pw;
                 for y in 0..ph {
                     // Past the read window: mirrored, as StarDist pads (csbdeep's `reflect`)
                     let sy = ry0 + reflect(y, rh);
+                    let src_row = plane_off + sy * w;
+                    let dst_row = dst_c + y * pw;
                     for x in 0..pw {
                         let sx = rx0 + reflect(x, rw);
-                        input[(c * ph + y) * pw + x] = planes[c * w * h + sy * w + sx];
+                        input_buf[dst_row + x] = planes[src_row + sx];
                     }
                 }
             }
             let t0 = std::time::Instant::now();
-            let attempt = || -> Result<(Vec<f32>, Vec<f32>), String> {
+            let attempt = |buf: &[f32]| -> Result<(Vec<f32>, Vec<f32>), String> {
                 // In the network's precision on the wire: half the bytes up and back in F16
-                let data = TensorData::new(input.clone(), [1, nc, ph, pw]);
                 let x = match net.precision {
-                    crate::net::Precision::F32 => Tensor::<4>::from_data(data, &net.device),
-                    crate::net::Precision::F16 => Tensor::<4>::from_data(data.convert::<burn::tensor::f16>(), (&net.device, burn::tensor::DType::F16)),
+                    crate::net::Precision::F32 => Tensor::<4>::from_data(TensorData::new(buf.to_vec(), [1, nc, ph, pw]), &net.device),
+                    crate::net::Precision::F16 => {
+                        let halfs: Vec<burn::tensor::f16> = buf.iter().map(|&v| burn::tensor::f16::from_f32(v)).collect();
+                        Tensor::<4>::from_data(TensorData::new(halfs, [1, nc, ph, pw]), (&net.device, burn::tensor::DType::F16))
+                    }
                 };
                 let (p, d) = net.forward(x);
                 let p: Vec<f32> = p.try_into_data().map_err(|e| format!("reading the probability: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
@@ -137,11 +144,11 @@ pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Ti
                 Ok((p, d))
             };
             // A matrix product this device cannot launch: Burn's own convolutions from now on
-            let (p, d) = match attempt() {
+            let (p, d) = match attempt(&input_buf) {
                 Ok(r) => r,
                 Err(e) if crate::gemm_cannot_launch(&e) && crate::net::disable_gemm() => {
                     eprintln!("stardist: the matrix-product convolutions failed on this device, using Burn's own ({e})");
-                    attempt().map_err(crate::explain)?
+                    attempt(&input_buf).map_err(crate::explain)?
                 }
                 Err(e) => return Err(crate::explain(e)),
             };
@@ -173,20 +180,36 @@ pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Ti
     Ok(GridOutput { gh, gw, prob, dist })
 }
 
+fn ray_table() -> &'static [(f32, f32); N_RAYS] {
+    static TABLE: std::sync::OnceLock<[(f32, f32); N_RAYS]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|k| {
+            let phi = 2.0 * std::f32::consts::PI * k as f32 / N_RAYS as f32;
+            (phi.sin(), phi.cos())
+        })
+    })
+}
+
 /// The star polygon of grid point `(gy, gx)` (input pixels, `(y, x)` vertices).
 pub fn polygon(out: &GridOutput, gy: usize, gx: usize) -> Vec<[f32; 2]> {
+    let mut poly = Vec::with_capacity(N_RAYS);
+    polygon_into(out, gy, gx, &mut poly);
+    poly
+}
+
+fn polygon_into(out: &GridOutput, gy: usize, gx: usize, poly: &mut Vec<[f32; 2]>) {
+    poly.clear();
     let (cy, cx) = ((gy * GRID) as f32, (gx * GRID) as f32);
-    (0..N_RAYS)
-        .map(|k| {
-            let phi = 2.0 * std::f32::consts::PI * k as f32 / N_RAYS as f32;
-            let d = out.dist[(gy * out.gw + gx) * N_RAYS + k].max(1e-3);
-            [cy + d * phi.sin(), cx + d * phi.cos()]
-        })
-        .collect()
+    let base = (gy * out.gw + gx) * N_RAYS;
+    let rays = ray_table();
+    for (k, &(s, c)) in rays.iter().enumerate() {
+        let d = out.dist[base + k].max(1e-3);
+        poly.push([cy + d * s, cx + d * c]);
+    }
 }
 
 /// The pixels (row-major indices of a `w × h` image) whose centres are inside `poly`.
-fn rasterize(poly: &[[f32; 2]], w: usize, h: usize, out: &mut Vec<usize>) {
+fn rasterize(poly: &[[f32; 2]], w: usize, h: usize, xs: &mut Vec<f32>, out: &mut Vec<usize>) {
     out.clear();
     let (mut y0, mut y1) = (f32::MAX, f32::MIN);
     for p in poly {
@@ -195,7 +218,6 @@ fn rasterize(poly: &[[f32; 2]], w: usize, h: usize, out: &mut Vec<usize>) {
     }
     let ys = (y0.floor().max(0.0)) as usize;
     let ye = ((y1.ceil()) as isize).clamp(0, h as isize) as usize;
-    let mut xs: Vec<f32> = Vec::new();
     for y in ys..ye {
         let fy = y as f32 + 0.5;
         xs.clear();
@@ -243,6 +265,8 @@ pub fn instances(out: &GridOutput, w: usize, h: usize, t: Thresholds) -> (Vec<u3
     cands.sort_by(|a, b| b.0.total_cmp(&a.0));
     let mut labels = vec![0u32; w * h];
     let mut kept = Vec::new();
+    let mut poly = Vec::with_capacity(N_RAYS);
+    let mut xs = Vec::with_capacity(16);
     let mut px = Vec::new();
     for (p, gy, gx) in cands {
         // A candidate inside a kept nucleus is suppressed at once
@@ -250,7 +274,8 @@ pub fn instances(out: &GridOutput, w: usize, h: usize, t: Thresholds) -> (Vec<u3
         if cy < h && cx < w && labels[cy * w + cx] != 0 {
             continue;
         }
-        rasterize(&polygon(out, gy, gx), w, h, &mut px);
+        polygon_into(out, gy, gx, &mut poly);
+        rasterize(&poly, w, h, &mut xs, &mut px);
         if px.is_empty() {
             continue;
         }

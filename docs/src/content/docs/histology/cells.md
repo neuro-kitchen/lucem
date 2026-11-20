@@ -23,9 +23,11 @@ the nucleus, the cytoplasm and the whole cell.
 
 ## With a model
 
-Choose a nucleus model (for example **StarDist H&E** or **StarDist fluorescence**) instead of the
-threshold. The model reads the image at about its own scale and finds the nuclei; lucem grows and
-measures the cells the same way. See [Models](/lucem/models/).
+Choose a nucleus model (for example **InstanSeg fluorescence**, **StarDist H&E**, or **StarDist
+fluorescence**) instead of the threshold. The model reads the image at about its own scale and
+finds the nuclei; lucem grows and measures the cells the same way. See [Models](/lucem/models/).
+
+![Cell and nuclei segmentation overlay on a multispectral fluorescence slide](/lucem/screenshots/05_tooling_cell-seg.png)
 
 ## On the command line
 

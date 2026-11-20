@@ -8,6 +8,8 @@ sidebar:
 Analyze lists what was measured on the image shown: its **regions and shapes**, its **cells**
 and **tiles** (histology), and each result view's table.
 
+![Analyze workspace data table with column filters and measurements](/lucem/screenshots/06_analysis_data-table.png)
+
 ## The table
 
 - Filter each column (`> 10`, `1..20`, `= stroma`), search every column, sort by a header.
@@ -29,3 +31,5 @@ a tab. Plots draw the rows the table shows, filters included.
 
 A plot's tab switches its kind. The hierarchy (left) and the selection and summary pane (right)
 show and hide from the ends of the bar.
+
+![Interactive plots in the Analyze workspace](/lucem/screenshots/06_b_analysis_plots.png)

@@ -170,6 +170,8 @@ pub fn device() -> Result<Device, String> {
         "cuda" => Ok(Device::cuda(0)),
         #[cfg(feature = "cpu")]
         "cpu" => Ok(Device::cpu()),
+        #[cfg(feature = "cuda")]
+        "" | "auto" if !cfg!(target_os = "linux") || std::path::Path::new("/proc/driver/nvidia/version").exists() => Ok(Device::cuda(0)),
         #[cfg(feature = "wgpu")]
         "" | "auto" | "wgpu" | "vulkan" => Ok(Device::wgpu(DeviceKind::DefaultDevice)),
         other => Err(format!("LUCEM_RUNTIME={other:?}: this build runs on {}", runtimes().join(", "))),

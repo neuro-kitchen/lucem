@@ -372,18 +372,33 @@ impl PipelineView {
         });
     }
 
-    /// The Pipeline's menus: Sources, Edit, Process (Find an operation, then a submenu per
-    /// family), Output, Script, Model, View.
+    /// The Pipeline's menus: Edit (including canvas view toggles), Sources, Process, Script, Model, Output.
     pub fn menu_specs() -> Vec<MenuSpec> {
         let c = MenuItem::command;
         vec![
+            MenuSpec::new(
+                "Edit",
+                vec![
+                    c("pipeline.duplicate"),
+                    c("pipeline.delete"),
+                    c("pipeline.delete_alone"),
+                    MenuItem::Separator,
+                    c("pipeline.select_all"),
+                    MenuItem::Separator,
+                    c("edit.undo"),
+                    c("edit.redo"),
+                    MenuItem::Separator,
+                    c("pipeline.fit"),
+                    c("pipeline.actual"),
+                    c("pipeline.grid"),
+                    c("pipeline.minimap"),
+                ],
+            ),
             MenuSpec::new("Sources", vec![MenuItem::provided("pipeline.sources")]),
-            MenuSpec::new("Edit", vec![c("pipeline.duplicate"), c("pipeline.delete"), c("pipeline.delete_alone"), MenuItem::Separator, c("pipeline.select_all"), MenuItem::Separator, c("edit.undo"), c("edit.redo")]),
             MenuSpec::new("Process", vec![c("process.find"), MenuItem::Separator, MenuItem::label("A node on the canvas"), MenuItem::provided("pipeline.families"), MenuItem::Separator, MenuItem::provided("pipeline.recipes")]),
-            MenuSpec::new("Output", vec![c("pipeline.output")]),
             MenuSpec::new("Script", vec![MenuItem::label("A step written as a file; edit, save, it runs again"), c("script.new_python"), c("script.new_rust"), c("script.from_file"), MenuItem::Separator, MenuItem::provided("pipeline.plugin_scripts")]),
             MenuSpec::new("Model", vec![MenuItem::provided("pipeline.models")]),
-            MenuSpec::new("View", vec![c("pipeline.fit"), c("pipeline.actual"), MenuItem::Separator, c("pipeline.grid"), c("pipeline.minimap")]),
+            MenuSpec::new("Output", vec![c("pipeline.output")]),
         ]
     }
 
@@ -1162,7 +1177,15 @@ impl Inspector {
                 if names.len() == 3 {
                     options.push(("Colour (all three channels)".into(), Vec::new()));
                 }
-                options.extend(names.iter().enumerate().map(|(i, n)| (SharedString::from(format!("Channel {}: {n}", i + 1)), vec![i])));
+                let processed_map = doc.graph.processed_channels(image, names.len());
+                options.extend(names.iter().enumerate().map(|(i, n)| {
+                    let label = if processed_map.contains_key(&i) {
+                        format!("Channel {}: {n} (preprocessed)", i + 1)
+                    } else {
+                        format!("Channel {}: {n}", i + 1)
+                    };
+                    (SharedString::from(label), vec![i])
+                }));
                 let current = options.iter().position(|(_, c)| c == channels).or_else(|| channels.is_empty().then_some(0));
                 let (store_c, id_c, kind_c) = (self.store.clone(), id.clone(), node.kind.clone());
                 let picks: Vec<Vec<usize>> = options.iter().map(|(_, c)| c.clone()).collect();

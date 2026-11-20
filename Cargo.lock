@@ -7665,6 +7665,7 @@ dependencies = [
  "js-sys",
  "lucem-core",
  "lucem-io",
+ "lucem-ml",
  "prost",
  "prost-build",
  "protox",

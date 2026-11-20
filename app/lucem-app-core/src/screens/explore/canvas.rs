@@ -159,7 +159,7 @@ impl Wand {
         for y in by0..by1 {
             crop.extend(self.mask[y * self.w + bx0..y * self.w + bx1].iter().map(|&v| v as f32));
         }
-        let img = lucem_view::render_layer(&crop, bw, bh, lucem_view::LayerStyle::Mask { color: self.color, alpha: 0.5 });
+        let img = lucem_view::render_layer(&crop, bw, bh, lucem_view::LayerStyle::Mask { color: self.color, alpha: 0.65 });
         let ds = self.ds;
         self.overlay = Some(([(self.x0 + bx0) as f64 * ds, (self.y0 + by0) as f64 * ds, bw as f64 * ds, bh as f64 * ds], img));
     }
@@ -309,6 +309,9 @@ pub struct ImageCanvas {
     live: Option<([f64; 4], Arc<RenderImage>)>,
     /// Outlines of selected brush strokes (traced from their paint), by id and version.
     outlines: std::cell::RefCell<HashMap<String, Vec<Vec<[f64; 2]>>>>,
+    /// The last region whose raw tiles were read for channels drawn from results
+    /// (`level, x0, y0, w, h, plane, channels`), so the readout, probe and wand have their values.
+    prefetched: Option<(usize, usize, usize, usize, usize, usize, Vec<usize>)>,
     /// An image shown whatever is selected (`None`: the selected image).
     pub pinned: Option<String>,
     /// Only this channel is drawn (a cell of the Channels view).
@@ -397,6 +400,7 @@ impl ImageCanvas {
             paint_task: None,
             live: None,
             outlines: Default::default(),
+            prefetched: None,
             pinned: None,
             channel: None,
             compact: false,
@@ -572,12 +576,16 @@ impl ImageCanvas {
         if !self.syncing {
             cx.emit(CanvasEvent::Camera { zoom: self.zoom, center: self.center });
         }
-        if self.results_source {
-            self.refresh = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(200)).await;
-                let _ = this.update(cx, |c, cx| c.request_results(cx));
-            }));
-        }
+        let results = self.results_source;
+        self.refresh = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(200)).await;
+            let _ = this.update(cx, |c, cx| {
+                if results {
+                    c.request_results(cx);
+                }
+                c.prefetch_raw(cx);
+            });
+        }));
     }
 
     /// The Threshold tool's mask over the visible region, recomputed (off the UI thread) when
@@ -641,15 +649,15 @@ impl ImageCanvas {
         };
         let s = self.store.read(cx);
         let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
-        let cells: Vec<lucem_hist::HistObject> = if s.hist.show && ov.annotations { s.hist.cells.get(&v.image).into_iter().chain(s.hist.tiles.get(&v.image)).flatten().cloned().collect() } else { Vec::new() };
-        let key = format!("{}/{}/{}/{}", v.image, s.hist.rev, ov.opacity, s.sel.objects.join(","));
-        // Selected objects, by their index in the list drawn (cells, then tiles)
-        let n_cells = s.hist.cells.get(&v.image).map_or(0, Vec::len);
-        let selected: std::collections::HashSet<usize> = cells.iter().enumerate().filter(|(i, o)| s.sel.objects.contains(&format!("{}{}", if *i < n_cells { "c" } else { "t" }, o.id))).map(|(i, _)| i).collect();
+        let show_any = s.hist.show && ov.annotations;
+        let n_cells = if show_any { s.hist.cells.get(&v.image).map_or(0, Vec::len) } else { 0 };
+        let n_tiles = if show_any { s.hist.tiles.get(&v.image).map_or(0, Vec::len) } else { 0 };
+        let key = format!("{}/{}/{}/{}/{}/{}", v.image, s.hist.rev, n_cells, n_tiles, ov.opacity, s.sel.objects.join(","));
         let (iw, ih) = (v.pyramid.width() as f64, v.pyramid.height() as f64);
         let view = self.visible();
         let ds_view = 1.0 / self.zoom.max(1e-9);
         let (vx0, vy0, vx1, vy1) = (view[0].max(0.0), view[1].max(0.0), (view[0] + view[2]).min(iw), (view[1] + view[3]).min(ih));
+        // Fast path BEFORE touching or cloning any HistObject: zero allocations on steady frames
         if let Some(p) = &self.cells {
             let covers = p.image.is_none() || (p.rect[0] <= vx0 && p.rect[1] <= vy0 && p.rect[0] + p.rect[2] >= vx1 && p.rect[1] + p.rect[3] >= vy1);
             let ratio = p.ds / ds_view;
@@ -668,6 +676,47 @@ impl ImageCanvas {
             return;
         }
         self.cells_want = want;
+        if n_cells == 0 && n_tiles == 0 {
+            if let Some(old) = self.cells.replace(PaintLayer { rect, ds, key, image: None }).and_then(|p| p.image) {
+                self.drops.push(old);
+            }
+            return;
+        }
+        // Viewport-cull BEFORE cloning so 100k+ detected cells never OOM or stall the UI thread
+        const MAX_RASTER_CELLS: usize = 25_000;
+        let sel_set: std::collections::HashSet<&str> = s.sel.objects.iter().map(String::as_str).collect();
+        let mut visible_indices: Vec<(bool, usize)> = Vec::new();
+        if let Some(list) = s.hist.cells.get(&v.image) {
+            for (i, o) in list.iter().enumerate() {
+                let (bx0, by0, bx1, by1) = lucem_hist::polygon::bounds(&o.roi);
+                if bx1 >= x0 && by1 >= y0 && bx0 <= x1 && by0 <= y1 {
+                    visible_indices.push((true, i));
+                }
+            }
+        }
+        if let Some(list) = s.hist.tiles.get(&v.image) {
+            for (i, o) in list.iter().enumerate() {
+                let (bx0, by0, bx1, by1) = lucem_hist::polygon::bounds(&o.roi);
+                if bx1 >= x0 && by1 >= y0 && bx0 <= x1 && by0 <= y1 {
+                    visible_indices.push((false, i));
+                }
+            }
+        }
+        let stride = (visible_indices.len() / MAX_RASTER_CELLS).max(1);
+        let mut cells: Vec<lucem_hist::HistObject> = Vec::with_capacity(visible_indices.len().min(MAX_RASTER_CELLS));
+        let mut selected: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let raw_cells = s.hist.cells.get(&v.image);
+        let raw_tiles = s.hist.tiles.get(&v.image);
+        for (is_cell, idx) in visible_indices.into_iter().step_by(stride) {
+            let obj = if is_cell { raw_cells.and_then(|v| v.get(idx)) } else { raw_tiles.and_then(|v| v.get(idx)) };
+            if let Some(o) = obj {
+                let tag = format!("{}{}", if is_cell { "c" } else { "t" }, o.id);
+                if sel_set.contains(tag.as_str()) {
+                    selected.insert(cells.len());
+                }
+                cells.push(o.clone());
+            }
+        }
         if cells.is_empty() {
             if let Some(old) = self.cells.replace(PaintLayer { rect, ds, key, image: None }).and_then(|p| p.image) {
                 self.drops.push(old);
@@ -837,31 +886,12 @@ impl ImageCanvas {
     /// Starts a wand stroke at `p`: reads the visible region of the visible channels from cache
     /// (falling back to cached coarser LOD tiles so it never blocks the UI thread on wasm32).
     fn start_wand(&mut self, p: [f64; 2], cx: &mut Context<Self>) -> Option<Wand> {
+        let shown = self.shown_channels(cx);
+        let (level, x0, y0, w, h, plane) = self.wand_region()?;
         let v = self.viewer.as_ref()?;
-        let py = v.pyramid.clone();
-        let rect = self.visible();
-        let mut level = py.level_for_zoom(self.zoom * self.scale as f64);
-        // Keep the wand's working buffer <= 1024 px on a side so flood-fill is always instant
-        while level < py.coarsest()
-            && ((rect[2] / py.levels[level].downsample) as usize)
-                .max((rect[3] / py.levels[level].downsample) as usize)
-                > 1024
-        {
-            level += 1;
-        }
-        let l = py.levels[level].clone();
-        let ds = l.downsample;
-        let x0 = (rect[0] / ds).floor().max(0.0) as usize;
-        let y0 = (rect[1] / ds).floor().max(0.0) as usize;
-        let x1 = (((rect[0] + rect[2]) / ds).ceil().max(0.0) as usize).min(l.width);
-        let y1 = (((rect[1] + rect[3]) / ds).ceil().max(0.0) as usize).min(l.height);
-        if x1 <= x0 || y1 <= y0 {
-            return None;
-        }
-        let (w, h) = (x1 - x0, y1 - y0);
-        let plane = self.plane_at(level);
+        let ds = v.pyramid.levels[level].downsample;
         let mut channels = Vec::new();
-        for (c, d) in v.display_docs.iter().enumerate().filter(|(_, d)| d.visible) {
+        for (c, d) in v.display_docs.iter().enumerate().filter(|(c, _)| shown.contains(c)) {
             let cached = v.service.read_region_cached(level, plane, c, x0, y0, w, h);
             #[cfg(not(target_family = "wasm"))]
             let mut raw = match cached {
@@ -877,8 +907,9 @@ impl ImageCanvas {
             channels.push(raw);
         }
         if channels.is_empty() {
+            self.prefetch_raw(cx);
             self.store.update(cx, |s, cx| {
-                s.set_status("Wand: waiting for visible tiles to load (try again in a moment).", cx);
+                s.set_status("Wand: loading the pixels of this view; click again in a moment.", cx);
             });
             return None;
         }
@@ -1132,7 +1163,81 @@ impl ImageCanvas {
         }
         let level = v.pyramid.level_for_zoom(self.zoom * self.scale as f64);
         let ds = v.pyramid.levels[level].downsample;
-        Some((p, level, v.service.sample(level, self.plane_at(level), (p[0] / ds) as usize, (p[1] / ds) as usize)))
+        let mut vals = v.service.sample(level, self.plane_at(level), (p[0] / ds) as usize, (p[1] / ds) as usize);
+        // Not cached at this level yet (or drawn from results): the nearest coarser level that is
+        for l2 in (level + 1)..v.pyramid.levels.len() {
+            if vals.iter().all(Option::is_some) {
+                break;
+            }
+            let d2 = v.pyramid.levels[l2].downsample;
+            let more = v.service.sample(l2, self.plane_at(l2), (p[0] / d2) as usize, (p[1] / d2) as usize);
+            for (a, b) in vals.iter_mut().zip(more) {
+                if a.is_none() {
+                    *a = b;
+                }
+            }
+        }
+        Some((p, level, vals))
+    }
+
+    /// The channels the user shows (processed ones included), or the cell's one channel.
+    fn shown_channels(&self, cx: &App) -> Vec<usize> {
+        let Some(v) = self.viewer.as_ref() else { return Vec::new() };
+        if let Some(only) = self.channel {
+            return vec![only];
+        }
+        self.store.read(cx).doc.image(&v.image).map(|i| i.channels.iter().enumerate().filter(|(_, d)| d.visible).map(|(c, _)| c).collect()).unwrap_or_default()
+    }
+
+    /// The region the wand works on: `level, x0, y0, w, h, plane`, at most 1024 px a side.
+    fn wand_region(&self) -> Option<(usize, usize, usize, usize, usize, usize)> {
+        let py = &self.viewer.as_ref()?.pyramid;
+        let rect = self.visible();
+        let mut level = py.level_for_zoom(self.zoom * self.scale as f64);
+        while level < py.coarsest() && ((rect[2] / py.levels[level].downsample) as usize).max((rect[3] / py.levels[level].downsample) as usize) > 1024 {
+            level += 1;
+        }
+        let l = &py.levels[level];
+        let ds = l.downsample;
+        let x0 = (rect[0] / ds).floor().max(0.0) as usize;
+        let y0 = (rect[1] / ds).floor().max(0.0) as usize;
+        let x1 = (((rect[0] + rect[2]) / ds).ceil().max(0.0) as usize).min(l.width);
+        let y1 = (((rect[1] + rect[3]) / ds).ceil().max(0.0) as usize).min(l.height);
+        (x1 > x0 && y1 > y0).then(|| (level, x0, y0, x1 - x0, y1 - y0, self.plane_at(level)))
+    }
+
+    /// Reads (in the background) the raw tiles of shown channels the tile service does not draw
+    /// (those drawn from their results), so the readout, probe and wand have their values.
+    fn prefetch_raw(&mut self, cx: &mut Context<Self>) {
+        let chans: Vec<usize> = {
+            let Some(v) = self.viewer.as_ref() else { return };
+            self.shown_channels(cx).into_iter().filter(|c| !v.display_docs.get(*c).is_some_and(|d| d.visible)).collect()
+        };
+        if chans.is_empty() {
+            return;
+        }
+        let Some((level, x0, y0, w, h, plane)) = self.wand_region() else { return };
+        let key = (level, x0, y0, w, h, plane, chans.clone());
+        if self.prefetched.as_ref() == Some(&key) {
+            return;
+        }
+        self.prefetched = Some(key);
+        let Some(v) = self.viewer.as_ref() else { return };
+        let reader = v.service.region_reader();
+        let coarsest = v.pyramid.coarsest();
+        let (cw, ch) = (v.pyramid.levels[coarsest].width, v.pyramid.levels[coarsest].height);
+        let cplane = self.plane_at(coarsest);
+        let task = cx.background_spawn(async move {
+            for &c in &chans {
+                let _ = reader.read_region(coarsest, cplane, c, 0, 0, cw, ch);
+                let _ = reader.read_region(level, plane, c, x0, y0, w, h);
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            task.await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
     }
 
     // ------------------------------------------------------------------------
@@ -1880,10 +1985,10 @@ impl Render for ImageCanvas {
         if let Some(t) = &self.threshold {
             overlays.push((t.0, t.1.clone()));
         }
-        if let Some(Gesture::Wand(w)) = &self.gesture
-            && let Some(o) = &w.overlay {
-                overlays.push((o.0, o.1.clone()));
-            }
+        let wand_overlay = match &self.gesture {
+            Some(Gesture::Wand(w)) => w.overlay.clone(),
+            _ => None,
+        };
         let strokes = self.annotation_paths(cx);
         let labels = self.labels(cx);
         let (zoom, center) = (self.zoom, self.center);
@@ -1943,6 +2048,13 @@ impl Render for ImageCanvas {
                     }
                     for st in &strokes {
                         paint_stroke(window, o, st);
+                    }
+                    // Outermost layer: active Magic Wand stroke paints above all channels, results, and annotations
+                    if let Some((r, img)) = wand_overlay {
+                        let sx = ((r[0] - center.0) * zoom + vw as f64 / 2.0) as f32;
+                        let sy = ((r[1] - center.1) * zoom + vh as f64 / 2.0) as f32;
+                        let b = Bounds { origin: point(o.x + px(sx), o.y + px(sy)), size: size(px((r[2] * zoom) as f32), px((r[3] * zoom) as f32)) };
+                        let _ = window.paint_image(bounds, b, Corners::default(), img, 0, false);
                     }
                     if let Some((cx_, cy_)) = crosshair {
                         let (bw, bh) = (bounds.size.width, bounds.size.height);

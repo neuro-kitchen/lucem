@@ -152,6 +152,20 @@ pub async fn fetch_server_table(name: &str) -> Result<ServerTableData, String> {
 }
 
 #[cfg(target_family = "wasm")]
+pub async fn fetch_ml_plugins() -> Result<(Vec<lucem_ml::PluginInfo>, Vec<String>), String> {
+    let v = fetch_json("/api/ml/plugins", "GET", None).await?;
+    let plugins = serde_json::from_value(v.get("plugins").cloned().unwrap_or_default()).map_err(|e| e.to_string())?;
+    let problems = serde_json::from_value(v.get("problems").cloned().unwrap_or_default()).unwrap_or_default();
+    Ok((plugins, problems))
+}
+
+#[cfg(target_family = "wasm")]
+pub async fn install_server_model(program: &str, model: &str) -> Result<(), String> {
+    let body = serde_json::json!({ "program": program, "model": model }).to_string();
+    fetch_json("/api/ml/install", "POST", Some(body)).await.map(|_| ())
+}
+
+#[cfg(target_family = "wasm")]
 pub async fn save_server_recipe(recipe: &crate::data::recipes::Recipe) -> Result<String, String> {
     let body = serde_json::to_string(recipe).map_err(|e| e.to_string())?;
     let v = fetch_json("/api/recipes/save", "POST", Some(body)).await?;

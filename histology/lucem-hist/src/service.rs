@@ -19,7 +19,7 @@ use std::sync::atomic::AtomicBool;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::engine::{apply, Analysis, Ctx, NoModels};
+use crate::engine::{apply, Analysis, Ctx, PluginModels};
 use crate::session::Action;
 
 /// The plugin id a server registers it under.
@@ -73,10 +73,11 @@ fn objects_max() -> usize {
     OBJECTS_MAX
 }
 
-/// The images' analyses, kept between calls.
+/// The images' analyses and warm ML model plugins, kept between calls.
 #[derive(Default)]
 pub struct Service {
     analyses: Mutex<HashMap<PathBuf, Analysis>>,
+    models: Mutex<PluginModels>,
 }
 
 /// A body that does not read, said with the method's name.
@@ -103,9 +104,10 @@ impl Service {
                 if let Some(tissue) = call.tissue {
                     analysis.tissue = tissue;
                 }
-                let (mut models, cancel) = (NoModels, AtomicBool::new(false));
+                let cancel = AtomicBool::new(false);
+                let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
                 let mut progress = |_: &str, _: Option<f32>| {};
-                let mut ctx = Ctx { client: &client, pyramid: &pyramid, z: call.z, models: &mut models, progress: &mut progress, cancel: &cancel };
+                let mut ctx = Ctx { client: &client, pyramid: &pyramid, z: call.z, models: &mut *models, progress: &mut progress, cancel: &cancel };
                 let outcome = apply(&mut ctx, &mut analysis, &call.action);
                 let mut answer = counts(&analysis);
                 // The regions themselves (few, small): the caller shows them as annotations

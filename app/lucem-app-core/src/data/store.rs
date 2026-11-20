@@ -936,6 +936,35 @@ impl Store {
             return;
         }
         self.ml.scanning = true;
+        // A page: the plugins are the server's
+        #[cfg(target_family = "wasm")]
+        {
+            if crate::data::remote::runs_alone() {
+                self.ml.scanning = false;
+                self.ml.scanned = true;
+                cx.notify();
+                return;
+            }
+            cx.spawn(async move |this, cx| {
+                let r = crate::data::server_api::fetch_ml_plugins().await;
+                let _ = this.update(cx, |s, cx| {
+                    s.ml.scanning = false;
+                    s.ml.scanned = true;
+                    match r {
+                        Ok((plugins, problems)) => {
+                            s.ml.set_plugins(plugins);
+                            s.ml.problems = problems;
+                        }
+                        Err(e) => s.ml.problems = vec![format!("server: {e}")],
+                    }
+                    cx.emit(AppEvent::Status);
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
+        #[allow(unreachable_code)]
         let task = cx.background_spawn(async move { lucem_ml::discover() });
         cx.spawn(async move |this, cx| {
             let found = task.await;
@@ -986,6 +1015,25 @@ impl Store {
 
     /// Downloads and verifies a model's weights through its plugin.
     pub fn install_model(&mut self, program: String, model: String, cx: &mut Context<Self>) {
+        #[cfg(target_family = "wasm")]
+        if !crate::data::remote::runs_alone() {
+            self.ml.busy = Some((format!("Installing {model} on the server"), None));
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let r = crate::data::server_api::install_server_model(&program, &model).await;
+                let _ = this.update(cx, |s, cx| {
+                    s.ml.busy = None;
+                    match r {
+                        Ok(()) => s.set_status(format!("{model} installed on the server"), cx),
+                        Err(e) => s.set_status(format!("{model}: {e}"), cx),
+                    }
+                    s.scan_plugins(cx);
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
         let label = format!("Installing {model}");
         self.ml_job(
             program,

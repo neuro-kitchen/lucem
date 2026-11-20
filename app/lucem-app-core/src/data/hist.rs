@@ -374,7 +374,9 @@ pub(crate) fn hashed_color(name: &str) -> [u8; 3] {
 /// filled in their colour, cell outlines drawn. `None` when no cell is there.
 /// Selected objects (`selected`: their indices) are outlined in white.
 pub fn cells_raster(cells: &[HistObject], color: &dyn Fn(&HistObject) -> [u8; 3], rect: [f64; 4], ds: f64, alpha: f32, selected: &std::collections::HashSet<usize>) -> Option<Arc<RenderImage>> {
-    let (w, h) = (((rect[2] / ds).ceil() as usize).max(1), ((rect[3] / ds).ceil() as usize).max(1));
+    // Cap raster buffer to <= 1024 px per side so large viewports never allocate oversized RGBA buffers
+    let ds = ds.max(rect[2].max(rect[3]) / 1024.0);
+    let (w, h) = (((rect[2] / ds).ceil() as usize).clamp(1, 1024), ((rect[3] / ds).ceil() as usize).clamp(1, 1024));
     let origin = [rect[0], rect[1]];
     let inside: Vec<(usize, &HistObject)> = cells
         .iter()

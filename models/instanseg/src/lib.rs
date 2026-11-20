@@ -244,6 +244,8 @@ pub fn device() -> Result<Device, String> {
         "cuda" => Ok(Device::cuda(0)),
         #[cfg(feature = "cpu")]
         "cpu" => Ok(Device::cpu()),
+        #[cfg(feature = "cuda")]
+        "" | "auto" if !cfg!(target_os = "linux") || Path::new("/proc/driver/nvidia/version").exists() => Ok(Device::cuda(0)),
         #[cfg(feature = "wgpu")]
         "" | "auto" | "wgpu" | "vulkan" => Ok(Device::wgpu(DeviceKind::DefaultDevice)),
         other => Err(format!("LUCEM_RUNTIME={other:?}: this build runs on {}", runtimes().join(", "))),
@@ -446,6 +448,8 @@ impl InstanSeg {
         let step = t.tile.max(net::DIVISOR);
         let (ny, nx) = (h.div_ceil(step), w.div_ceil(step));
         let mut computed = 0usize;
+        let mut input_buf: Vec<f32> = Vec::new();
+        let want_timing = timing();
         for ty in 0..ny {
             for tx in 0..nx {
                 let t0 = Instant::now();
@@ -455,40 +459,48 @@ impl InstanSeg {
                 let (ry1, rx1) = ((y1 + t.halo).min(h), (x1 + t.halo).min(w));
                 let (rh, rw) = (ry1 - ry0, rx1 - rx0);
                 let (ph, pw) = (rh.div_ceil(SHAPE_STEP) * SHAPE_STEP, rw.div_ceil(SHAPE_STEP) * SHAPE_STEP);
-                let mut input = vec![0f32; nc * ph * pw];
+                input_buf.resize(nc * ph * pw, 0.0);
                 for c in 0..nc {
+                    let plane_off = c * w * h;
+                    let dst_c = c * ph * pw;
                     for y in 0..ph {
                         let sy = ry0 + reflect(y, rh);
+                        let src_row = plane_off + sy * w;
+                        let dst_row = dst_c + y * pw;
                         for x in 0..pw {
-                            input[(c * ph + y) * pw + x] = planes[c * w * h + sy * w + rx0 + reflect(x, rw)];
+                            input_buf[dst_row + x] = planes[src_row + rx0 + reflect(x, rw)];
                         }
                     }
                 }
                 computed += ph * pw;
                 times.prepare += ms(t0);
                 // The tile through the network: its output, and the ms of compute and readback
-                let attempt = || -> Result<(Vec<f32>, f64, f64), String> {
+                let attempt = |buf: &[f32]| -> Result<(Vec<f32>, f64, f64), String> {
                     let t1 = Instant::now();
                     // In the network's precision on the wire: half the bytes up and back in F16
-                    let data = TensorData::new(input.clone(), [1, nc, ph, pw]);
-                    // Created in that dtype: `from_data` would otherwise convert to the device's default
                     let x = match self.precision {
-                        Precision::F32 => Tensor::<4>::from_data(data, &self.device),
-                        Precision::F16 => Tensor::<4>::from_data(data.convert::<burn::tensor::f16>(), (&self.device, burn::tensor::DType::F16)),
+                        Precision::F32 => Tensor::<4>::from_data(TensorData::new(buf.to_vec(), [1, nc, ph, pw]), &self.device),
+                        Precision::F16 => {
+                            let halfs: Vec<burn::tensor::f16> = buf.iter().map(|&v| burn::tensor::f16::from_f32(v)).collect();
+                            Tensor::<4>::from_data(TensorData::new(halfs, [1, nc, ph, pw]), (&self.device, burn::tensor::DType::F16))
+                        }
                     };
                     let y = self.model.fcn.forward(x);
-                    self.device.sync().map_err(|e| format!("the device: {e:?}"))?;
+                    // Only insert an explicit barrier when profiling phases; try_into_data synchronizes on readback.
+                    if want_timing {
+                        self.device.sync().map_err(|e| format!("the device: {e:?}"))?;
+                    }
                     let compute = ms(t1);
                     let t2 = Instant::now();
                     let y = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
                     Ok((y, compute, ms(t2)))
                 };
                 // A matrix product this device cannot launch: Burn's own convolutions from now on
-                let (y, compute, readback) = match attempt() {
+                let (y, compute, readback) = match attempt(&input_buf) {
                     Ok(r) => r,
                     Err(e) if crate::gemm_cannot_launch(&e) && net::disable_gemm() => {
                         eprintln!("instanseg: the matrix-product convolutions failed on this device, using Burn's own ({e})");
-                        attempt().map_err(crate::explain)?
+                        attempt(&input_buf).map_err(crate::explain)?
                     }
                     Err(e) => return Err(crate::explain(e)),
                 };

@@ -19,7 +19,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex, Disableable as _, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{div, img, px, AnyElement, App, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
+use gpui_kit::{canvas, div, img, point, px, AnyElement, App, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, PathBuilder, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
 use lucem_pipeline::{Op, PortType};
 
 use crate::data::store::{MaskOperation, Store};
@@ -30,6 +30,103 @@ use crate::screens::explore::canvas::ImageCanvas;
 use crate::screens::pipeline::catalog::{operations, Template};
 use crate::ui::theme::{self, color};
 use crate::ui::widgets::group_digits;
+
+/// Miniature 18×18 LOD silhouette preview of a shape's actual geometry for the Shapes list.
+fn shape_preview_mark(shape: &Shape, rgb: [u8; 3]) -> AnyElement {
+    let col = theme::rgb8(rgb);
+    let (pts, closed, is_point): (Vec<[f64; 2]>, bool, bool) = match shape {
+        Shape::Rect { x, y, w, h } => (vec![[*x, *y], [x + w, *y], [x + w, y + h], [*x, y + h]], true, false),
+        Shape::Ellipse { cx, cy, rx, ry } => {
+            let n = 20;
+            let p = (0..n)
+                .map(|i| {
+                    let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                    [cx + rx * a.cos(), cy + ry * a.sin()]
+                })
+                .collect();
+            (p, true, false)
+        }
+        Shape::Polygon { points } | Shape::Freehand { points } => {
+            let step = (points.len() / 32).max(1);
+            (points.iter().step_by(step).copied().collect(), true, false)
+        }
+        Shape::Stroke { points, .. } => {
+            let step = (points.len() / 24).max(1);
+            (points.iter().step_by(step).copied().collect(), false, false)
+        }
+        Shape::Line { x0, y0, x1, y1 } => (vec![[*x0, *y0], [*x1, *y1]], false, false),
+        Shape::Point { x, y } => (vec![[*x, *y]], false, true),
+    };
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in &pts {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    let span = (x1 - x0).max(y1 - y0).max(1e-6);
+    let norm: Vec<(f32, f32)> = if is_point {
+        vec![(0.5, 0.5)]
+    } else {
+        let ox = (span - (x1 - x0)) * 0.5;
+        let oy = (span - (y1 - y0)) * 0.5;
+        pts.iter().map(|p| (((p[0] - x0 + ox) / span) as f32, ((p[1] - y0 + oy) / span) as f32)).collect()
+    };
+    div()
+        .flex_none()
+        .size(px(18.))
+        .rounded(px(4.))
+        .bg(color::canvas())
+        .border_1()
+        .border_color(color::border())
+        .overflow_hidden()
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let pad = 3.0_f32;
+                    let w = (bounds.size.width.as_f32() - 2.0 * pad).max(1.0);
+                    let h = (bounds.size.height.as_f32() - 2.0 * pad).max(1.0);
+                    let ox = bounds.origin.x.as_f32() + pad;
+                    let oy = bounds.origin.y.as_f32() + pad;
+                    if is_point {
+                        let c = point(px(ox + w * 0.5), px(oy + h * 0.5));
+                        let r = 2.5_f32;
+                        let ring: Vec<_> = (0..12)
+                            .map(|i| {
+                                let a = i as f32 / 12.0 * std::f32::consts::TAU;
+                                point(c.x + px(r * a.cos()), c.y + px(r * a.sin()))
+                            })
+                            .collect();
+                        let mut b = PathBuilder::fill();
+                        b.add_polygon(&ring, true);
+                        if let Ok(path) = b.build() {
+                            window.paint_path(path, col);
+                        }
+                        return;
+                    }
+                    if norm.len() < 2 {
+                        return;
+                    }
+                    let screen: Vec<_> = norm.iter().map(|&(nx, ny)| point(px(ox + nx * w), px(oy + ny * h))).collect();
+                    if closed && screen.len() >= 3 {
+                        let mut bf = PathBuilder::fill();
+                        bf.add_polygon(&screen, true);
+                        if let Ok(path) = bf.build() {
+                            window.paint_path(path, col.opacity(0.28));
+                        }
+                    }
+                    let mut bs = PathBuilder::stroke(px(1.25));
+                    bs.add_polygon(&screen, closed);
+                    if let Ok(path) = bs.build() {
+                        window.paint_path(path, col);
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
 
 /// Thumbnail of a result at the top level of a group, and the icon / dot of other rows.
 const THUMB: f32 = 28.;
@@ -571,11 +668,37 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
     // Annotations by class (every class: they are managed here), each annotation a row
     let all: Vec<&Annotation> = s.doc.annotations_of(&image).collect();
     // The hierarchy: how many cells each region holds (with the regions inside it)
-    let cells = s.hist.cells.get(&image).cloned().unwrap_or_default();
+    let cells: &[lucem_hist::HistObject] = s.hist.cells.get(&image).map_or(&[], Vec::as_slice);
+    let has_cells = !cells.is_empty();
     let hier = s.hierarchy(&image);
     let cells_in = |id: &str| hier.in_subtree.get(id).copied().unwrap_or(0);
     let key = format!("annotations:{image}");
-    list = list.child(row(store, Row { key: key.clone(), depth: 0, fold: Some(open(&key)), mark: icon_mark(IconName::Shapes, None), name: "Shapes".into(), kind: group_digits(all.len()), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None }));
+    let all_ids: Vec<String> = all.iter().map(|a| a.id.clone()).collect();
+    let st_show_all = store.clone();
+    let show_all_btn = (!all.is_empty()).then(|| {
+        Button::new("layers-shapes-show-all")
+            .ghost()
+            .xsmall()
+            .label("Show all")
+            .tooltip("Show all shape classes and select all shapes")
+            .on_click(move |_, _, cx| {
+                let ids = all_ids.clone();
+                st_show_all.update(cx, |s, cx| {
+                    let hidden: Vec<ClassDoc> = s.doc.classes.iter().filter(|c| !c.visible).cloned().collect();
+                    for mut cls in hidden {
+                        cls.visible = true;
+                        let _ = s.execute(Command::SetClass { class: cls }, cx);
+                    }
+                    s.select(ids, cx);
+                });
+            })
+    });
+    list = list.child(
+        h_flex()
+            .items_center()
+            .child(div().flex_1().min_w_0().child(row(store, Row { key: key.clone(), depth: 0, fold: Some(open(&key)), mark: icon_mark(IconName::Shapes, None), name: "Shapes".into(), kind: group_digits(all.len()), selected: false, visible: None, on_eye: None, on_click: Box::new(noop), menu: None })))
+            .children(show_all_btn),
+    );
     if open(&key) {
         // Classes with annotations first; the empty ones folded under one row (closed by default),
         // Measurement (the rulers' class) only when it has rulers
@@ -707,26 +830,46 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
             if of.is_empty() || !open(&layer) {
                 continue;
             }
-            for a in of.iter().rev().take(MAX_ROWS) {
-                let (label, icon) = shape_label(&a.shape);
-                let n_cells = if a.shape.is_region() && !cells.is_empty() { cells_in(&a.id) } else { 0 };
+            let displayed_ids: Vec<String> = of.iter().rev().take(MAX_ROWS).map(|a| a.id.clone()).collect();
+            for (row_idx, a) in of.iter().rev().take(MAX_ROWS).enumerate() {
+                let (label, _icon) = shape_label(&a.shape);
+                let n_cells = if a.shape.is_region() && has_cells { cells_in(&a.id) } else { 0 };
                 let plane = [a.z.map(|z| format!("z {z}")), (n_cells > 0).then(|| format!("{} cells", group_digits(n_cells)))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-                let (st, cv, ann) = (store.clone(), canvas.clone(), (**a).clone());
+                let (st, cv, ann, siblings) = (store.clone(), canvas.clone(), (**a).clone(), displayed_ids.clone());
                 list = list.child(row(
                     store,
                     Row {
                         key: format!("ann:{}", a.id),
                         depth: 2,
                         fold: None,
-                        mark: icon_mark(icon, Some(c.color)),
+                        mark: shape_preview_mark(&a.shape, c.color),
                         name: if a.note.is_empty() { format!("{label} {}", a.id) } else { a.note.clone() },
                         kind: plane,
                         selected: s.sel.shapes.contains(&a.id),
                         visible: None,
                         on_eye: None,
                         on_click: Box::new(move |e, cx| {
-                            let additive = e.modifiers().shift || e.modifiers().control || e.modifiers().platform;
-                            reveal(&st, &cv, &ann, additive, cx)
+                            if e.modifiers().shift {
+                                // Shift-click range selection from the last selected shape in this class
+                                st.update(cx, |s, cx| {
+                                    let anchor = s.sel.shapes.iter().rev().find_map(|id| siblings.iter().position(|x| x == id));
+                                    if let Some(a_idx) = anchor {
+                                        let (lo, hi) = (a_idx.min(row_idx), a_idx.max(row_idx));
+                                        let mut next = s.sel.shapes.clone();
+                                        for id in &siblings[lo..=hi] {
+                                            next.insert(id.clone());
+                                        }
+                                        s.select(next, cx);
+                                        return;
+                                    }
+                                    let mut next = s.sel.shapes.clone();
+                                    next.insert(ann.id.clone());
+                                    s.select(next, cx);
+                                });
+                            } else {
+                                let additive = e.modifiers().control || e.modifiers().platform;
+                                reveal(&st, &cv, &ann, additive, cx);
+                            }
                         }),
                         menu: Some(annotation_menu(store, a, s)),
                     },
@@ -768,7 +911,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
 
     // Detections: the cells and tiles found, by class (thousands: drawn as a raster, listed here
     // by class; each one is in the Analyze workspace, under the region it belongs to)
-    let tiles = s.hist.tiles.get(&image).cloned().unwrap_or_default();
+    let tiles: &[lucem_hist::HistObject] = s.hist.tiles.get(&image).map_or(&[], Vec::as_slice);
     if !cells.is_empty() || !tiles.is_empty() {
         let key = format!("detections:{image}");
         let shown = s.hist.show;
@@ -796,7 +939,7 @@ pub fn panel(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, cx: &App) -> A
             },
         ));
         if open(&key) {
-            for (what, objects, icon) in [("Cells", &cells, IconName::Sparkles), ("Tiles", &tiles, IconName::Grid3x3)] {
+            for (what, objects, icon) in [("Cells", cells, IconName::Sparkles), ("Tiles", tiles, IconName::Grid3x3)] {
                 if objects.is_empty() {
                     continue;
                 }

@@ -489,6 +489,42 @@ pub async fn handle(request: hyper::Request<Incoming>, data_root: &Path) -> Repl
                 Err(e) => json_reply(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e.to_string()})),
             }
         }
+        (Method::GET, "/api/ml/plugins") => {
+            let found = tokio::task::spawn_blocking(lucem_ml::discover).await.unwrap_or_default();
+            let mut plugins = Vec::new();
+            let mut problems = Vec::new();
+            for r in found {
+                match r {
+                    Ok(p) => plugins.push(serde_json::to_value(p).unwrap_or_default()),
+                    Err(e) => problems.push(e),
+                }
+            }
+            json_reply(StatusCode::OK, json!({"plugins": plugins, "problems": problems}))
+        }
+        (Method::POST, "/api/ml/install") => {
+            let body = match request.into_body().collect().await {
+                Ok(b) => b.to_bytes(),
+                Err(e) => return json_reply(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+            };
+            let req: Value = serde_json::from_slice(&body).unwrap_or_default();
+            let program = req.get("program").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let model = req.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let r = tokio::task::spawn_blocking(move || -> Result<(), String> {
+                // Only a plugin the server itself discovered may be started
+                let known = lucem_ml::discover().into_iter().filter_map(Result::ok).any(|p| p.program == program);
+                if !known {
+                    return Err("not a model plugin of this server".into());
+                }
+                let mut proc = lucem_ml::PluginProcess::start(&program)?;
+                proc.request(&lucem_ml::Request::Install { model }, &mut |_, _| {}).map(|_| ())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            match r {
+                Ok(()) => json_reply(StatusCode::OK, json!({"ok": true})),
+                Err(e) => json_reply(StatusCode::BAD_REQUEST, json!({"error": e})),
+            }
+        }
         (Method::GET, "/api/analyze/tables") => {
             let root = data_root.to_path_buf();
             let tables = tokio::task::spawn_blocking(move || collect_tables(&root)).await.unwrap_or_default();
