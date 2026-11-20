@@ -367,13 +367,30 @@ fn measure(img: &CellImage, nuclei: &[u32], cells: &[u32], n: u32, expanded: boo
             }
         }
     }
-    let nucleus_polys: std::collections::HashMap<u32, Polygon> = polygon::trace_labels(nuclei, w, h, img.origin, img.downsample).into_iter().map(|(l, p)| (l, smooth(&p, img.downsample))).collect();
-    let cell_polys: std::collections::HashMap<u32, Polygon> = if expanded { polygon::trace_labels(cells, w, h, img.origin, img.downsample).into_iter().map(|(l, p)| (l, smooth(&p, img.downsample))).collect() } else { Default::default() };
+    let trace_and_smooth = |labels: &[u32]| -> std::collections::HashMap<u32, Polygon> {
+        let raw = polygon::trace_labels(labels, w, h, img.origin, img.downsample);
+        #[cfg(not(target_family = "wasm"))]
+        {
+            use rayon::prelude::*;
+            raw.into_par_iter().map(|(l, p)| (l, smooth(&p, img.downsample))).collect()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            raw.into_iter().map(|(l, p)| (l, smooth(&p, img.downsample))).collect()
+        }
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let (nucleus_polys, cell_polys) = if expanded {
+        rayon::join(|| trace_and_smooth(nuclei), || trace_and_smooth(cells))
+    } else {
+        (trace_and_smooth(nuclei), Default::default())
+    };
+    #[cfg(target_family = "wasm")]
+    let (nucleus_polys, cell_polys) = (trace_and_smooth(nuclei), if expanded { trace_and_smooth(cells) } else { Default::default() });
     let um = img.pixel_um;
     let px_area = img.um_per_px().powi(2);
-    let mut out = Vec::with_capacity(n as usize);
-    for l in 1..=n {
-        let Some(nuc) = nucleus_polys.get(&l).cloned() else { continue };
+    let build_one = |l: u32| -> Option<HistObject> {
+        let nuc = nucleus_polys.get(&l)?.clone();
         let li = l as usize;
         let m = mom[li];
         let mut o = HistObject::new(l, if expanded { ObjectKind::Cell } else { ObjectKind::Detection }, cell_polys.get(&l).cloned().unwrap_or_else(|| nuc.clone()));
@@ -414,9 +431,17 @@ fn measure(img: &CellImage, nuclei: &[u32], cells: &[u32], n: u32, expanded: boo
             }
         }
         o.nucleus = Some(nuc);
-        out.push(o);
+        Some(o)
+    };
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use rayon::prelude::*;
+        (1..=n).into_par_iter().filter_map(build_one).collect()
     }
-    out
+    #[cfg(target_family = "wasm")]
+    {
+        (1..=n).filter_map(build_one).collect()
+    }
 }
 
 #[cfg(test)]

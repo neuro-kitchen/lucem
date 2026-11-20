@@ -208,6 +208,13 @@ impl FigureView {
         let Some(pyr) = self.store.read(cx).pyramids.get(&img_id).cloned() else { return };
         if let Some(p) = self.doc.panels.get_mut(idx) {
             zoom_panel_region(p, factor, pyr.width() as f64, pyr.height() as f64);
+            if self.doc.link_views {
+                let (reg, lbl) = (p.region, p.region_label.clone());
+                for other in &mut self.doc.panels {
+                    other.region = reg;
+                    other.region_label = lbl.clone();
+                }
+            }
             cx.notify();
         }
     }
@@ -217,8 +224,28 @@ impl FigureView {
         let Some(pyr) = self.store.read(cx).pyramids.get(&img_id).cloned() else { return };
         if let Some(p) = self.doc.panels.get_mut(idx) {
             pan_panel_region(p, dx_frac, dy_frac, pyr.width() as f64, pyr.height() as f64);
+            if self.doc.link_views {
+                let (reg, lbl) = (p.region, p.region_label.clone());
+                for other in &mut self.doc.panels {
+                    other.region = reg;
+                    other.region_label = lbl.clone();
+                }
+            }
             cx.notify();
         }
+    }
+
+    pub(crate) fn fit_panel(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.doc.link_views {
+            for p in &mut self.doc.panels {
+                p.region = None;
+                p.region_label = "Full slide".into();
+            }
+        } else if let Some(p) = self.doc.panels.get_mut(idx) {
+            p.region = None;
+            p.region_label = "Full slide".into();
+        }
+        cx.notify();
     }
 
     pub(crate) fn sync_crop_to_all(&mut self, idx: usize, cx: &mut Context<Self>) {

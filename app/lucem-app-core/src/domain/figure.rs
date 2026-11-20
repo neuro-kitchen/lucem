@@ -120,6 +120,8 @@ pub struct FigureDoc {
     pub cols: usize,
     pub gap_px: usize,
     pub show_letters: bool,
+    /// When true, zooming/panning one panel orchestrates all panels on the artboard in lockstep.
+    pub link_views: bool,
     pub panels: Vec<FigurePanel>,
     pub selected: Option<usize>,
     pub next_id: usize,
@@ -134,6 +136,7 @@ impl Default for FigureDoc {
             cols: 3,
             gap_px: 12,
             show_letters: true,
+            link_views: true,
             panels: Vec::new(),
             selected: None,
             next_id: 1,

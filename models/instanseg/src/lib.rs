@@ -479,8 +479,12 @@ impl InstanSeg {
 
         let mut done = 0usize;
         for chunk in specs.chunks(MAX_BATCH) {
-            let bsz = chunk.len();
+            let actual = chunk.len();
+            // Canonical batch size ∈ {1, MAX_BATCH}: never emit bsz=2 or 3 so CubeCL never
+            // re-autotunes on partial tail batches.
+            let bsz = if actual == 1 { 1 } else { MAX_BATCH };
             let t0 = Instant::now();
+            batch_buf.clear();
             batch_buf.resize(bsz * tile_elems, 0.0);
             for (bi, sp) in chunk.iter().enumerate() {
                 let base = bi * tile_elems;
@@ -542,7 +546,7 @@ impl InstanSeg {
                 }
             }
             times.prepare += ms(t3);
-            done += bsz;
+            done += actual;
             progress(done, total);
         }
         times.tiles += ny * nx;

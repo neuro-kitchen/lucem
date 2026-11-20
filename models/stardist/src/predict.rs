@@ -136,7 +136,11 @@ pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Ti
     let d_stride = N_RAYS * tgh * tgw;
 
     for chunk in specs.chunks(MAX_BATCH) {
-        let bsz = chunk.len();
+        let actual = chunk.len();
+        // Canonical batch size ∈ {1, MAX_BATCH}: pad tail batches (2 or 3 tiles) to MAX_BATCH so
+        // CubeCL only ever autotunes 2 shapes total (`[1, C, 512, 512]` and `[4, C, 512, 512]`).
+        let bsz = if actual == 1 { 1 } else { MAX_BATCH };
+        batch_buf.clear();
         batch_buf.resize(bsz * tile_elems, 0.0);
         for (bi, sp) in chunk.iter().enumerate() {
             let base = bi * tile_elems;
@@ -196,7 +200,7 @@ pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Ti
                 }
             }
         }
-        done += bsz;
+        done += actual;
         progress(done, total);
     }
     if prob.iter().all(|&p| p == 0.0) {

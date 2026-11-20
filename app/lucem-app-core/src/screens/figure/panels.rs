@@ -101,6 +101,19 @@ pub fn top_toolbar(view: &FigureView, has_image: bool, cx: &mut Context<FigureVi
                         }))
                 })),
         )
+        .child(
+            Button::new("fig-link-views")
+                .ghost()
+                .xsmall()
+                .selected(view.doc.link_views)
+                .icon(if view.doc.link_views { IconName::Link } else { IconName::Unlink })
+                .label(if view.doc.link_views { "Linked zoom" } else { "Single view" })
+                .tooltip("When linked, zooming or panning any panel updates all panels together")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.doc.link_views = !this.doc.link_views;
+                    cx.notify();
+                })),
+        )
         .child(div().flex_1())
         .when_some(view.status_note.clone(), |d, msg| d.child(div().text_xs().text_color(color::text_muted()).child(msg)))
         .child(
@@ -570,13 +583,7 @@ pub fn right_inspector(
                                 .xsmall()
                                 .label("Fit")
                                 .tooltip("Reset to full slide")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(panel) = this.doc.panels.get_mut(sel_idx) {
-                                        panel.region = None;
-                                        panel.region_label = "Full slide".into();
-                                        cx.notify();
-                                    }
-                                })),
+                                .on_click(cx.listener(move |this, _, _, cx| this.fit_panel(sel_idx, cx))),
                         )
                         .child(
                             Button::new("fig-zoom-in")
