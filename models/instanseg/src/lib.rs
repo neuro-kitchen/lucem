@@ -441,7 +441,10 @@ impl InstanSeg {
 
     /// [`Self::network`], adding where its time went to `times`.
     pub fn network_timed(&self, planes: &[f32], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize), times: &mut Timings) -> Result<Vec<f32>, String> {
-        const MAX_BATCH: usize = 4;
+        // Default batch=1 keeps peak VRAM low on shared 8 GB desktop/browser GPUs (zero PCIe
+        // VRAM swapping) with ONE canonical shape `[1, C, 512, 512]`. Set `LUCEM_ML_BATCH=4` on
+        // dedicated high-VRAM servers for 4-tile volume batching.
+        let max_batch: usize = std::env::var("LUCEM_ML_BATCH").ok().and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 8);
         let no = self.config.outputs();
         let nc = self.config.channels;
         let mut out = vec![0f32; no * w * h];
@@ -478,11 +481,10 @@ impl InstanSeg {
         }
 
         let mut done = 0usize;
-        for chunk in specs.chunks(MAX_BATCH) {
+        for chunk in specs.chunks(max_batch) {
             let actual = chunk.len();
-            // Canonical batch size ∈ {1, MAX_BATCH}: never emit bsz=2 or 3 so CubeCL never
-            // re-autotunes on partial tail batches.
-            let bsz = if actual == 1 { 1 } else { MAX_BATCH };
+            // Canonical batch size ∈ {1, max_batch}: never emit partial tail batch sizes.
+            let bsz = if actual == 1 { 1 } else { max_batch };
             let t0 = Instant::now();
             batch_buf.clear();
             batch_buf.resize(bsz * tile_elems, 0.0);

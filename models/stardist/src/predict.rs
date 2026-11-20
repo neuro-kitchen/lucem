@@ -95,7 +95,10 @@ pub fn normalize(pixels: &[u8], w: usize, h: usize, c: usize) -> Vec<f32> {
 /// (`[B, C, canon, canon]`, `B <= 4`) so CubeCL autotunes once and GPU SMs run tiles in parallel
 /// at a fraction of the VRAM of a monolithic tile; `progress(done, total)`.
 pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize)) -> Result<GridOutput, String> {
-    const MAX_BATCH: usize = 4;
+    // Default batch=1 keeps peak VRAM ~250 MiB on shared 8 GB desktop/browser GPUs (zero PCIe
+    // VRAM swapping) with ONE canonical shape `[1, C, 512, 512]`. High-VRAM servers can set
+    // `LUCEM_ML_BATCH=4` for 4-tile volume batching.
+    let max_batch: usize = std::env::var("LUCEM_ML_BATCH").ok().and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 8);
     let (gh, gw) = (h.div_ceil(GRID), w.div_ceil(GRID));
     let mut prob = vec![0f32; gh * gw];
     let mut dist = vec![0f32; gh * gw * N_RAYS];
@@ -135,11 +138,11 @@ pub fn predict_grid(net: &StarDistNet, planes: &[f32], w: usize, h: usize, t: Ti
     let p_stride = tgh * tgw;
     let d_stride = N_RAYS * tgh * tgw;
 
-    for chunk in specs.chunks(MAX_BATCH) {
+    for chunk in specs.chunks(max_batch) {
         let actual = chunk.len();
-        // Canonical batch size ∈ {1, MAX_BATCH}: pad tail batches (2 or 3 tiles) to MAX_BATCH so
-        // CubeCL only ever autotunes 2 shapes total (`[1, C, 512, 512]` and `[4, C, 512, 512]`).
-        let bsz = if actual == 1 { 1 } else { MAX_BATCH };
+        // Canonical batch size ∈ {1, max_batch}: pad tail batches to max_batch so CubeCL only ever
+        // autotunes at most 2 shapes total.
+        let bsz = if actual == 1 { 1 } else { max_batch };
         batch_buf.clear();
         batch_buf.resize(bsz * tile_elems, 0.0);
         for (bi, sp) in chunk.iter().enumerate() {
