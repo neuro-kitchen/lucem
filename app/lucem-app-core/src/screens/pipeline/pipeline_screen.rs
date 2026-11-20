@@ -590,7 +590,10 @@ impl Inspector {
     /// of its last run marked on their lines.
     fn script_code(&mut self, id: &str, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.code.as_ref().is_none_or(|c| c.path != path) {
+            #[cfg(not(target_family = "wasm"))]
             let text = std::fs::read_to_string(path).unwrap_or_default();
+            #[cfg(target_family = "wasm")]
+            let text = String::from("# Loading script from server…\n");
             let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or_default();
             let view = cx.new(|cx| CodeView::new(CodeLanguage::from_name(ext), text.clone(), window, cx).editable(true));
             let sub = cx.subscribe(&view, |this, _, e: &CodeChanged, cx| {
@@ -600,6 +603,25 @@ impl Inspector {
                 cx.notify();
             });
             self.code = Some(ScriptCode { path: path.to_string(), view, saved: text, error: None, dirty: false, _sub: sub });
+            #[cfg(target_family = "wasm")]
+            if !crate::data::remote::runs_alone() {
+                let p = path.to_string();
+                cx.spawn_in(window, async move |this, cx| {
+                    if let Ok(content) = crate::data::server_api::read_server_script(&p).await {
+                        let _ = this.update_in(cx, |insp, window, cx| {
+                            if let Some(c) = &mut insp.code
+                                && c.path == p
+                            {
+                                c.saved = content.clone();
+                                c.dirty = false;
+                                c.view.update(cx, |v, cx| v.set_text(content, window, cx));
+                                cx.notify();
+                            }
+                        });
+                    }
+                })
+                .detach();
+            }
         }
         let error = self.store.read(cx).analysis.as_ref().and_then(|a| a.errors.get(id).cloned());
         if let Some(c) = &mut self.code
@@ -616,18 +638,49 @@ impl Inspector {
     fn save_script(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(c) = &mut self.code else { return };
         let text = c.view.read(cx).text(cx);
-        match std::fs::write(&c.path, &text) {
-            Ok(()) => {
-                c.saved = text;
-                c.dirty = false;
-                self.store.update(cx, |s, cx| s.reload_script(id, cx));
-            }
-            Err(e) => {
-                let msg = format!("Could not save {}: {e}", crate::domain::paths::short_path(std::path::Path::new(&c.path)));
-                self.store.update(cx, |s, cx| s.set_status(msg, cx));
-            }
+        #[cfg(target_family = "wasm")]
+        {
+            let path = c.path.clone();
+            let saved_text = text.clone();
+            let store = self.store.clone();
+            let _ = id;
+            cx.spawn(async move |this, cx| {
+                match crate::data::server_api::write_server_script(&path, &saved_text).await {
+                    Ok(()) => {
+                        let _ = this.update(cx, |insp, cx| {
+                            if let Some(c) = &mut insp.code
+                                && c.path == path
+                            {
+                                c.saved = saved_text;
+                                c.dirty = false;
+                            }
+                            cx.notify();
+                        });
+                        store.update(cx, |s, cx| s.set_status(format!("Saved {path} on server"), cx));
+                    }
+                    Err(e) => {
+                        store.update(cx, |s, cx| s.set_status(format!("Could not save {path}: {e}"), cx));
+                    }
+                }
+            })
+            .detach();
+            return;
         }
-        cx.notify();
+        #[cfg(not(target_family = "wasm"))]
+        {
+            match std::fs::write(&c.path, &text) {
+                Ok(()) => {
+                    c.saved = text;
+                    c.dirty = false;
+                    self.store.update(cx, |s, cx| s.reload_script(id, cx));
+                }
+                Err(e) => {
+                    let msg = format!("Could not save {}: {e}", crate::domain::paths::short_path(std::path::Path::new(&c.path)));
+                    self.store.update(cx, |s, cx| s.set_status(msg, cx));
+                }
+            }
+            cx.notify();
+        }
     }
 
     /// Puts back the text on disk.

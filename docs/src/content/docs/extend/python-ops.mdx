@@ -1,0 +1,95 @@
+---
+title: Drop-in Python & Rust ops
+description: Write a single-file Python or Rust operation that appears automatically in Lucem's menus and Pipeline.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Drop any `.py` or `.rs` file with a `# lucem:` header into **`~/.config/lucem/plugins/ops/`** (or
+`$LUCEM_PLUGINS/ops/`) and Lucem discovers it automatically — no build step or plugin boilerplate
+required.
+
+## Complete example
+
+<Tabs>
+  <TabItem label="Python (PEP 723 + SciPy)">
+    ```python title="~/.config/lucem/plugins/ops/local_contrast_boost.py"
+    # /// script
+    # dependencies = ["numpy", "scipy"]
+    # ///
+    # lucem: name = "Local Contrast Boost"
+    # lucem: family = "Filter"
+    # lucem: description = "Enhances fine cellular structures by subtracting a blurred local background"
+    # lucem: halo = 12
+    # lucem: input image: image
+    # lucem: param sigma = 3.0
+    # lucem: param strength = 1.8
+    # lucem: output image
+
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+
+
+    def run(image: np.ndarray, sigma: float, strength: float) -> np.ndarray:
+        img = image.astype(np.float32, copy=False)
+        background = gaussian_filter(img, sigma=max(float(sigma), 0.2))
+        enhanced = img + float(strength) * (img - background)
+        return np.clip(enhanced, float(img.min()), float(img.max())).astype(np.float32)
+    ```
+  </TabItem>
+  <TabItem label="Rust (compiled & cached)">
+    ```rust title="~/.config/lucem/plugins/ops/channel_ratio.rs"
+    // lucem: name = "Channel Ratio"
+    // lucem: family = "Intensity"
+    // lucem: description = "Safe ratio a / (b + eps) between two fluorescence channels"
+    // lucem: input a: image
+    // lucem: input b: image
+    // lucem: param eps = 0.01
+    // lucem: output image
+
+    pub fn run(inputs: &Inputs, params: &Params) -> Result<Array, String> {
+        let a = inputs.image("a")?;
+        let b = inputs.image("b")?;
+        let eps = params.get("eps").max(1e-6) as f32;
+        let data = a.data.iter().zip(&b.data).map(|(&x, &y)| x / (y + eps)).collect();
+        Ok(Array::image(a.shape.clone(), data))
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python library (52 GPU ops)">
+    ```python title="batch_segment.py"
+    import lucem
+    import numpy as np
+
+    # Run any of Lucem's 52 CubeCL GPU operations directly on NumPy arrays
+    # (one upload, every op stays on the GPU, one download)
+    stack = np.random.rand(512, 512).astype(np.float32)
+    mask = lucem.run_pipeline(
+        stack,
+        [
+            {"op": "rolling_ball", "radius": 24.0},
+            {"op": "gaussian_blur", "sigma": 1.5},
+            {"op": "li_threshold", "bins": 256},
+        ],
+    )
+    ```
+  </TabItem>
+</Tabs>
+
+## Header reference
+
+| Directive | Purpose | Example |
+|---|---|---|
+| `name = "..."` | Display title in menus and on the Pipeline node | `name = "Local Contrast Boost"` |
+| `family = "..."` | Category in the Process / Script menu | `family = "Filter"` |
+| `description = "..."` | Tooltip and Inspector summary | `description = "Boost local detail"` |
+| `halo = N` | Border overlap in pixels for seamless tiled execution | `halo = 12` |
+| `input <name>: <type>` | Typed input port (`image`, `mask`, or `labels`) | `input image: image` |
+| `param <name> = <num>` | Editable numeric parameter in the Inspector | `param sigma = 3.0` |
+| `output <type>` | Output port type (`image`, `mask`, or `labels`) | `output image` |
+
+See also the starter repository template in
+[`templates/lucem-plugin-template/`](https://github.com/neuro-kitchen/lucem/tree/main/templates/lucem-plugin-template)
+for publishing community plugins with CI validation and `.lucem-recipe.json` presets.

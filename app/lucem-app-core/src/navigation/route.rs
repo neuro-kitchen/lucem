@@ -12,16 +12,19 @@ pub enum Workspace {
     Pipeline,
     /// Tables of measurements.
     Analyze,
+    /// Simplified Zed-style script editor for Python & Rust ops.
+    Code,
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 3] = [Workspace::Explore, Workspace::Pipeline, Workspace::Analyze];
+    pub const ALL: [Workspace; 4] = [Workspace::Explore, Workspace::Pipeline, Workspace::Analyze, Workspace::Code];
 
     pub fn title(self) -> &'static str {
         match self {
             Workspace::Explore => "Explore",
             Workspace::Pipeline => "Pipeline",
             Workspace::Analyze => "Analyze",
+            Workspace::Code => "Code",
         }
     }
 
@@ -30,6 +33,7 @@ impl Workspace {
             Workspace::Explore => "The image: view, annotate, measure, apply operations (1)",
             Workspace::Pipeline => "The processing graph: sources, operations and results on a canvas (2)",
             Workspace::Analyze => "Measurements of annotations and objects as tables (3)",
+            Workspace::Code => "Write and edit Python & Rust script ops (4)",
         }
     }
 
@@ -38,6 +42,7 @@ impl Workspace {
             Workspace::Explore => IconName::Microscope,
             Workspace::Pipeline => IconName::Workflow,
             Workspace::Analyze => IconName::Table2,
+            Workspace::Code => IconName::Code,
         }
     }
 }

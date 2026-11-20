@@ -1110,8 +1110,24 @@ impl Store {
     pub fn add_script_node(&mut self, lang: crate::data::script::Language, cx: &mut Context<Self>) {
         #[cfg(target_family = "wasm")]
         {
-            let _ = lang;
-            self.set_status("Local Python/Rust script files run in the desktop app (browsers cannot spawn local processes)", cx);
+            if crate::data::remote::runs_alone() {
+                let _ = lang;
+                self.set_status("Standalone viewer has no server: connect to lucem serve --web or use the desktop app for scripts", cx);
+                return;
+            }
+            let ext = lang.extension();
+            self.set_status(format!("Creating {} script on server…", lang.title()), cx);
+            cx.spawn(async move |this, cx| {
+                match crate::data::server_api::new_server_script(ext).await {
+                    Ok((path, content)) => {
+                        let _ = this.update(cx, |s, cx| s.add_script_from_text(path, &content, cx));
+                    }
+                    Err(e) => {
+                        let _ = this.update(cx, |s, cx| s.set_status(format!("Could not create server script: {e}"), cx));
+                    }
+                }
+            })
+            .detach();
             return;
         }
         #[cfg(not(target_family = "wasm"))]
@@ -1126,12 +1142,45 @@ impl Store {
         }
     }
 
+    #[cfg(target_family = "wasm")]
+    fn add_script_from_text(&mut self, path: String, content: &str, cx: &mut Context<Self>) {
+        let h = match crate::data::script::read_header(content) {
+            Ok(h) => h,
+            Err(e) => return self.set_status(format!("{path}: {e}"), cx),
+        };
+        let kind = NodeKind::Script { path: path.clone(), inputs: h.inputs, output: h.output, params: h.params, enabled: true };
+        let y = self.doc.graph.next_row();
+        let before: std::collections::HashSet<String> = self.doc.graph.nodes.iter().map(|n| n.id.clone()).collect();
+        if self.execute(Command::AddNode { kind, x: 300.0, y, id: None, after: None }, cx).is_ok()
+            && let Some(id) = self.doc.graph.nodes.iter().find(|n| !before.contains(&n.id)).map(|n| n.id.clone())
+        {
+            self.set_workspace(Workspace::Pipeline, cx);
+            cx.emit(AppEvent::RevealNode(id));
+            self.set_status(format!("Opened {path} in the Pipeline script editor"), cx);
+        }
+    }
+
     /// A script node running an existing `.py` or `.rs` file.
     pub fn add_script_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         #[cfg(target_family = "wasm")]
         {
-            let _ = path;
-            self.set_status("Local Python/Rust script files run in the desktop app (browsers cannot spawn local processes)", cx);
+            if crate::data::remote::runs_alone() {
+                let _ = path;
+                self.set_status("Standalone viewer has no server: connect to lucem serve --web or use the desktop app for scripts", cx);
+                return;
+            }
+            let path_str = path.to_string_lossy().into_owned();
+            cx.spawn(async move |this, cx| {
+                match crate::data::server_api::read_server_script(&path_str).await {
+                    Ok(content) => {
+                        let _ = this.update(cx, |s, cx| s.add_script_from_text(path_str, &content, cx));
+                    }
+                    Err(e) => {
+                        let _ = this.update(cx, |s, cx| s.set_status(format!("Could not read server script: {e}"), cx));
+                    }
+                }
+            })
+            .detach();
             return;
         }
         #[cfg(not(target_family = "wasm"))]

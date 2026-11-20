@@ -13,9 +13,27 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+/// Returns a RAM-backed shared-memory directory (`/dev/shm/lucem-scripts` on Linux when writable,
+/// else the OS temp dir) so Rust ↔ Python tile buffers transfer via zero-copy `mmap` in RAM
+/// without touching disk.
+pub fn shm_scratch_root() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let shm = Path::new("/dev/shm");
+        if shm.is_dir() {
+            let root = shm.join("lucem-scripts");
+            if std::fs::create_dir_all(&root).is_ok() {
+                return root;
+            }
+        }
+    }
+    std::env::temp_dir()
+}
+
 /// Long-lived stdlib Python worker speaking JSON-lines on stdin/stdout. Keeps Python, NumPy,
-/// and user ML frameworks (PyTorch/ONNX/SciPy) warm between tile runs, calls optional `init()`
-/// once per script version, and reloads the module automatically when the script changes on disk.
+/// and user ML frameworks (PyTorch/ONNX/SciPy) warm between tile runs, maps shared-memory inputs
+/// zero-copy via `mmap_mode="r"`, calls optional `init()` once per script version, and reloads
+/// the module automatically when the script changes on disk.
 const PYTHON_WARM_WORKER: &str = r#"import hashlib, importlib.util, json, sys, traceback
 import numpy as np
 
@@ -46,7 +64,8 @@ for raw_line in sys.stdin:
             for line in mf:
                 p = line.split()
                 if p[:1] == ["input"]:
-                    args[p[1]] = np.load(folder + "/" + p[1] + ".npy")
+                    # Zero-copy memory-mapped view directly into /dev/shm RAM buffer
+                    args[p[1]] = np.load(folder + "/" + p[1] + ".npy", mmap_mode="r")
                 elif p[:1] == ["param"]:
                     args[p[1]] = float(p[2])
                 elif p[:1] == ["dtype"]:

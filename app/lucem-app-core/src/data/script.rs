@@ -442,7 +442,7 @@ fn cache_dir() -> PathBuf {
 fn scratch() -> Result<PathBuf, String> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("lucem-run-{}-{n}", std::process::id()));
+    let dir = crate::data::python_worker::shm_scratch_root().join(format!("lucem-run-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }

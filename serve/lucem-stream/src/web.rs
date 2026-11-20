@@ -169,6 +169,7 @@ struct State {
     images: Arc<Images>,
     plugins: Arc<Vec<Arc<dyn ServerPlugin>>>,
     processor: Option<Arc<dyn TileProcessor>>,
+    data_root: PathBuf,
     web_root: Option<PathBuf>,
     names: Vec<String>,
     server_name: String,
@@ -225,7 +226,8 @@ impl WebServer {
         let root = data.canonicalize()?;
         let serve_info = ServeInfo { server: Some(server_name.clone()), webtransport_port: Some(port), certificate_sha256 };
         let tiles = std::sync::Mutex::new(TileCache::new(tile_cache_mib << 20));
-        let state = State { authority, images: Arc::new(Images::new(root).with_samples(samples)), plugins: Arc::new(plugins), processor, web_root, names, server_name, runtime, serve_info, tiles, warmed: Default::default() };
+        let data_root = root.clone();
+        let state = State { authority, images: Arc::new(Images::new(root).with_samples(samples)), plugins: Arc::new(plugins), processor, data_root, web_root, names, server_name, runtime, serve_info, tiles, warmed: Default::default() };
         Ok(Self { listener, tls, transport, state: Arc::new(state) })
     }
 
@@ -532,6 +534,14 @@ async fn handle(mut request: hyper::Request<Incoming>, state: Arc<State>) -> Res
         let info = serde_json::to_string(&state.serve_info).unwrap_or_else(|_| "{}".into());
         return Ok(reply(StatusCode::OK, "application/json", info));
     }
+    if request.uri().path().starts_with("/api/") {
+        let origin = request.headers().get("origin").and_then(|v| v.to_str().ok());
+        let host = request.headers().get("host").and_then(|v| v.to_str().ok()).unwrap_or_default();
+        if !same_origin(origin, host) {
+            return Ok(reply(StatusCode::FORBIDDEN, "text/plain", "not this page's origin"));
+        }
+        return Ok(crate::web_api::handle(request, &state.data_root).await);
+    }
     // HEAD: the same answer as GET without its body (link checkers, curl -I)
     let head = request.method() == hyper::Method::HEAD;
     if request.method() != hyper::Method::GET && !head {
@@ -724,8 +734,9 @@ mod tests {
     fn state(dir: &Path) -> State {
         let authority = Arc::new(Authority::open_or_create(&dir.join("auth")).unwrap());
         std::fs::create_dir_all(dir.join("data")).unwrap();
-        let images = Arc::new(Images::new(dir.join("data").canonicalize().unwrap()));
-        State { authority, images, plugins: Arc::default(), processor: None, web_root: None, names: vec!["localhost".into()], server_name: "test".into(), runtime: String::new(), serve_info: ServeInfo { server: None, webtransport_port: None, certificate_sha256: Vec::new() }, tiles: std::sync::Mutex::new(TileCache::new(1 << 20)), warmed: Default::default() }
+        let data_root = dir.join("data").canonicalize().unwrap();
+        let images = Arc::new(Images::new(data_root.clone()));
+        State { authority, images, plugins: Arc::default(), processor: None, data_root, web_root: None, names: vec!["localhost".into()], server_name: "test".into(), runtime: String::new(), serve_info: ServeInfo { server: None, webtransport_port: None, certificate_sha256: Vec::new() }, tiles: std::sync::Mutex::new(TileCache::new(1 << 20)), warmed: Default::default() }
     }
 
     /// A page pairs with a code (and gets a token), then comes back with the token; a wrong

@@ -54,8 +54,8 @@ lucem-stream = { workspace = true, features = ["native"] }
 # WebTransport or a WebSocket
 [target.'cfg(target_family = "wasm")'.dependencies]
 lucem-stream = { workspace = true, default-features = false, features = ["web"] }
-# The session kept in the browser's storage between reloads
-web-sys = { workspace = true, features = ["Window", "Storage"] }
+# The session kept in the browser's storage between reloads + same-origin server API fetch
+web-sys = { workspace = true, features = ["Window", "Storage", "Request", "RequestInit", "Response", "Headers"] }
 js-sys.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
