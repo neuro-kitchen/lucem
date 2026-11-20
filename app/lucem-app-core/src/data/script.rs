@@ -157,7 +157,12 @@ pub fn read_header(text: &str) -> Result<Header, String> {
                         h.inputs.push(ScriptPort { name, port });
                     }
                 }
-            } else if let Some(args) = dec.strip_prefix("op(").and_then(|s| s.trim_end().strip_suffix(')')) {
+            } else if let Some(args) = dec
+                .strip_prefix("op(")
+                .or_else(|| dec.strip_prefix("transform("))
+                .or_else(|| dec.strip_prefix("custom.transform("))
+                .and_then(|s| s.trim_end().strip_suffix(')'))
+            {
                 for kv in args.split(',') {
                     if let Some((k, v)) = kv.split_once('=') {
                         let k = k.trim();
@@ -228,7 +233,122 @@ pub fn read_header(text: &str) -> Result<Header, String> {
             h.params.push(ScriptParam { name: name.trim().to_string(), value });
         }
     }
+    // Auto-derive inputs, numeric params, output, name, and description from any `@lucem.*`
+    // decorated Python function signature:
+    //   @lucem.op(family="Filter", halo=12)
+    //   def local_contrast_boost(image: np.ndarray, sigma: float = 3.0, strength: float = 1.8) -> np.ndarray:
+    parse_decorated_python_signature(text, &mut h);
     Ok(h)
+}
+
+fn parse_decorated_python_signature(text: &str, h: &mut Header) {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        if trimmed.starts_with("@lucem.") || trimmed == "@lucem" {
+            // Walk past any stacked decorators to the `def ...` line
+            let mut j = i + 1;
+            while j < lines.len() && (lines[j].trim_start().starts_with('@') || lines[j].trim().is_empty()) {
+                j += 1;
+            }
+            if j >= lines.len() || !lines[j].trim_start().starts_with("def ") {
+                i += 1;
+                continue;
+            }
+            // Collect multi-line function signature up to `):` or `-> ...:`
+            let mut sig = String::new();
+            let mut k = j;
+            while k < lines.len() {
+                sig.push_str(lines[k].trim());
+                sig.push(' ');
+                if lines[k].trim_end().ends_with(':') {
+                    break;
+                }
+                k += 1;
+            }
+            if let Some(after_def) = sig.strip_prefix("def ")
+                && let Some((fn_name, rest)) = after_def.split_once('(')
+                && let Some((params_str, after_paren)) = rest.split_once(')')
+            {
+                let fn_name = fn_name.trim();
+                if h.name.is_none() && !fn_name.is_empty() && fn_name != "run" {
+                    let pretty: String = fn_name
+                        .split('_')
+                        .filter(|s| !s.is_empty())
+                        .map(|w| {
+                            let mut cs = w.chars();
+                            match cs.next() {
+                                Some(c) => format!("{}{}", c.to_uppercase(), cs.as_str()),
+                                None => String::new(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    h.name = Some(pretty);
+                }
+                // Return type annotation (`-> Mask` / `-> Labels` / `-> np.ndarray`)
+                if let Some((_, ret)) = after_paren.split_once("->") {
+                    let ret_l = ret.trim_end_matches(':').trim().to_ascii_lowercase();
+                    if ret_l.contains("mask") {
+                        h.output = PortType::Mask;
+                    } else if ret_l.contains("label") {
+                        h.output = PortType::Labels;
+                    }
+                }
+                // Parse each parameter in `def fn(image: np.ndarray, sigma: float = 3.0, ...)`
+                for raw_arg in params_str.split(',') {
+                    let arg = raw_arg.trim();
+                    if arg.is_empty() || arg == "*" || arg == "/" || arg.starts_with('*') {
+                        continue;
+                    }
+                    let (lhs, default_str) = match arg.split_once('=') {
+                        Some((l, r)) => (l.trim(), Some(r.trim())),
+                        None => (arg, None),
+                    };
+                    let (arg_name, ty_str) = match lhs.split_once(':') {
+                        Some((n, t)) => (n.trim(), Some(t.trim().to_ascii_lowercase())),
+                        None => (lhs, None),
+                    };
+                    if arg_name.is_empty() {
+                        continue;
+                    }
+                    if let Some(def_s) = default_str {
+                        if let Ok(val) = def_s.parse::<f64>() {
+                            if !h.params.iter().any(|p| p.name == arg_name) {
+                                h.params.push(ScriptParam { name: arg_name.to_string(), value: val });
+                            }
+                            continue;
+                        }
+                    }
+                    let ty = ty_str.as_deref().unwrap_or("");
+                    let is_scalar = ty == "float" || ty == "int" || ty == "bool" || ty == "str";
+                    if !is_scalar && !h.inputs.iter().any(|p| p.name == arg_name) {
+                        let port = if ty.contains("mask") || arg_name.contains("mask") {
+                            PortType::Mask
+                        } else if ty.contains("label") || arg_name.contains("label") {
+                            PortType::Labels
+                        } else {
+                            PortType::Image
+                        };
+                        h.inputs.push(ScriptPort { name: arg_name.to_string(), port });
+                    }
+                }
+                // Optional first docstring line as description
+                if h.description.is_none() && k + 1 < lines.len() {
+                    let doc_line = lines[k + 1].trim();
+                    if let Some(inner) = doc_line.strip_prefix("\"\"\"").or_else(|| doc_line.strip_prefix("'''")) {
+                        let clean = inner.trim_end_matches("\"\"\"").trim_end_matches("'''").trim();
+                        if !clean.is_empty() {
+                            h.description = Some(clean.to_string());
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        i += 1;
+    }
 }
 
 /// Extracts Python package dependencies declared via PEP 723 inline script metadata

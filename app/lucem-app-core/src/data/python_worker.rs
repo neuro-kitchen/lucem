@@ -41,8 +41,14 @@ import numpy as np
 # even when the full `lucem` wheel is not installed in the script's venv.
 class _LucemShim:
     @staticmethod
-    def op(**_kw):
-        return lambda fn: fn
+    def op(fn=None, **_kw):
+        def _wrap(f):
+            f._lucem_op = True
+            return f
+        return _wrap(fn) if callable(fn) else _wrap
+    @staticmethod
+    def transform(fn=None, **_kw):
+        return _LucemShim.op(fn, **_kw)
     @staticmethod
     def input(*_a, **_kw):
         return lambda fn: fn
@@ -53,9 +59,16 @@ class _LucemShim:
 if "lucem" not in sys.modules:
     _m = types.ModuleType("lucem")
     _m.op = _LucemShim.op
+    _m.transform = _LucemShim.transform
     _m.input = _LucemShim.input
     _m.param = _LucemShim.param
     sys.modules["lucem"] = _m
+
+def _find_entry(mod):
+    for v in vars(mod).values():
+        if callable(v) and getattr(v, "_lucem_op", False):
+            return v
+    return mod.run
 
 loaded = {}  # script_path -> (sha, module)
 
@@ -90,7 +103,7 @@ for raw_line in sys.stdin:
                     args[p[1]] = float(p[2])
                 elif p[:1] == ["dtype"]:
                     dtype = p[1]
-        out = mod.run(**args)
+        out = _find_entry(mod)(**args)
         if isinstance(out, dict):
             out = next(iter(out.values()))
         np.save(folder + "/output.npy", np.ascontiguousarray(np.asarray(out).astype(dtype)))

@@ -150,3 +150,10 @@ pub async fn fetch_server_table(name: &str) -> Result<ServerTableData, String> {
     let v = fetch_json(&format!("/api/analyze/table?name={encoded}"), "GET", None).await?;
     serde_json::from_value(v).map_err(|e| e.to_string())
 }
+
+#[cfg(target_family = "wasm")]
+pub async fn save_server_recipe(recipe: &crate::data::recipes::Recipe) -> Result<String, String> {
+    let body = serde_json::to_string(recipe).map_err(|e| e.to_string())?;
+    let v = fetch_json("/api/recipes/save", "POST", Some(body)).await?;
+    Ok(v.get("path").and_then(|s| s.as_str()).unwrap_or("saved").to_string())
+}

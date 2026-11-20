@@ -91,21 +91,86 @@ fn parse_script_header(path: &Path) -> Value {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let comment = if path.extension().and_then(|e| e.to_str()) == Some("rs") { "//" } else { "#" };
     let mut name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("script").to_string();
+    let mut explicit_name = false;
     let mut family = "Custom".to_string();
     let mut description = String::new();
     let mut halo: usize = 0;
-    for line in text.lines().take(60) {
+    let lines: Vec<&str> = text.lines().take(80).collect();
+    for (idx, line) in lines.iter().enumerate() {
         let t = line.trim();
-        let Some(rest) = t.strip_prefix(comment).map(str::trim) else { continue };
-        let Some(spec) = rest.strip_prefix("lucem:").map(str::trim) else { continue };
-        if let Some((k, v)) = spec.split_once('=') {
+        if let Some(rest) = t.strip_prefix(comment).map(str::trim)
+            && let Some(spec) = rest.strip_prefix("lucem:").map(str::trim)
+            && let Some((k, v)) = spec.split_once('=')
+        {
             let v = v.trim().trim_matches('"').trim_matches('\'');
             match k.trim() {
-                "name" if !v.is_empty() => name = v.to_string(),
+                "name" if !v.is_empty() => {
+                    name = v.to_string();
+                    explicit_name = true;
+                }
                 "family" if !v.is_empty() => family = v.to_string(),
                 "description" => description = v.to_string(),
                 "halo" => halo = v.parse().unwrap_or(0),
                 _ => {}
+            }
+            continue;
+        }
+        // Also parse `@lucem.op(...)` / `@lucem.transform(...)` / `@lucem.custom.transform(...)`
+        let is_dec = t.starts_with("@lucem.op")
+            || t.starts_with("@lucem.transform")
+            || t.starts_with("@lucem.custom.transform");
+        if is_dec {
+            if let Some(open) = t.find('(')
+                && let Some(close) = t.rfind(')')
+            {
+                for part in t[open + 1..close].split(',') {
+                    if let Some((k, v)) = part.split_once('=') {
+                        let v = v.trim().trim_matches('"').trim_matches('\'');
+                        match k.trim() {
+                            "name" if !v.is_empty() => {
+                                name = v.to_string();
+                                explicit_name = true;
+                            }
+                            "family" if !v.is_empty() => family = v.to_string(),
+                            "description" => description = v.to_string(),
+                            "halo" => halo = v.parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            // Look ahead for `def <fn_name>(...):` and optional docstring
+            for next_idx in (idx + 1)..lines.len() {
+                let nt = lines[next_idx].trim();
+                if nt.is_empty() || nt.starts_with('@') || nt.starts_with('#') {
+                    continue;
+                }
+                if let Some(after_def) = nt.strip_prefix("def ") {
+                    if !explicit_name
+                        && let Some(fn_name) = after_def.split('(').next().map(str::trim)
+                        && !fn_name.is_empty()
+                    {
+                        name = fn_name
+                            .split('_')
+                            .filter(|w| !w.is_empty())
+                            .map(|w| {
+                                let mut ch = w.chars();
+                                match ch.next() {
+                                    Some(c) => c.to_uppercase().collect::<String>() + ch.as_str(),
+                                    None => String::new(),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                    }
+                    if description.is_empty()
+                        && let Some(doc_line) = lines.get(next_idx + 1).map(|l| l.trim())
+                        && (doc_line.starts_with("\"\"\"") || doc_line.starts_with("'''"))
+                    {
+                        description = doc_line.trim_matches('"').trim_matches('\'').trim().to_string();
+                    }
+                }
+                break;
             }
         }
     }
@@ -351,7 +416,7 @@ pub async fn handle(request: hyper::Request<Incoming>, data_root: &Path) -> Repl
             let starter = if ext == "rs" {
                 "// lucem: name = \"Custom Rust Step\"\n// lucem: input image: image\n// lucem: param gain = 1.5\n// lucem: output image\n\npub fn run(inputs: &Inputs, params: &Params) -> Result<Array, String> {\n    let src = inputs.image(\"image\")?;\n    let gain = params.get(\"gain\") as f32;\n    let data = src.data.iter().map(|&v| (v * gain).clamp(0.0, 1.0)).collect();\n    Ok(Array::image(src.shape.clone(), data))\n}\n"
             } else {
-                "# /// script\n# dependencies = [\"numpy\"]\n# ///\n# lucem: name = \"Custom Python Step\"\n# lucem: family = \"Filter\"\n# lucem: halo = 4\n# lucem: input image: image\n# lucem: param gain = 1.5\n# lucem: output image\n\nimport numpy as np\n\ndef run(image, gain):\n    return np.clip(image.astype(np.float32) * float(gain), 0.0, 1.0)\n"
+                "# /// script\n# dependencies = [\"numpy\"]\n# ///\nimport numpy as np\nimport lucem\n\n@lucem.op(family=\"Filter\", halo=4)\ndef custom_step(image: np.ndarray, gain: float = 1.5) -> np.ndarray:\n    \"\"\"Scale tile intensity by gain. Lucem handles tiling and halo cropping.\"\"\"\n    return np.clip(image.astype(np.float32, copy=False) * float(gain), 0.0, 1.0)\n"
             };
             if let Err(e) = std::fs::write(&file_path, starter) {
                 return json_reply(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e.to_string()}));
@@ -371,6 +436,31 @@ pub async fn handle(request: hyper::Request<Incoming>, data_root: &Path) -> Repl
                 .await
                 .unwrap_or_default();
             json_reply(StatusCode::OK, json!({"diagnostics": diags}))
+        }
+        (Method::POST, "/api/recipes/save") => {
+            let body = match request.into_body().collect().await {
+                Ok(b) => b.to_bytes(),
+                Err(e) => return json_reply(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+            };
+            let req: Value = serde_json::from_slice(&body).unwrap_or_default();
+            let name = req.get("name").and_then(|v| v.as_str()).unwrap_or("custom_recipe");
+            let slug: String = name
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            let slug = slug.trim_matches('_');
+            let slug = if slug.is_empty() { "custom_recipe" } else { slug };
+            let dir = config_dir().join("recipes");
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return json_reply(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e.to_string()}));
+            }
+            let file_path = dir.join(format!("{slug}.lucem-recipe.json"));
+            let pretty = serde_json::to_string_pretty(&req).unwrap_or_else(|_| req.to_string());
+            match std::fs::write(&file_path, pretty) {
+                Ok(()) => json_reply(StatusCode::OK, json!({"ok": true, "path": file_path.to_string_lossy()})),
+                Err(e) => json_reply(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": e.to_string()})),
+            }
         }
         (Method::GET, "/api/analyze/tables") => {
             let root = data_root.to_path_buf();

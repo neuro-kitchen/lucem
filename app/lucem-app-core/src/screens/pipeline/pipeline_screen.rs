@@ -667,66 +667,6 @@ impl Inspector {
         }
     }
 
-    /// Writes the editor's text to the script's file and runs the node again.
-    fn save_script(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(c) = &mut self.code else { return };
-        let text = c.view.read(cx).text(cx);
-        #[cfg(target_family = "wasm")]
-        {
-            let path = c.path.clone();
-            let saved_text = text.clone();
-            let store = self.store.clone();
-            let _ = id;
-            cx.spawn(async move |this, cx| {
-                match crate::data::server_api::write_server_script(&path, &saved_text).await {
-                    Ok(()) => {
-                        let _ = this.update(cx, |insp, cx| {
-                            if let Some(c) = &mut insp.code
-                                && c.path == path
-                            {
-                                c.saved = saved_text;
-                                c.dirty = false;
-                            }
-                            cx.notify();
-                        });
-                        store.update(cx, |s, cx| s.set_status(format!("Saved {path} on server"), cx));
-                    }
-                    Err(e) => {
-                        store.update(cx, |s, cx| s.set_status(format!("Could not save {path}: {e}"), cx));
-                    }
-                }
-            })
-            .detach();
-            return;
-        }
-        #[cfg(not(target_family = "wasm"))]
-        {
-            match std::fs::write(&c.path, &text) {
-                Ok(()) => {
-                    c.saved = text;
-                    c.dirty = false;
-                    self.store.update(cx, |s, cx| s.reload_script(id, cx));
-                }
-                Err(e) => {
-                    let msg = format!("Could not save {}: {e}", crate::domain::paths::short_path(std::path::Path::new(&c.path)));
-                    self.store.update(cx, |s, cx| s.set_status(msg, cx));
-                }
-            }
-            cx.notify();
-        }
-    }
-
-    /// Puts back the text on disk.
-    fn revert_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(c) = &mut self.code {
-            let text = std::fs::read_to_string(&c.path).unwrap_or_else(|_| c.saved.clone());
-            c.saved = text.clone();
-            c.dirty = false;
-            c.view.update(cx, |v, cx| v.set_text(text, window, cx));
-        }
-        cx.notify();
-    }
-
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.canvas.read(cx).selected.clone();
         // The selected script node's code, made ready before the store is read below
@@ -800,6 +740,83 @@ impl Inspector {
                 .icon(Icon::new(IconName::Play))
                 .label("Run on view")
                 .on_click(move |_, _, cx| store_run.update(cx, |s, cx| s.recompute(cx)));
+            let store_recipe = self.store.clone();
+            let recipe_btn = Button::new("inspector-make-recipe")
+                .outline()
+                .small()
+                .icon(Icon::new(IconName::Package))
+                .label("Make recipe")
+                .tooltip("Save this pipeline as a shareable .lucem-recipe.json")
+                .on_click(move |_, _, cx| {
+                    let (name, steps) = {
+                        let s = store_recipe.read(cx);
+                        let img_name = s.doc.active().map_or_else(|| "pipeline".to_string(), |i| i.name.clone());
+                        let stem = img_name.split('.').next().unwrap_or("pipeline");
+                        let ops: Vec<lucem_pipeline::Op> = s
+                            .doc
+                            .graph
+                            .nodes
+                            .iter()
+                            .filter_map(|n| match &n.kind {
+                                NodeKind::Op { enabled: true, op } => Some(op.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        (format!("{stem}_recipe"), ops)
+                    };
+                    if steps.is_empty() {
+                        store_recipe.update(cx, |s, cx| {
+                            s.set_status("Add at least one enabled GPU operation to save a recipe.", cx);
+                        });
+                        return;
+                    }
+                    let recipe = crate::data::recipes::Recipe {
+                        schema: 1,
+                        name,
+                        family: "Recipe".to_string(),
+                        description: format!("Exported pipeline with {} operation(s)", steps.len()),
+                        steps,
+                    };
+                    #[cfg(not(target_family = "wasm"))]
+                    {
+                        match crate::data::recipes::save_recipe(&recipe) {
+                            Ok(path) => store_recipe.update(cx, |s, cx| {
+                                s.set_status(format!("Saved recipe to {}", path.display()), cx);
+                            }),
+                            Err(e) => store_recipe.update(cx, |s, cx| {
+                                s.set_status(format!("Could not save recipe: {e}"), cx);
+                            }),
+                        }
+                    }
+                    #[cfg(target_family = "wasm")]
+                    {
+                        if crate::data::remote::runs_alone() {
+                            if let Ok(json) = serde_json::to_string_pretty(&recipe) {
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(json));
+                                store_recipe.update(cx, |s, cx| {
+                                    s.set_status("Copied .lucem-recipe.json to clipboard.", cx);
+                                });
+                            }
+                        } else {
+                            let st = store_recipe.clone();
+                            cx.spawn(async move |cx| {
+                                match crate::data::server_api::save_server_recipe(&recipe).await {
+                                    Ok(path) => {
+                                        let _ = cx.update(|cx| {
+                                            st.update(cx, |s, cx| s.set_status(format!("Saved recipe to {path}"), cx));
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = cx.update(|cx| {
+                                            st.update(cx, |s, cx| s.set_status(format!("Could not save recipe: {e}"), cx));
+                                        });
+                                    }
+                                }
+                            })
+                            .detach();
+                        }
+                    }
+                });
             let quick_ops: Vec<AnyElement> = ["rolling_ball", "gaussian_blur", "clahe", "otsu_threshold", "li_threshold", "canny"]
                 .iter()
                 .filter_map(|tag| lucem_pipeline::Op::by_tag(tag))
@@ -844,7 +861,7 @@ impl Inspector {
                         .child(row("Image", div().min_w_0().truncate().text_sm().child(active_name)))
                         .child(row("Graph", div().text_sm().font_family("monospace").child(format!("{n_nodes} nodes · {n_edges} edges")))),
                 )
-                .child(h_flex().gap(px(theme::SM)).flex_wrap().child(add_btn).child(run_btn))
+                .child(h_flex().gap(px(theme::SM)).flex_wrap().child(add_btn).child(run_btn).child(recipe_btn))
                 .child(
                     v_flex()
                         .p(px(theme::SM))
@@ -867,7 +884,15 @@ impl Inspector {
         let (title, sub, icon) = describe(&node.kind, &doc);
         let analysis = s.analysis.clone();
         let layer = s.results.get(&id).cloned();
-        let preview = analysis.as_ref().and_then(|a| a.previews.get(&id).cloned());
+        let preview = analysis
+            .as_ref()
+            .and_then(|a| a.previews.get(&id).cloned())
+            .or_else(|| layer.as_ref().and_then(|r| r.layer.clone()))
+            .or_else(|| {
+                g.outputs(&id)
+                    .iter()
+                    .find_map(|(out_id, _)| s.results.get(*out_id).and_then(|r| r.layer.clone()))
+            });
         let header = v_flex()
             .gap(px(2.))
             .child(h_flex().gap(px(theme::SM)).child(Icon::new(icon).small()).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title)))

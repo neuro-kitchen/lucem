@@ -85,8 +85,9 @@ burn = { version = "0.22.1", default-features = false }
 # Python bindings (built by maturin, see pyproject.toml)
 pyo3 = { version = "0.30.1" }
 numpy = "0.30.0"
-# UI: GPUI through gpui-kit (re-exports gpui, gpui-base, gpui-component)
-gpui-kit = "0.10.0"
+# UI: GPUI through gpui-kit (re-exports gpui, gpui-base, gpui-component); `syntect` gives pure-Rust
+# syntax highlighting on both desktop and wasm32.
+gpui-kit = { version = "0.10.0", features = ["syntect"] }
 # The neuro-kitchen apps' shared UI (github.com/neuro-kitchen/kitchen): kitchen-ui (tokens,
 # widgets, the parameter editor, icon bundling) and kitchen-shell (the frame, the command
 # registry, menus, search, jobs, people). Both from crates.io, at the same version (one
