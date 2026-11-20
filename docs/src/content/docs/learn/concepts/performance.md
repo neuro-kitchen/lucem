@@ -26,3 +26,15 @@ Following the architecture pioneered by **QuPath**, **Cytomine**, and **Vitessce
 - CUDA **StarDist** and **InstanSeg** run on the server GPU (`lucem-ml`), keeping the full object table in server memory.
 - As you pan or zoom in **Explore**, the browser requests a single ~15–30 KB viewport PNG overlay (`hist/raster`) rasterized natively on the server in milliseconds.
 - The **Analyze** workspace fetches compact, simplified summaries on demand.
+
+## 5. GPU VRAM & Batched-Volume ML (`LUCEM_ML_BATCH`)
+
+StarDist and InstanSeg tile any ROI into canonical **`512×512`** (`tile: 384, halo: 64`) squares so CubeCL autotunes once and reuses cached CUDA kernels across every future ROI (~28–32 ms per tile on an RTX 2070).
+
+- **Default (`LUCEM_ML_BATCH=1`):** Keeps peak VRAM around **~250–350 MiB** so shared 6–8 GB laptop/desktop GPUs (running a compositor + browser WebGPU canvas) never hit PCIe VRAM swapping. Switching between StarDist and InstanSeg automatically evicts the idle model plugin from VRAM first.
+- **High-VRAM workstations & servers (`LUCEM_ML_BATCH=4` or `8`):** On dedicated 16–80 GB GPUs (RTX 4090, A6000, L40S, H100), set `LUCEM_ML_BATCH=4` (or `8`) before starting `lucem serve` or `lucem hist`. Lucem stacks `B` canonical tiles into a single 4D volume `[B, C, 512, 512]` and evaluates them in one parallel GPU forward pass — saturating GPU SMs with one kernel-launch and readback cycle per batch (padding partial tail batches to `B` so CubeCL never re-autotunes).
+
+```bash
+# Dedicated 24 GB+ GPU server: 4-tile batched volume inference
+LUCEM_ML_BATCH=4 lucem serve --data ./slides
+```
