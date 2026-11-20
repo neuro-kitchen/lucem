@@ -614,6 +614,8 @@ impl Store {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (mut outcomes, mut error) = (Vec::new(), None);
+            let mut cell_count = 0usize;
+            let mut tile_count = 0usize;
             for (i, action) in actions.iter().enumerate() {
                 if job.cancelled() {
                     error = Some("cancelled".to_string());
@@ -631,6 +633,8 @@ impl Store {
                         if let Ok(regions) = serde_json::from_value(r["regions"].clone()) {
                             a.tissue = regions;
                         }
+                        cell_count = r["cells"].as_u64().unwrap_or(0) as usize;
+                        tile_count = r["tiles"].as_u64().unwrap_or(0) as usize;
                         outcomes.push(o);
                     }
                     Err(e) => {
@@ -640,10 +644,17 @@ impl Store {
                 }
             }
             if !outcomes.is_empty() {
-                job.set(&format!("{what}: fetching the objects"), None);
-                for (kind, list) in [("cells", &mut a.cells), ("tiles", &mut a.tiles)] {
-                    match server_objects(&link, &path, kind).await {
-                        Ok(found) => *list = found,
+                if cell_count > 0 {
+                    match server_objects(&link, &path, "cells", &job, &this, cx).await {
+                        Ok(found) => a.cells = found,
+                        Err(e) => {
+                            error.get_or_insert(e);
+                        }
+                    }
+                }
+                if tile_count > 0 {
+                    match server_objects(&link, &path, "tiles", &job, &this, cx).await {
+                        Ok(found) => a.tiles = found,
                         Err(e) => {
                             error.get_or_insert(e);
                         }
@@ -1211,16 +1222,27 @@ mod tests {
     }
 }
 
-/// Every object of `kind` (`cells`, `tiles`) the server's analysis of `path` holds, page by page.
+/// Every object of `kind` (`cells`, `tiles`) the server's analysis of `path` holds, streamed in
+/// small pages (1,000 per RPC) with yields between pages so the browser UI stays 60 fps and never
+/// OOMs on whole-slide detections.
 #[cfg(target_family = "wasm")]
-async fn server_objects(link: &lucem_stream::web_client::PageLink, path: &str, kind: &str) -> Result<Vec<HistObject>, String> {
+async fn server_objects(
+    link: &lucem_stream::web_client::PageLink,
+    path: &str,
+    kind: &str,
+    job: &kitchen_shell::jobs::JobHandle,
+    this: &gpui_kit::WeakEntity<Store>,
+    cx: &mut gpui_kit::AsyncApp,
+) -> Result<Vec<HistObject>, String> {
+    const PAGE_SIZE: usize = 1_000;
+    const BROWSER_MAX_OBJECTS: usize = 25_000;
     let mut out: Vec<HistObject> = Vec::new();
     loop {
         let mut answer = link
             .plugin_call(
                 lucem_hist::service::PLUGIN,
                 "objects",
-                &serde_json::json!({ "path": path, "kind": kind, "offset": out.len(), "limit": 5_000 }),
+                &serde_json::json!({ "path": path, "kind": kind, "offset": out.len(), "limit": PAGE_SIZE }),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -1231,9 +1253,14 @@ async fn server_objects(link: &lucem_stream::web_client::PageLink, path: &str, k
             break;
         }
         out.extend(page);
-        if out.len() >= total {
+        let cap = total.min(BROWSER_MAX_OBJECTS);
+        job.set(&format!("Fetching {kind} ({}/{})", out.len(), cap), Some((out.len() as f32 / cap.max(1) as f32).min(1.0)));
+        let _ = this.update(cx, |_, cx| cx.notify());
+        if out.len() >= cap {
             break;
         }
+        // Yield briefly to the browser event loop between pages so UI remains responsive
+        cx.background_executor().timer(std::time::Duration::from_millis(4)).await;
     }
     Ok(out)
 }

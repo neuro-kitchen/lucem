@@ -133,13 +133,20 @@ struct Wand {
 
 impl Wand {
     /// Flood-fills connected pixels similar to the seed (unconstrained in `flood` mode, or within
-    /// `radius` in smart-brush mode) and fills enclosed interior holes.
-    fn stamp(&mut self, p: [f64; 2]) {
+    /// `radius` in smart-brush mode). When `erase` is true (`Alt` held), subtracts from the mask
+    /// instead of adding.
+    fn stamp(&mut self, p: [f64; 2], erase: bool) {
         let (cx, cy) = (p[0] / self.ds - self.x0 as f64, p[1] / self.ds - self.y0 as f64);
         if cx < 0.0 || cy < 0.0 || cx >= self.w as f64 || cy >= self.h as f64 {
             return;
         }
         let (sx, sy) = (cx as usize, cy as usize);
+        let target_val = if erase { 0u8 } else { 1u8 };
+        // In flood-fill drag mode, skip redundant flood if this pixel is already in the desired state
+        if self.flood && self.mask[sy * self.w + sx] == target_val {
+            self.last = p;
+            return;
+        }
         let r = (self.radius / self.ds).max(1.0);
         let r2 = r * r;
         let seed: Vec<f32> = self.channels.iter().map(|c| c[sy * self.w + sx]).collect();
@@ -152,11 +159,13 @@ impl Wand {
         let (mut bx0, mut by0, mut bx1, mut by1) = self.bbox.unwrap_or((usize::MAX, usize::MAX, 0, 0));
         while let Some((x, y)) = queue.pop_front() {
             let i = y * w + x;
-            self.mask[i] = 1;
-            bx0 = bx0.min(x);
-            by0 = by0.min(y);
-            bx1 = bx1.max(x + 1);
-            by1 = by1.max(y + 1);
+            self.mask[i] = target_val;
+            if !erase {
+                bx0 = bx0.min(x);
+                by0 = by0.min(y);
+                bx1 = bx1.max(x + 1);
+                by1 = by1.max(y + 1);
+            }
             let neighbors = [
                 (x + 1 < w).then(|| (x + 1, y)),
                 (x > 0).then(|| (x - 1, y)),
@@ -180,7 +189,7 @@ impl Wand {
                 }
             }
         }
-        if bx1 > bx0 && by1 > by0 {
+        if !erase && bx1 > bx0 && by1 > by0 {
             self.bbox = Some((bx0, by0, bx1, by1));
             self.fill_holes(bx0, by0, bx1, by1);
         }
@@ -237,12 +246,10 @@ impl Wand {
         }
     }
 
-    /// Stamps along the segment from the last stamp to `p` (in smart-brush mode; flood mode is single-click).
-    fn stroke_to(&mut self, p: [f64; 2]) {
-        if self.flood {
-            return;
-        }
-        let step = (self.radius * 0.5).max(self.ds);
+    /// Sweeps along the segment from the last stamp to `p`, adding (or erasing when `Alt` is held)
+    /// contiguous regions in both Flood fill (Quick Selection) and Smart brush modes.
+    fn stroke_to(&mut self, p: [f64; 2], erase: bool) {
+        let step = if self.flood { (self.ds * 8.0).max(1.0) } else { (self.radius * 0.5).max(self.ds) };
         let (a, d) = (self.last, (p[0] - self.last[0]).hypot(p[1] - self.last[1]));
         if d < step {
             return;
@@ -250,7 +257,7 @@ impl Wand {
         let n = (d / step).ceil() as usize;
         for k in 1..=n {
             let t = k as f64 / n as f64;
-            self.stamp([a[0] + t * (p[0] - a[0]), a[1] + t * (p[1] - a[1])]);
+            self.stamp([a[0] + t * (p[0] - a[0]), a[1] + t * (p[1] - a[1])], erase);
         }
         self.refresh_overlay();
     }
@@ -1049,7 +1056,7 @@ impl ImageCanvas {
         let flood = s.tool.wand_flood;
         let mut wand = Wand { level, ds, x0, y0, w, h, channels, mask: vec![0; w * h], bbox: None, radius: self.brush_radius(cx), flood, last: p, tolerance: s.tool.wand_tolerance, color, overlay: None };
         let _ = wand.level;
-        wand.stamp(p);
+        wand.stamp(p, false);
         wand.refresh_overlay();
         Some(wand)
     }
@@ -1517,8 +1524,14 @@ impl ImageCanvas {
             Tool::Rect | Tool::Ellipse | Tool::Ruler | Tool::Segment | Tool::Marquee => self.gesture = Some(Gesture::Drag { tool, a: p, b: p }),
             Tool::Lasso => self.gesture = Some(Gesture::Path { tool, points: vec![p], radius: 0.0 }),
             Tool::Brush | Tool::Eraser => {
+                // Holding Alt flips Brush <-> Eraser on the fly (Photoshop/Affinity workflow)
+                let active_tool = if e.modifiers.alt {
+                    if tool == Tool::Brush { Tool::Eraser } else { Tool::Brush }
+                } else {
+                    tool
+                };
                 let radius = self.brush_radius(cx);
-                self.gesture = Some(Gesture::Path { tool, points: vec![p], radius });
+                self.gesture = Some(Gesture::Path { tool: active_tool, points: vec![p], radius });
                 self.refresh_live(cx);
             }
             Tool::Wand => {
@@ -1583,7 +1596,7 @@ impl ImageCanvas {
             }
             Some(Gesture::Wand(w)) => {
                 let old = w.overlay.as_ref().map(|o| o.1.clone());
-                w.stroke_to(p);
+                w.stroke_to(p, e.modifiers.alt);
                 if let (Some(o), Some(n)) = (old, w.overlay.as_ref())
                     && !Arc::ptr_eq(&o, &n.1) {
                         self.drops.push(o);
@@ -2107,10 +2120,18 @@ impl Render for ImageCanvas {
         }
         let image = self.viewer.as_ref().map(|v| v.image.clone());
         let um = self.viewer.as_ref().and_then(|v| v.pyramid.pixel_size_um);
-        // Result layers of the shown image
+        // Result layers of the shown image (in a single-channel cell of the Channels multiview,
+        // only draw the processed result belonging to that channel so DAPI never bleeds onto FITC/CY3/etc.)
         let mut overlays: Vec<([f64; 4], Arc<RenderImage>)> = Vec::new();
         if tool.show_results {
+            let processed_map = image.as_ref().map(|id| s.processed_channels(id)).unwrap_or_default();
             for n in s.doc.graph.views() {
+                if let Some(only_ch) = self.channel {
+                    let belongs_to_ch = processed_map.get(&only_ch).is_some_and(|vid| vid == &n.id);
+                    if !belongs_to_ch {
+                        continue;
+                    }
+                }
                 let visible = matches!(&n.kind, crate::domain::graph::NodeKind::View { style, .. } if style.visible);
                 if let Some(r) = s.results.get(&n.id).filter(|r| visible && Some(&r.image) == image.as_ref())
                     && let Some(l) = &r.layer {
