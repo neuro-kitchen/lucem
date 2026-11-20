@@ -372,7 +372,70 @@ impl Render for AnalyzeWebView {
                     .child(div().text_xs().text_color(color::text_muted()).child(format!("{shown} / {total_rows} rows · {} cols", cols.len())))
                     .child(div().flex_1())
                     .child(div().w(px(220.)).child(Input::new(&self.filter).small())),
+            );
+        let cells_summary = (src == Source::Cells).then(|| {
+            let s = self.store.read(cx);
+            let active = s.doc.active_image.as_deref();
+            let cells = active.and_then(|id| s.hist.cells.get(id));
+            let um = active.and_then(|id| s.pyramids.get(id)).and_then(|p| p.pixel_size_um);
+            let list = cells.filter(|l| !l.is_empty())?;
+            let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            let mut by_class: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for c in list {
+                x0 = x0.min(c.centroid[0]);
+                y0 = y0.min(c.centroid[1]);
+                x1 = x1.max(c.centroid[0]);
+                y1 = y1.max(c.centroid[1]);
+                *by_class.entry(c.class.clone().unwrap_or_else(|| "Unclassified".into())).or_default() += 1;
+            }
+            let (span_w, span_h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+            let (region_label, density_label) = match um {
+                Some(u) if u > 0.0 => {
+                    let w_mm = span_w * u / 1000.0;
+                    let h_mm = span_h * u / 1000.0;
+                    let area_mm2 = (w_mm * h_mm).max(1e-6);
+                    (format!("{w_mm:.2} × {h_mm:.2} mm"), format!("{:.0} cells/mm²", list.len() as f64 / area_mm2))
+                }
+                _ => (format!("{span_w:.0} × {span_h:.0} px"), "—".to_string()),
+            };
+            let chips: Vec<gpui_kit::AnyElement> = by_class
+                .into_iter()
+                .take(6)
+                .map(|(cls, n)| {
+                    h_flex()
+                        .px(px(8.))
+                        .h(px(22.))
+                        .rounded(px(999.))
+                        .bg(color::panel())
+                        .text_xs()
+                        .text_color(color::text_muted())
+                        .child(format!("{cls}: {n}"))
+                        .into_any_element()
+                })
+                .collect();
+            Some(
+                v_flex()
+                    .flex_none()
+                    .mx(px(theme::MD))
+                    .mt(px(theme::SM))
+                    .p(px(theme::SM))
+                    .gap(px(theme::XS))
+                    .rounded(px(10.))
+                    .bg(color::control())
+                    .child(
+                        h_flex()
+                            .gap(px(theme::LG))
+                            .flex_wrap()
+                            .items_center()
+                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text()).child(format!("Region LOD summary · {} cells", list.len())))
+                            .child(div().text_xs().text_color(color::text_muted()).child(format!("Span: {region_label}")))
+                            .child(div().text_xs().text_color(color::text_muted()).child(format!("Density: {density_label}"))),
+                    )
+                    .child(h_flex().gap(px(6.)).flex_wrap().children(chips)),
             )
+        }).flatten();
+        let main = main
+            .children(cells_summary)
             .when(self.loading, |v| v.child(div().p(px(theme::LG)).text_xs().text_color(color::text_muted()).child("Loading table…")))
             .children(self.error.clone().map(|e| div().p(px(theme::MD)).text_xs().text_color(color::danger()).child(e)))
             .when(!self.loading && cols.is_empty(), |v| {

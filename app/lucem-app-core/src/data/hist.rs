@@ -1216,9 +1216,17 @@ mod tests {
 async fn server_objects(link: &lucem_stream::web_client::PageLink, path: &str, kind: &str) -> Result<Vec<HistObject>, String> {
     let mut out: Vec<HistObject> = Vec::new();
     loop {
-        let answer = link.plugin_call(lucem_hist::service::PLUGIN, "objects", &serde_json::json!({ "path": path, "kind": kind, "offset": out.len() })).await.map_err(|e| e.to_string())?;
+        let mut answer = link
+            .plugin_call(
+                lucem_hist::service::PLUGIN,
+                "objects",
+                &serde_json::json!({ "path": path, "kind": kind, "offset": out.len(), "limit": 5_000 }),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         let total = answer["total"].as_u64().unwrap_or(0) as usize;
-        let page: Vec<HistObject> = serde_json::from_value(answer["objects"].clone()).map_err(|e| e.to_string())?;
+        let raw = answer.get_mut("objects").map(serde_json::Value::take).unwrap_or_default();
+        let page: Vec<HistObject> = serde_json::from_value(raw).map_err(|e| e.to_string())?;
         if page.is_empty() {
             break;
         }

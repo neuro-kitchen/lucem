@@ -72,6 +72,41 @@ enum Gesture {
     Wand(Box<Wand>),
 }
 
+/// Fast separable 2-pass box blur on a 2D `f32` buffer (used to suppress fluorescence shot noise
+/// before Magic Wand flood-filling so selections snap cleanly to anatomical boundaries).
+fn box_blur_f32(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+    if radius == 0 || w == 0 || h == 0 {
+        return src.to_vec();
+    }
+    let mut tmp = vec![0.0f32; w * h];
+    let mut dst = vec![0.0f32; w * h];
+    let r = radius as isize;
+    for y in 0..h {
+        let row = y * w;
+        for x in 0..w {
+            let x0 = (x as isize - r).max(0) as usize;
+            let x1 = (x as isize + r).min(w as isize - 1) as usize;
+            let mut sum = 0.0f32;
+            for xi in x0..=x1 {
+                sum += src[row + xi];
+            }
+            tmp[row + x] = sum / (x1 - x0 + 1) as f32;
+        }
+    }
+    for x in 0..w {
+        for y in 0..h {
+            let y0 = (y as isize - r).max(0) as usize;
+            let y1 = (y as isize + r).min(h as isize - 1) as usize;
+            let mut sum = 0.0f32;
+            for yi in y0..=y1 {
+                sum += tmp[yi * w + x];
+            }
+            dst[y * w + x] = sum / (y1 - y0 + 1) as f32;
+        }
+    }
+    dst
+}
+
 /// A wand stroke: the visible region of a level, its visible channels in display units (0–1),
 /// the painted mask and its bounds.
 #[derive(Debug, Clone)]
@@ -86,8 +121,10 @@ struct Wand {
     mask: Vec<u8>,
     /// `x0, y0, x1, y1` (exclusive) of what is painted, region px.
     bbox: Option<(usize, usize, usize, usize)>,
-    /// Brush radius, level-0 px.
+    /// Brush radius, level-0 px (used when `flood == false`).
     radius: f64,
+    /// True = contiguous flood fill (Photoshop/QuPath Magic Wand); false = smart brush.
+    flood: bool,
     last: [f64; 2],
     tolerance: f32,
     color: [u8; 3],
@@ -95,7 +132,8 @@ struct Wand {
 }
 
 impl Wand {
-    /// Paints the pixels within the brush that are connected to its centre and look like it.
+    /// Flood-fills connected pixels similar to the seed (unconstrained in `flood` mode, or within
+    /// `radius` in smart-brush mode) and fills enclosed interior holes.
     fn stamp(&mut self, p: [f64; 2]) {
         let (cx, cy) = (p[0] / self.ds - self.x0 as f64, p[1] / self.ds - self.y0 as f64);
         if cx < 0.0 || cy < 0.0 || cx >= self.w as f64 || cy >= self.h as f64 {
@@ -103,41 +141,107 @@ impl Wand {
         }
         let (sx, sy) = (cx as usize, cy as usize);
         let r = (self.radius / self.ds).max(1.0);
+        let r2 = r * r;
         let seed: Vec<f32> = self.channels.iter().map(|c| c[sy * self.w + sx]).collect();
         let tol = self.tolerance;
-        let (w, h) = (self.w as isize, self.h as isize);
-        let mut seen = std::collections::HashSet::new();
-        let mut stack = vec![(sx as isize, sy as isize)];
-        seen.insert((sx as isize, sy as isize));
+        let (w, h) = (self.w, self.h);
+        let mut seen = vec![0u8; w * h];
+        let mut queue = std::collections::VecDeque::new();
+        seen[sy * w + sx] = 1;
+        queue.push_back((sx, sy));
         let (mut bx0, mut by0, mut bx1, mut by1) = self.bbox.unwrap_or((usize::MAX, usize::MAX, 0, 0));
-        while let Some((x, y)) = stack.pop() {
-            let i = (y * w + x) as usize;
+        while let Some((x, y)) = queue.pop_front() {
+            let i = y * w + x;
             self.mask[i] = 1;
-            (bx0, by0, bx1, by1) = (bx0.min(x as usize), by0.min(y as usize), bx1.max(x as usize + 1), by1.max(y as usize + 1));
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let (nx, ny) = (x + dx, y + dy);
-                if nx < 0 || ny < 0 || nx >= w || ny >= h || seen.contains(&(nx, ny)) {
+            bx0 = bx0.min(x);
+            by0 = by0.min(y);
+            bx1 = bx1.max(x + 1);
+            by1 = by1.max(y + 1);
+            let neighbors = [
+                (x + 1 < w).then(|| (x + 1, y)),
+                (x > 0).then(|| (x - 1, y)),
+                (y + 1 < h).then(|| (x, y + 1)),
+                (y > 0).then(|| (x, y - 1)),
+            ];
+            for (nx, ny) in neighbors.into_iter().flatten() {
+                let j = ny * w + nx;
+                if seen[j] != 0 {
                     continue;
                 }
-                let (ddx, ddy) = (nx as f64 + 0.5 - cx, ny as f64 + 0.5 - cy);
-                if ddx * ddx + ddy * ddy > r * r {
-                    continue;
+                if !self.flood {
+                    let (ddx, ddy) = (nx as f64 + 0.5 - cx, ny as f64 + 0.5 - cy);
+                    if ddx * ddx + ddy * ddy > r2 {
+                        continue;
+                    }
                 }
-                let j = (ny * w + nx) as usize;
                 if self.channels.iter().zip(&seed).all(|(c, s)| (c[j] - s).abs() <= tol) {
-                    seen.insert((nx, ny));
-                    stack.push((nx, ny));
+                    seen[j] = 1;
+                    queue.push_back((nx, ny));
                 }
             }
         }
-        if bx1 > bx0 {
+        if bx1 > bx0 && by1 > by0 {
             self.bbox = Some((bx0, by0, bx1, by1));
+            self.fill_holes(bx0, by0, bx1, by1);
         }
         self.last = p;
     }
 
-    /// Stamps along the segment from the last stamp to `p`.
+    /// Fills enclosed interior holes inside `[bx0..bx1, by0..by1]` so fluorescence speckles don't
+    /// leave swiss-cheese cutouts in the selected region.
+    fn fill_holes(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        let (bw, bh) = (bx1 - bx0, by1 - by0);
+        if bw < 3 || bh < 3 {
+            return;
+        }
+        let mut outside = vec![0u8; bw * bh];
+        let mut q = std::collections::VecDeque::new();
+        let mut seed_bg = |lx: usize, ly: usize| {
+            let gi = (by0 + ly) * self.w + (bx0 + lx);
+            let li = ly * bw + lx;
+            if self.mask[gi] == 0 && outside[li] == 0 {
+                outside[li] = 1;
+                q.push_back((lx, ly));
+            }
+        };
+        for lx in 0..bw {
+            seed_bg(lx, 0);
+            seed_bg(lx, bh - 1);
+        }
+        for ly in 0..bh {
+            seed_bg(0, ly);
+            seed_bg(bw - 1, ly);
+        }
+        while let Some((lx, ly)) = q.pop_front() {
+            let nbs = [
+                (lx + 1 < bw).then(|| (lx + 1, ly)),
+                (lx > 0).then(|| (lx - 1, ly)),
+                (ly + 1 < bh).then(|| (lx, ly + 1)),
+                (ly > 0).then(|| (lx, ly - 1)),
+            ];
+            for (nx, ny) in nbs.into_iter().flatten() {
+                let li = ny * bw + nx;
+                let gi = (by0 + ny) * self.w + (bx0 + nx);
+                if outside[li] == 0 && self.mask[gi] == 0 {
+                    outside[li] = 1;
+                    q.push_back((nx, ny));
+                }
+            }
+        }
+        for ly in 0..bh {
+            for lx in 0..bw {
+                if outside[ly * bw + lx] == 0 {
+                    self.mask[(by0 + ly) * self.w + (bx0 + lx)] = 1;
+                }
+            }
+        }
+    }
+
+    /// Stamps along the segment from the last stamp to `p` (in smart-brush mode; flood mode is single-click).
     fn stroke_to(&mut self, p: [f64; 2]) {
+        if self.flood {
+            return;
+        }
         let step = (self.radius * 0.5).max(self.ds);
         let (a, d) = (self.last, (p[0] - self.last[0]).hypot(p[1] - self.last[1]));
         if d < step {
@@ -151,15 +255,40 @@ impl Wand {
         self.refresh_overlay();
     }
 
-    /// The painted part as an image over the canvas.
+    /// Selection preview: calm 24% translucent interior tint + crisp bright 1 px perimeter contour.
     fn refresh_overlay(&mut self) {
         let Some((bx0, by0, bx1, by1)) = self.bbox else { return };
         let (bw, bh) = (bx1 - bx0, by1 - by0);
-        let mut crop = Vec::with_capacity(bw * bh);
-        for y in by0..by1 {
-            crop.extend(self.mask[y * self.w + bx0..y * self.w + bx1].iter().map(|&v| v as f32));
+        let [r, g, b] = self.color;
+        // Brighten the perimeter color slightly toward white so it pops cleanly on dark fluorescence
+        let er = ((r as u16 + 255) / 2) as u8;
+        let eg = ((g as u16 + 255) / 2) as u8;
+        let eb = ((b as u16 + 255) / 2) as u8;
+        let mut out = vec![0u8; bw * bh * 4];
+        for ly in 0..bh {
+            let gy = by0 + ly;
+            for lx in 0..bw {
+                let gx = bx0 + lx;
+                if self.mask[gy * self.w + gx] == 0 {
+                    continue;
+                }
+                let is_edge = lx == 0
+                    || ly == 0
+                    || lx + 1 == bw
+                    || ly + 1 == bh
+                    || self.mask[gy * self.w + (gx - 1)] == 0
+                    || self.mask[gy * self.w + (gx + 1)] == 0
+                    || self.mask[(gy - 1) * self.w + gx] == 0
+                    || self.mask[(gy + 1) * self.w + gx] == 0;
+                let dst = (ly * bw + lx) * 4;
+                if is_edge {
+                    out[dst..dst + 4].copy_from_slice(&[eb, eg, er, 235]);
+                } else {
+                    out[dst..dst + 4].copy_from_slice(&[b, g, r, 62]);
+                }
+            }
         }
-        let img = lucem_view::render_layer(&crop, bw, bh, lucem_view::LayerStyle::Mask { color: self.color, alpha: 0.65 });
+        let img = lucem_view::bgra_image(bw, bh, out);
         let ds = self.ds;
         self.overlay = Some(([(self.x0 + bx0) as f64 * ds, (self.y0 + by0) as f64 * ds, bw as f64 * ds, bh as f64 * ds], img));
     }
@@ -904,7 +1033,9 @@ impl ImageCanvas {
             };
             let span = (d.max - d.min).max(1e-12);
             raw.iter_mut().for_each(|x| *x = ((*x - d.min) / span).clamp(0.0, 1.0));
-            channels.push(raw);
+            let smooth_r = self.store.read(cx).tool.wand_smooth.round().max(0.0) as usize;
+            let smoothed = if smooth_r > 0 { box_blur_f32(&raw, w, h, smooth_r) } else { raw };
+            channels.push(smoothed);
         }
         if channels.is_empty() {
             self.prefetch_raw(cx);
@@ -915,7 +1046,8 @@ impl ImageCanvas {
         }
         let s = self.store.read(cx);
         let color = s.doc.class(&s.tool.class).map_or([255, 255, 255], |c| c.color);
-        let mut wand = Wand { level, ds, x0, y0, w, h, channels, mask: vec![0; w * h], bbox: None, radius: self.brush_radius(cx), last: p, tolerance: s.tool.wand_tolerance, color, overlay: None };
+        let flood = s.tool.wand_flood;
+        let mut wand = Wand { level, ds, x0, y0, w, h, channels, mask: vec![0; w * h], bbox: None, radius: self.brush_radius(cx), flood, last: p, tolerance: s.tool.wand_tolerance, color, overlay: None };
         let _ = wand.level;
         wand.stamp(p);
         wand.refresh_overlay();
@@ -1207,11 +1339,17 @@ impl ImageCanvas {
     }
 
     /// Reads (in the background) the raw tiles of shown channels the tile service does not draw
-    /// (those drawn from their results), so the readout, probe and wand have their values.
+    /// (those drawn from their results), or ALL channels when Pixel Probe is active, so the
+    /// readout, probe HUD and wand always have real pixel values.
     fn prefetch_raw(&mut self, cx: &mut Context<Self>) {
+        let probe_active = self.tool(cx) == Tool::Probe;
         let chans: Vec<usize> = {
             let Some(v) = self.viewer.as_ref() else { return };
-            self.shown_channels(cx).into_iter().filter(|c| !v.display_docs.get(*c).is_some_and(|d| d.visible)).collect()
+            if probe_active {
+                (0..v.pyramid.channels.len()).collect()
+            } else {
+                self.shown_channels(cx).into_iter().filter(|c| !v.display_docs.get(*c).is_some_and(|d| d.visible)).collect()
+            }
         };
         if chans.is_empty() {
             return;
@@ -1318,12 +1456,27 @@ impl ImageCanvas {
         match tool {
             Tool::Zoom => self.zoom_at(if e.modifiers.alt { 0.5 } else { 2.0 }, Some(local), cx),
             Tool::Probe => {
-                // The 3D cursor to the pixel clicked (the other views follow)
+                // Move 3D cursor to the clicked pixel and copy the multi-channel readout to clipboard
                 if let Some(id) = self.viewer.as_ref().map(|v| v.image.clone()) {
                     let at = [self.z, p[1].max(0.0) as usize, p[0].max(0.0) as usize];
                     self.store.update(cx, |s, cx| s.set_cursor_of(&id, at, cx));
                 }
-                self.gesture = Some(Gesture::Pan { mouse: local, center: self.center });
+                if let Some((pt, _, vals)) = self.readout() {
+                    let s = self.store.read(cx);
+                    let names: Vec<String> = s.doc.active().map(|i| i.channels.iter().map(|c| c.label.clone()).collect()).unwrap_or_default();
+                    let summary: String = names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, n)| match vals.get(i).copied().flatten() {
+                            Some(v) => format!("{n}={v:.1}"),
+                            None => format!("{n}=—"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    let line = format!("({:.1}, {:.1})  {summary}", pt[0], pt[1]);
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(line.clone()));
+                    self.store.update(cx, |s, cx| s.set_status(format!("Probe copied: {line}"), cx));
+                }
             }
             Tool::Select => {
                 match self.hit(p, cx) {
@@ -1944,6 +2097,9 @@ impl Render for ImageCanvas {
         self.sync_threshold(cx);
         self.sync_paint(cx);
         self.sync_cells(cx);
+        if self.tool(cx) == Tool::Probe {
+            self.prefetch_raw(cx);
+        }
         let s = self.store.read(cx);
         let mut tool = s.tool.clone();
         if let Some(o) = self.overlays {
@@ -1993,8 +2149,9 @@ impl Render for ImageCanvas {
         let labels = self.labels(cx);
         let (zoom, center) = (self.zoom, self.center);
         let (vw, vh) = self.view_size();
-        // The brush outline at true size
-        let brush = match (tool.tool.uses_brush(), self.mouse, &self.gesture) {
+        // The brush outline at true size (hidden in Wand flood-fill mode)
+        let show_brush_ring = tool.tool.uses_brush() && !(tool.tool == Tool::Wand && tool.wand_flood);
+        let brush = match (show_brush_ring, self.mouse, &self.gesture) {
             (true, Some(m), None | Some(Gesture::Path { .. })) => Some((m, (self.brush_radius(cx) * zoom) as f32)),
             _ => None,
         };
@@ -2100,6 +2257,68 @@ impl Render for ImageCanvas {
                 .child(div().text_xs().text_color(gpui_kit::white()).child(bar_label))
                 .child(div().w(px(bar_px)).h(px(3.)).bg(gpui_kit::white()))
         });
+        let probe_hud = (tool.tool == Tool::Probe)
+            .then(|| {
+                let (pt, _, vals) = self.readout()?;
+                let img_doc = s.doc.active()?;
+                let coord_str = match um {
+                    Some(u) => format!("x {:.1}  y {:.1} µm  ({:.0}, {:.0} px)", pt[0] * u, pt[1] * u, pt[0], pt[1]),
+                    None => format!("x {:.0}  y {:.0} px", pt[0], pt[1]),
+                };
+                let rows: Vec<gpui_kit::AnyElement> = img_doc
+                    .channels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ch)| {
+                        let val = vals.get(i).copied().flatten();
+                        let frac = val
+                            .map(|v| ((v - ch.min) / (ch.max - ch.min).max(1e-6)).clamp(0.0, 1.0))
+                            .unwrap_or(0.0);
+                        let val_str = val.map_or_else(|| "…".to_string(), |v| format!("{v:.1}"));
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(div().flex_none().size(px(8.)).rounded_full().bg(theme::rgb8(ch.color)))
+                            .child(div().w(px(72.)).truncate().text_xs().text_color(color::text()).child(ch.label.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(4.))
+                                    .rounded(px(2.))
+                                    .bg(color::control())
+                                    .overflow_hidden()
+                                    .child(div().h_full().w(gpui_kit::relative(frac)).bg(theme::rgb8(ch.color))),
+                            )
+                            .child(div().w(px(46.)).text_right().text_xs().font_family("monospace").text_color(color::text_muted()).child(val_str))
+                            .into_any_element()
+                    })
+                    .collect();
+                Some(
+                    v_flex()
+                        .absolute()
+                        .top(px(12.))
+                        .left(px(12.))
+                        .w(px(236.))
+                        .p(px(10.))
+                        .gap(px(5.))
+                        .rounded(px(10.))
+                        .bg(color::panel().opacity(0.94))
+                        .border_1()
+                        .border_color(color::border())
+                        .shadow_md()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(color::text()).child("Pixel Probe"))
+                                .child(div().text_size(px(10.)).text_color(color::text_muted()).child("Click to copy")),
+                        )
+                        .child(div().text_size(px(10.)).font_family("monospace").text_color(color::text_muted()).child(coord_str))
+                        .children(rows),
+                )
+            })
+            .flatten();
+
         let plane_el = div()
             .id("image-plane")
             .relative()
@@ -2122,7 +2341,8 @@ impl Render for ImageCanvas {
             .child(plane)
             .children(label_elems)
             .children(empty)
-            .children(scale_bar);
+            .children(scale_bar)
+            .children(probe_hud);
 
         // Rulers
         let rulers = tool.rulers && image.is_some();
