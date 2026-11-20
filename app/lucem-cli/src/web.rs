@@ -242,7 +242,7 @@ impl ServerPythonWorker {
         }
         let mut cmd = if let Some(deps) = deps {
             let mut c = std::process::Command::new("uv");
-            c.args(["run", "--quiet"]);
+            c.args(["run", "--no-project", "--quiet"]);
             for dep in deps {
                 c.args(["--with", dep]);
             }
@@ -255,6 +255,7 @@ impl ServerPythonWorker {
             c
         };
         let mut child = cmd
+            .current_dir(&worker_dir)
             .arg(&worker_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
