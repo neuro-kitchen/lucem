@@ -56,6 +56,7 @@ export default defineConfig({
             chapter('Get started', 'learn/get-started'),
             chapter('Concepts', 'learn/concepts'),
             chapter('Python', 'learn/python'),
+            chapter('Migration guides', 'learn/migration'),
             {
               label: 'Course',
               collapsed: false,

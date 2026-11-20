@@ -14,10 +14,12 @@ pub enum Workspace {
     Analyze,
     /// Simplified Zed-style script editor for Python & Rust ops.
     Code,
+    /// Publication figure composer: multi-panel channels, stages, scale bars, titles, and PNG/SVG export.
+    Figure,
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 4] = [Workspace::Explore, Workspace::Pipeline, Workspace::Analyze, Workspace::Code];
+    pub const ALL: [Workspace; 5] = [Workspace::Explore, Workspace::Pipeline, Workspace::Analyze, Workspace::Code, Workspace::Figure];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -25,6 +27,7 @@ impl Workspace {
             Workspace::Pipeline => "Pipeline",
             Workspace::Analyze => "Analyze",
             Workspace::Code => "Code",
+            Workspace::Figure => "Figure",
         }
     }
 
@@ -34,6 +37,7 @@ impl Workspace {
             Workspace::Pipeline => "The processing graph: sources, operations and results on a canvas (2)",
             Workspace::Analyze => "Measurements of annotations and objects as tables (3)",
             Workspace::Code => "Write and edit Python & Rust script ops (4)",
+            Workspace::Figure => "Compose publication figures from channels, pipeline stages, and ROIs (5)",
         }
     }
 
@@ -43,6 +47,7 @@ impl Workspace {
             Workspace::Pipeline => IconName::Workflow,
             Workspace::Analyze => IconName::Table2,
             Workspace::Code => IconName::Code,
+            Workspace::Figure => IconName::LayoutGrid,
         }
     }
 }

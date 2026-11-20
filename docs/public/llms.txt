@@ -1,0 +1,45 @@
+# Lucem — GPU Image Analysis for Histology & Microscopy
+
+> Lucem is a Rust + Python + WebAssembly platform for viewing gigapixel OME-Zarr / OME-TIFF slides, building live GPU processing pipelines (CubeCL), running CUDA ML cell segmentation (StarDist, InstanSeg), writing `@lucem.op` scripts, and composing publication figures.
+
+## Quick links
+
+- Docs home: https://neuro-kitchen.github.io/lucem/
+- Interactive browser viewer: https://neuro-kitchen.github.io/lucem/viewer/
+- Repository: https://github.com/neuro-kitchen/lucem
+
+## Installation
+
+- Python (core): `pip install lucem`
+- Python + browser app: `pip install "lucem[web]"` then `lucem web`
+- Rust CLI & Desktop app: `cargo run -p lucem-app` / `cargo build -p lucem-cli`
+
+## Workspaces (App)
+
+- **Explore (`Ctrl+1`)**: Multi-channel pyramid viewer, Multiview split, annotations, edge-snapping Magic Wand (`W`, `Alt` to erase), Pixel Probe HUD (`I`), Histology recipes.
+- **Pipeline (`Ctrl+2`)**: Non-destructive GPU node graph (52 CubeCL ops), live node previews, Script & Model nodes, `.lucem-recipe.json` export.
+- **Analyze (`Ctrl+3`)**: Measurement tables (Polars on desktop, Region LOD summaries in browser).
+- **Code (`Ctrl+4`)**: Built-in Python & Rust `@lucem.op` editor with LSP completion/hover and Astral `ruff` diagnostics.
+- **Figure (`Ctrl+5`)**: Multi-panel publication composer with channel/stage presets, ROI crop sync, calibrated scale bars, and PNG / SVG export.
+
+## Core Python API
+
+- `lucem.open(path)` — open OME-Zarr, OME-TIFF, or standard image as a lazy `Pyramid`
+- `@lucem.op(family="Filter", halo=12)` — register a custom tiled NumPy/SciPy operation with auto-generated UI parameters
+- `lucem.ops.*` — 52 GPU-accelerated filtering, morphology, threshold, and segmentation operations
+- `lucem.hist.*` — tissue detection, cell detection (threshold, StarDist, InstanSeg), stain separation, intensity scoring
+- `lucem.web.serve(...)` — launch the browser viewer locally
+
+## Key Documentation Pages
+
+- Get Started: https://neuro-kitchen.github.io/lucem/learn/get-started/install/
+- Python Guide: https://neuro-kitchen.github.io/lucem/learn/python/
+- 6-Chapter Course: https://neuro-kitchen.github.io/lucem/learn/course/
+- Coming from QuPath: https://neuro-kitchen.github.io/lucem/learn/migration/coming-from-qupath/
+- Coming from Napari & ImageJ: https://neuro-kitchen.github.io/lucem/learn/migration/coming-from-napari/
+- Architecture & Performance: https://neuro-kitchen.github.io/lucem/learn/concepts/performance/
+- Figure Composer: https://neuro-kitchen.github.io/lucem/app/figure/
+- Keyboard Shortcuts: https://neuro-kitchen.github.io/lucem/app/shortcuts/
+- Python API Reference: https://neuro-kitchen.github.io/lucem/reference/python/
+- CLI Reference: https://neuro-kitchen.github.io/lucem/reference/cli/
+- Operations Reference: https://neuro-kitchen.github.io/lucem/reference/operations/

@@ -3,4 +3,5 @@
 //! paths stay `crate::domain::…`), and the app's own tools.
 
 pub use lucem_session::{annotation, boolean, command, geometry, graph, hierarchy, paths, project};
+pub mod figure;
 pub mod tool;

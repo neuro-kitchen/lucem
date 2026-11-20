@@ -78,9 +78,9 @@ pub fn panel(store: &Entity<Store>, cx: &App) -> AnyElement {
     let idle = job.is_none();
     let stains = s.hist_stains(&img);
     let brightfield = !matches!(stains, StainChoice::Fluorescence(_));
-    let cells = s.hist.cells.get(&img).cloned().unwrap_or_default();
-    let count = cells.len();
-    let tiles = s.hist.tiles.get(&img).map_or(0, Vec::len);
+    let cells: &[lucem_hist::HistObject] = s.hist.cells.get(&img).map_or(&[], Vec::as_slice);
+    let count = s.hist.cell_count(&img);
+    let tiles = s.hist.tile_count(&img);
     let selected: Vec<&crate::domain::annotation::Annotation> = s.doc.annotations.iter().filter(|a| a.image == img && s.sel.shapes.contains(&a.id) && a.shape.is_region()).collect();
     let regions = selected.len();
 

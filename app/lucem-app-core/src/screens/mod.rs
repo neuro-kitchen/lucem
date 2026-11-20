@@ -8,6 +8,7 @@ pub mod analyze_web;
 pub mod code;
 pub mod code_lsp;
 pub mod explore;
+pub mod figure;
 pub mod home;
 pub mod pipeline;
 pub mod server_images;

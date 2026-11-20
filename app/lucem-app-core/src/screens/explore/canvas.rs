@@ -107,8 +107,83 @@ fn box_blur_f32(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
     dst
 }
 
+/// Computes a multi-channel Sobel edge-magnitude map (`0..=1+`) so the Magic Wand can stop cleanly
+/// at sharp anatomical boundaries (Affinity Photo "Snap to edges" / Photoshop Quick Selection).
+fn sobel_gradient_map(channels: &[Vec<f32>], w: usize, h: usize) -> Vec<f32> {
+    let mut grad = vec![0.0f32; w * h];
+    if w < 3 || h < 3 {
+        return grad;
+    }
+    for ch in channels {
+        for y in 1..h - 1 {
+            let r0 = (y - 1) * w;
+            let r1 = y * w;
+            let r2 = (y + 1) * w;
+            for x in 1..w - 1 {
+                let gx = -ch[r0 + x - 1] + ch[r0 + x + 1] - 2.0 * ch[r1 + x - 1] + 2.0 * ch[r1 + x + 1] - ch[r2 + x - 1] + ch[r2 + x + 1];
+                let gy = -ch[r0 + x - 1] - 2.0 * ch[r0 + x] - ch[r0 + x + 1] + ch[r2 + x - 1] + 2.0 * ch[r2 + x] + ch[r2 + x + 1];
+                let mag = (gx * gx + gy * gy).sqrt() * 0.25;
+                let idx = r1 + x;
+                if mag > grad[idx] {
+                    grad[idx] = mag;
+                }
+            }
+        }
+    }
+    grad
+}
+
+/// 1-pass morphological close (3×3 dilate then erode) on a cropped binary mask to smooth 1 px
+/// jagged edges before polygon contour tracing (Photoshop Auto-Enhance / Affinity Refine).
+fn morph_close_1px(mask: &[u8], w: usize, h: usize) -> Vec<u8> {
+    if w < 3 || h < 3 {
+        return mask.to_vec();
+    }
+    let mut dil = vec![0u8; w * h];
+    for y in 0..h {
+        let y0 = y.saturating_sub(1);
+        let y1 = (y + 1).min(h - 1);
+        for x in 0..w {
+            let x0 = x.saturating_sub(1);
+            let x1 = (x + 1).min(w - 1);
+            let mut any = 0u8;
+            'd: for ny in y0..=y1 {
+                let row = ny * w;
+                for nx in x0..=x1 {
+                    if mask[row + nx] != 0 {
+                        any = 1;
+                        break 'd;
+                    }
+                }
+            }
+            dil[y * w + x] = any;
+        }
+    }
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        let y0 = y.saturating_sub(1);
+        let y1 = (y + 1).min(h - 1);
+        for x in 0..w {
+            let x0 = x.saturating_sub(1);
+            let x1 = (x + 1).min(w - 1);
+            let mut all = 1u8;
+            'e: for ny in y0..=y1 {
+                let row = ny * w;
+                for nx in x0..=x1 {
+                    if dil[row + nx] == 0 {
+                        all = 0;
+                        break 'e;
+                    }
+                }
+            }
+            out[y * w + x] = all;
+        }
+    }
+    out
+}
+
 /// A wand stroke: the visible region of a level, its visible channels in display units (0–1),
-/// the painted mask and its bounds.
+/// Sobel gradient barrier map, the painted mask and its bounds.
 #[derive(Debug, Clone)]
 struct Wand {
     level: usize,
@@ -118,6 +193,8 @@ struct Wand {
     w: usize,
     h: usize,
     channels: Vec<Vec<f32>>,
+    /// Multi-channel Sobel edge magnitude (`0..=1+`) for Affinity/Photoshop "Snap to edges".
+    grad: Vec<f32>,
     mask: Vec<u8>,
     /// `x0, y0, x1, y1` (exclusive) of what is painted, region px.
     bbox: Option<(usize, usize, usize, usize)>,
@@ -125,6 +202,8 @@ struct Wand {
     radius: f64,
     /// True = contiguous flood fill (Photoshop/QuPath Magic Wand); false = smart brush.
     flood: bool,
+    /// True = stop growth at strong Sobel gradient barriers & refine jagged 1 px edges.
+    snap_edges: bool,
     last: [f64; 2],
     tolerance: f32,
     color: [u8; 3],
@@ -132,9 +211,12 @@ struct Wand {
 }
 
 impl Wand {
-    /// Flood-fills connected pixels similar to the seed (unconstrained in `flood` mode, or within
-    /// `radius` in smart-brush mode). When `erase` is true (`Alt` held), subtracts from the mask
-    /// instead of adding.
+    /// Edge-aware adaptive region growing inspired by Photoshop Quick Selection & Affinity Photo's
+    /// Selection Brush ("Snap to edges"):
+    /// - Samples a 3×3 neighborhood mean & std-dev around the seed instead of a single noisy pixel.
+    /// - Combines foreground similarity, step-to-step local continuity, and a Sobel gradient barrier
+    ///   when `snap_edges` is enabled.
+    /// - When `erase` is true (`Alt` held), subtracts from the mask instead of adding.
     fn stamp(&mut self, p: [f64; 2], erase: bool) {
         let (cx, cy) = (p[0] / self.ds - self.x0 as f64, p[1] / self.ds - self.y0 as f64);
         if cx < 0.0 || cy < 0.0 || cx >= self.w as f64 || cy >= self.h as f64 {
@@ -149,9 +231,39 @@ impl Wand {
         }
         let r = (self.radius / self.ds).max(1.0);
         let r2 = r * r;
-        let seed: Vec<f32> = self.channels.iter().map(|c| c[sy * self.w + sx]).collect();
-        let tol = self.tolerance;
         let (w, h) = (self.w, self.h);
+
+        // 3×3 local neighborhood mean & std-dev around click seed (robust against fluorescence speckle)
+        let n_ch = self.channels.len();
+        let mut seed_mean = vec![0.0f32; n_ch];
+        let mut seed_std = vec![0.0f32; n_ch];
+        let x_lo = sx.saturating_sub(1);
+        let x_hi = (sx + 1).min(w - 1);
+        let y_lo = sy.saturating_sub(1);
+        let y_hi = (sy + 1).min(h - 1);
+        let count = ((x_hi - x_lo + 1) * (y_hi - y_lo + 1)) as f32;
+        for (ci, ch) in self.channels.iter().enumerate() {
+            let mut sum = 0.0f32;
+            for ny in y_lo..=y_hi {
+                for nx in x_lo..=x_hi {
+                    sum += ch[ny * w + nx];
+                }
+            }
+            let mean = sum / count;
+            let mut var = 0.0f32;
+            for ny in y_lo..=y_hi {
+                for nx in x_lo..=x_hi {
+                    let d = ch[ny * w + nx] - mean;
+                    var += d * d;
+                }
+            }
+            seed_mean[ci] = mean;
+            seed_std[ci] = (var / count).sqrt();
+        }
+
+        let tol = self.tolerance;
+        let local_step_tol = (tol * 0.85).max(0.035);
+        let edge_barrier = (tol * 1.15).max(0.08);
         let mut seen = vec![0u8; w * h];
         let mut queue = std::collections::VecDeque::new();
         seen[sy * w + sx] = 1;
@@ -166,6 +278,7 @@ impl Wand {
                 bx1 = bx1.max(x + 1);
                 by1 = by1.max(y + 1);
             }
+            let gi = self.grad[i];
             let neighbors = [
                 (x + 1 < w).then(|| (x + 1, y)),
                 (x > 0).then(|| (x - 1, y)),
@@ -183,7 +296,17 @@ impl Wand {
                         continue;
                     }
                 }
-                if self.channels.iter().zip(&seed).all(|(c, s)| (c[j] - s).abs() <= tol) {
+                // Gradient barrier ("Snap to edges"): block climbing onto a sharp contrast cliff
+                if self.snap_edges && self.grad[j] > edge_barrier && self.grad[j] >= gi {
+                    continue;
+                }
+                let ok = self.channels.iter().enumerate().all(|(ci, ch)| {
+                    let vj = ch[j];
+                    let global_ok = (vj - seed_mean[ci]).abs() <= tol + 0.5 * seed_std[ci];
+                    let step_ok = !self.snap_edges || (vj - ch[i]).abs() <= local_step_tol;
+                    global_ok && step_ok
+                });
+                if ok {
                     seen[j] = 1;
                     queue.push_back((nx, ny));
                 }
@@ -300,7 +423,7 @@ impl Wand {
         self.overlay = Some(([(self.x0 + bx0) as f64 * ds, (self.y0 + by0) as f64 * ds, bw as f64 * ds, bh as f64 * ds], img));
     }
 
-    /// The painted regions as level-0 polygons.
+    /// The painted regions as level-0 polygons (with optional 1 px morphological edge refine).
     fn polygons(&self) -> Vec<Vec<[f64; 2]>> {
         let Some((bx0, by0, bx1, by1)) = self.bbox else { return Vec::new() };
         let (bw, bh) = (bx1 - bx0, by1 - by0);
@@ -308,7 +431,8 @@ impl Wand {
         for y in by0..by1 {
             crop.extend_from_slice(&self.mask[y * self.w + bx0..y * self.w + bx1]);
         }
-        geometry::mask_to_polygons(&crop, bw, bh, 4)
+        let refined = if self.snap_edges && bw >= 4 && bh >= 4 { morph_close_1px(&crop, bw, bh) } else { crop };
+        geometry::mask_to_polygons(&refined, bw, bh, 4)
             .into_iter()
             .map(|p| geometry::simplify(&p, 0.6).into_iter().map(|[x, y]| [(x + (self.x0 + bx0) as f64) * self.ds, (y + (self.y0 + by0) as f64) * self.ds]).collect())
             .collect()
@@ -786,8 +910,8 @@ impl ImageCanvas {
         let s = self.store.read(cx);
         let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
         let show_any = s.hist.show && ov.annotations;
-        let n_cells = if show_any { s.hist.cells.get(&v.image).map_or(0, Vec::len) } else { 0 };
-        let n_tiles = if show_any { s.hist.tiles.get(&v.image).map_or(0, Vec::len) } else { 0 };
+        let n_cells = if show_any { s.hist.cell_count(&v.image) } else { 0 };
+        let n_tiles = if show_any { s.hist.tile_count(&v.image) } else { 0 };
         let key = format!("{}/{}/{}/{}/{}/{}", v.image, s.hist.rev, n_cells, n_tiles, ov.opacity, s.sel.objects.join(","));
         let (iw, ih) = (v.pyramid.width() as f64, v.pyramid.height() as f64);
         let view = self.visible();
@@ -817,6 +941,26 @@ impl ImageCanvas {
                 self.drops.push(old);
             }
             return;
+        }
+        // Server-side viewport rasterization (QuPath / Cytomine pattern): when connected to
+        // `lucem serve` on wasm32, ask the native server to rasterize the visible viewport into a
+        // ~20 KB PNG instead of doing polygon math on the single-threaded WASM main thread.
+        #[cfg(target_family = "wasm")]
+        if s.hist.remote_cells.get(&v.image).copied().unwrap_or(0) > 0 || s.hist.remote_tiles.get(&v.image).copied().unwrap_or(0) > 0 {
+            if let (Some(link), Some(path)) = (crate::data::remote::page_link(), s.doc.image(&v.image).map(|i| i.path.to_string_lossy().into_owned())) {
+                let alpha = ov.opacity;
+                let selected = s.sel.objects.clone();
+                self.cells_task = Some(cx.spawn(async move |this, cx| {
+                    let image = crate::data::hist::server_cells_raster(&link, &path, rect, ds, alpha, selected).await;
+                    let _ = this.update(cx, |c, cx| {
+                        if let Some(old) = c.cells.replace(PaintLayer { rect, ds, key, image }).and_then(|p| p.image) {
+                            c.drops.push(old);
+                        }
+                        cx.notify();
+                    });
+                }));
+                return;
+            }
         }
         // Viewport-cull BEFORE cloning so 100k+ detected cells never OOM or stall the UI thread
         const MAX_RASTER_CELLS: usize = 25_000;
@@ -1054,7 +1198,9 @@ impl ImageCanvas {
         let s = self.store.read(cx);
         let color = s.doc.class(&s.tool.class).map_or([255, 255, 255], |c| c.color);
         let flood = s.tool.wand_flood;
-        let mut wand = Wand { level, ds, x0, y0, w, h, channels, mask: vec![0; w * h], bbox: None, radius: self.brush_radius(cx), flood, last: p, tolerance: s.tool.wand_tolerance, color, overlay: None };
+        let snap_edges = s.tool.wand_snap_edges;
+        let grad = sobel_gradient_map(&channels, w, h);
+        let mut wand = Wand { level, ds, x0, y0, w, h, channels, grad, mask: vec![0; w * h], bbox: None, radius: self.brush_radius(cx), flood, snap_edges, last: p, tolerance: s.tool.wand_tolerance, color, overlay: None };
         let _ = wand.level;
         wand.stamp(p, false);
         wand.refresh_overlay();

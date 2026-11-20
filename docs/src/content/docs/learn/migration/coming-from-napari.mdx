@@ -1,0 +1,47 @@
+---
+title: Coming from Napari & ImageJ / Fiji
+description: Mapping Napari layers, ImageJ macros, and plugin workflows to Lucem.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Lucem combines the multi-channel pyramid viewing of **Napari** with the non-destructive node graph of modern compositors and a zero-boilerplate Python plugin model.
+
+## Concept map
+
+| Napari / ImageJ / Fiji | Lucem equivalent |
+| :--- | :--- |
+| Napari `Image` layers | **Channels** in **Explore › Layers** (independent LUTs, gamma, visibility, and **Multiview** split) |
+| Napari `Shapes` / `Labels` layers | **Shapes** tree with class folders, 18×18 geometry thumbnails, and boolean mask ops |
+| ImageJ Process menu / Macros | **Pipeline** workspace — live non-destructive GPU graph of 52 ops, exportable as `.lucem-recipe.json` |
+| Napari `magicgui` plugins / ImageJ plugins | **`@lucem.op`** Python functions (edited live in the **Code** tab, auto-generating inspector sliders) |
+| `napari.Viewer()` from Python | `lucem web` or `lucem.web.serve(slide)` — opens the GPU viewer in your browser |
+| Fiji `QuickFigures` / `Scale Bar` | Built-in **Figure** workspace with multi-panel presets, ROI crop sync, and vector SVG export |
+
+## Writing a custom op (`@lucem.op`)
+
+Instead of wiring GUI widgets by hand, type annotations in `@lucem.op` automatically generate scrubbed number inputs in **Pipeline**:
+
+<Tabs syncKey="language">
+  <TabItem label="Python">
+```python
+import numpy as np
+import lucem
+
+@lucem.op(family="Filter", halo=12)
+def local_contrast_boost(image: np.ndarray, strength: float = 0.5) -> np.ndarray:
+    """Boost local contrast relative to the tile mean."""
+    mean = float(np.mean(image))
+    return np.clip(image + strength * (image - mean), 0.0, 1.0).astype(np.float32)
+```
+  </TabItem>
+  <TabItem label="Command line">
+```bash
+# Drop the file into ~/.config/lucem/plugins/ops/ or edit it in the Code tab.
+# It appears immediately in Pipeline › Script and runs in a warm /dev/shm worker pool.
+lucem serve --data ./slides
+```
+  </TabItem>
+</Tabs>

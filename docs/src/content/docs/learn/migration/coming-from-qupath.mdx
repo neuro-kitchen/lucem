@@ -1,0 +1,66 @@
+---
+title: Coming from QuPath
+description: How QuPath projects, annotations, cell detection, Groovy scripts, and exports map to Lucem.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+If you already use **QuPath** for whole-slide pathology or multiplex immunofluorescence, Lucem's workflow will feel immediately familiar — with GPU-accelerated pipelines, native Python `@lucem.op` scripting, and browser-ready `lucem serve` hosting.
+
+## Concept map
+
+| QuPath | Lucem equivalent |
+| :--- | :--- |
+| Project (`project.qpproj`) | Project folder (`project.json` + `session.json` + `histology/`) |
+| Annotations (Rect, Polygon, Wand) | **Shapes** in **Explore** (`R`, `P`, `W` with **Snap to edges** & `Alt`-erase) |
+| Magic Wand tool | **Wand (`W`)** — supports both **Flood fill** and **Smart brush**, Sobel gradient barrier, `Smooth`, hole filling, drag-to-add, and `Alt`-to-erase |
+| Cell detection (Watershed / StarDist / InstanSeg) | **Histology › Count cells** (built-in GPU threshold + CUDA **StarDist** & **InstanSeg** plugins) |
+| Groovy scripts | **Code** workspace (Python `@lucem.op` & Rust ops with LSP + Astral `ruff`) or `lucem` Python API |
+| Measurement tables & Show detection measurements | **Analyze** workspace (Polars on desktop, Region LOD summaries in browser) |
+| Export GeoJSON / TSV | **File › Export GeoJSON** / **Export cells** (GeoParquet, Parquet, CSV, GeoJSON) |
+| Send region to ImageJ / QuickFigures | Built-in **Figure** workspace (channels, stages, scale bars, PNG & SVG export) |
+
+## Example: StarDist cell detection in a region
+
+<Tabs syncKey="language">
+  <TabItem label="Command line">
+```bash
+lucem hist cells slide.ome.zarr \
+  --detector stardist-fluo \
+  --channel DAPI \
+  --out cells.parquet
+```
+  </TabItem>
+  <TabItem label="Python">
+```python
+import lucem
+
+slide = lucem.open("slide.ome.zarr")
+cells = lucem.hist.detect_cells(
+    slide,
+    detector="stardist-fluo",
+    channel="DAPI",
+    min_area_um2=10.0,
+    max_area_um2=400.0,
+)
+print(f"Detected {len(cells)} cells")
+```
+  </TabItem>
+  <TabItem label="Rust">
+```rust
+use lucem_hist::{CellDetection, StainChoice};
+
+let settings = CellDetection {
+    min_area_um2: 10.0,
+    max_area_um2: 400.0,
+    ..Default::default()
+};
+```
+  </TabItem>
+</Tabs>
+
+## Why large whole-slide detections stay responsive in Lucem
+
+In browser mode (`lucem serve`), Lucem keeps the full 100k–1M cell dataset on the server and streams lightweight viewport PNG overlays (`hist/raster`) as you pan and zoom — so the browser never freezes downloading or rasterizing hundreds of thousands of JSON polygons.

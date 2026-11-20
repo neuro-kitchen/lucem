@@ -255,7 +255,19 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, scrub: &
                         move |d, _, cx| st_sm1.update(cx, |s, cx| s.update_tool(|t| t.wand_smooth = (t.wand_smooth + d).clamp(0.0, 8.0), cx)),
                         move |v, _, cx| st_sm2.update(cx, |s, cx| s.update_tool(|t| t.wand_smooth = (v as f32).clamp(0.0, 8.0), cx)),
                         cx,
-                    ));
+                    ))
+                    .child(divider_v())
+                    .child({
+                        let st_snap = store.clone();
+                        Checkbox::new("wand-snap-edges")
+                            .checked(t.wand_snap_edges)
+                            .label("Snap to edges")
+                            .tooltip("Stop selection at sharp contrast edges (Affinity / Photoshop Quick Selection). Hold Alt to erase.")
+                            .on_click(move |on: &bool, _, cx| {
+                                let on = *on;
+                                st_snap.update(cx, |s, cx| s.update_tool(|t| t.wand_snap_edges = on, cx));
+                            })
+                    });
             } else {
                 let st = store.clone();
                 bar = bar.child(divider_v()).child(brush_size()).child(Checkbox::new("brush-in-image").checked(t.brush_in_image).label("Fixed on the image").on_click(move |on: &bool, _, cx| {

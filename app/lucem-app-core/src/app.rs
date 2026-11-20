@@ -26,6 +26,7 @@ use crate::screens::analyze::AnalyzeView;
 use crate::screens::analyze_web::AnalyzeWebView;
 use crate::screens::code::CodeWorkspaceView;
 use crate::screens::explore::ExploreView;
+use crate::screens::figure::FigureView;
 use crate::screens::pipeline::PipelineView;
 use crate::screens::settings::{Section, SettingsView};
 use crate::ui::theme::{self, color};
@@ -254,6 +255,7 @@ pub struct LucemApp {
     #[cfg(target_family = "wasm")]
     pub analyze_web: Entity<AnalyzeWebView>,
     pub code: Entity<CodeWorkspaceView>,
+    pub figure: Entity<FigureView>,
     op_hover_preview: Entity<crate::ui::op_gallery::OpHoverPreview>,
     last_toast_id: u64,
     toast_timer: Option<gpui_kit::Task<()>>,
@@ -276,6 +278,7 @@ impl LucemApp {
         #[cfg(target_family = "wasm")]
         let analyze_web = cx.new(|cx| AnalyzeWebView::new(store.clone(), window, cx));
         let code = cx.new(|cx| CodeWorkspaceView::new(store.clone(), window, cx));
+        let figure = cx.new(|cx| FigureView::new(store.clone(), window, cx));
         // Model plugins are looked for once, in the background
         store.update(cx, |s, cx| s.scan_plugins(cx));
 
@@ -344,6 +347,7 @@ impl LucemApp {
         #[cfg(target_family = "wasm")]
         workspaces.push(workspace(Workspace::Analyze, analyze_web.clone().into(), AnalyzeWebView::menu_specs()));
         workspaces.push(workspace(Workspace::Code, code.clone().into(), CodeWorkspaceView::menu_specs()));
+        workspaces.push(workspace(Workspace::Figure, figure.clone().into(), FigureView::menu_specs()));
         let settings_view = cx.new(|_| SettingsView::new(store.clone()));
         let sections = Section::ALL
             .into_iter()
@@ -514,6 +518,7 @@ impl LucemApp {
             #[cfg(target_family = "wasm")]
             analyze_web,
             code,
+            figure,
             op_hover_preview,
             last_toast_id: 0,
             toast_timer: None,

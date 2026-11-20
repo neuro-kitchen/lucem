@@ -7453,6 +7453,7 @@ name = "lucem-hist"
 version = "0.0.4"
 dependencies = [
  "cubecl",
+ "image",
  "lucem-core",
  "lucem-io",
  "lucem-ml",
