@@ -1,0 +1,89 @@
+---
+title: Install
+description: Install lucem with uv/Python, build the CLI and app from source, or check your GPU runtime.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+<Tabs syncKey="language">
+  <TabItem label="Python">
+    ```sh
+    uv add lucem                     # Core GPU ops, OME-Zarr I/O, @lucem.op
+    uv add "lucem[web]"              # + Browser WASM workstation (`lucem web`)
+    uv add "lucem[app]"              # + Native desktop workstation (`lucem app`)
+    uv add "lucem[hist,stardist]"    # + Histology + StarDist model plugin
+    uv add "lucem[ml]"               # + StarDist + SAM + InstanSeg plugins
+    ```
+  </TabItem>
+  <TabItem label="Command line">
+    ```sh
+    git clone https://github.com/neuro-kitchen/lucem
+    cd lucem
+    cargo build --release -p lucem-cli     # `lucem` CLI & GPU server
+    cargo build --release -p lucem-app     # native desktop workstation
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```toml
+    # Cargo.toml
+    [dependencies]
+    lucem = "0.0.4"
+    lucem-io = "0.0.4"
+    lucem-pipeline = "0.0.4"
+    ```
+  </TabItem>
+</Tabs>
+
+## Check your GPU
+
+lucem runs on CUDA (NVIDIA), Vulkan / Metal / DX12 through wgpu (any recent GPU), or CPU. It picks the first usable GPU automatically:
+
+<Tabs syncKey="language">
+  <TabItem label="Command line">
+    ```sh
+    lucem doctor
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import lucem
+
+    lucem.runtime.available()   # ['cuda', 'wgpu', 'cpu']: compiled in, GPUs first
+    lucem.runtime.current()     # what calls use without runtime=
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let target = lucem_core::ComputeTarget::from_env()?;
+    let client = target.client()?;
+    ```
+  </TabItem>
+</Tabs>
+
+To override the runtime, set `LUCEM_RUNTIME=cuda|wgpu|cpu` or pick it in **Settings → Compute**.
+
+## Model plugins
+
+Models run as separate programs (`lucem-ml-*`), so their runtimes and licences stay out of core lucem:
+
+<Tabs syncKey="language">
+  <TabItem label="Python">
+    ```sh
+    uv add "lucem[stardist]"    # StarDist H&E and fluorescence
+    uv add "lucem[instanseg]"   # InstanSeg brightfield and fluorescence
+    uv add "lucem[sam]"         # Segment Anything 2
+    uv run lucem plugins
+    ```
+  </TabItem>
+  <TabItem label="Command line">
+    ```sh
+    cargo build --release -p lucem-ml-stardist
+    cargo build --release -p lucem-ml-instanseg
+    cargo build --release -p lucem-ml-sam
+    ```
+  </TabItem>
+</Tabs>
+
+Then install weights from **Settings → Models** (works in both the desktop app and `lucem serve --web`). See [Models](/lucem/models/).

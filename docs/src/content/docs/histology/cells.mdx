@@ -5,6 +5,8 @@ sidebar:
   order: 2
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Cells are found inside the selected regions, tile by tile on the GPU. Each nucleus is found,
 grown into its cell, and measured: area, shape, and the intensity of every channel (or stain) in
 the nucleus, the cytoplasm and the whole cell.
@@ -29,11 +31,29 @@ finds the nuclei; lucem grows and measures the cells the same way. See [Models](
 
 ![Cell and nuclei segmentation overlay on a multispectral fluorescence slide](/lucem/screenshots/05_tooling_cell-seg.png)
 
-## On the command line
+## Running headlessly
 
-```sh
-lucem hist cells slide.ome.zarr --region 0,0,4096,4096 --stains h-dab --out cells.tsv
-lucem hist cells slide.ome.zarr --within tissue.geojson --model stardist-he --out cells.geojson
-```
+<Tabs syncKey="language">
+  <TabItem label="Command line">
+    ```sh
+    lucem hist cells slide.ome.zarr --region 0,0,4096,4096 --stains h-dab --out cells.tsv
+    lucem hist cells slide.ome.zarr --within tissue.geojson --model instanseg-fluorescence --out cells.geojson
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import lucem
+
+    img = lucem.io.open("slide.ome.zarr")
+    cells = lucem.hist.count_cells(img, model="instanseg-fluorescence")
+    print(f"Detected {len(cells)} cells")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let outcome = lucem_hist::engine::apply(&mut ctx, &mut analysis, &action)?;
+    ```
+  </TabItem>
+</Tabs>
 
 New cells replace the cells inside the same regions; the rest are kept.

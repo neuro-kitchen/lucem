@@ -1,0 +1,81 @@
+---
+title: Your first analysis
+description: Open an image, run a GPU filter or count cells, inspect the table, and replay across slides.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## 1. Open or create a slide
+
+<Tabs syncKey="language">
+  <TabItem label="Command line">
+    ```sh
+    lucem sample sample.ome.zarr            # 2D synthetic fluorescence image
+    lucem sample volume.ome.zarr --depth 64 # 3D volume
+    lucem-app sample.ome.zarr               # open in the desktop app
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import lucem
+
+    img = lucem.io.open("sample.ome.zarr")
+    print(img.name, img.channels, img.pixel_size_um)
+
+    # Launch the browser or desktop UI on the slide
+    lucem.web.serve(data=".", port=8080, open_browser=True)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pyramid = lucem_io::Pyramid::open("sample.ome.zarr")?;
+    println!("{} ({} channels)", pyramid.name, pyramid.channels.len());
+    ```
+  </TabItem>
+</Tabs>
+
+## 2. Run a GPU pipeline
+
+<Tabs syncKey="language">
+  <TabItem label="Command line">
+    ```sh
+    lucem run pipeline.json sample.ome.zarr --out out.ome.zarr
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from lucem.ops import Pipeline, stage
+
+    pipe = Pipeline([
+        stage.gaussian_blur(sigma=1.5),
+        stage.rolling_ball(radius=30.0),
+        stage.otsu_threshold(),
+    ])
+    mask = pipe.process(tile)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use lucem_pipeline::{Op, PipelineSpec};
+    // Run the same pipeline JSON headlessly on CUDA, wgpu, or CPU
+    ```
+  </TabItem>
+</Tabs>
+
+## 3. Count cells & inspect in Analyze
+
+1. In **Explore**, draw a rectangle (<kbd>U</kbd>) or use **Histology → Find tissue**.
+2. Open **Histology → Count cells**, choose a threshold or model (**InstanSeg** / **StarDist**), and press **Find cells**.
+3. Switch to **Analyze** (<kbd>Ctrl</kbd>+<kbd>3</kbd>) to filter, sort, plot histograms/scatter plots, and export CSV/Parquet.
+
+## 4. Replay across a cohort
+
+Save the project (**Lucem → Save project in folder…**) and replay its `session.json` headlessly:
+
+```sh
+lucem session run my-project/session.json slides/*.ome.zarr --out results/
+```
+
+See [Sessions](/lucem/learn/concepts/sessions/).

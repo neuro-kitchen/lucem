@@ -72,7 +72,7 @@ export default defineConfig({
           ]),
           topic('App', 'app'),
           topic('Histology', 'histology'),
-          topic('Reference', 'reference', ['reference', 'reference/operations', chapter('Command line', 'reference/cli'), chapter('Files', 'reference/files'), chapter('Rust API', 'reference/rust', true)]),
+          topic('Reference', 'reference', ['reference', 'reference/operations', chapter('Python API', 'reference/python'), chapter('Command line', 'reference/cli'), chapter('Files', 'reference/files'), chapter('Rust API', 'reference/rust', true)]),
           topic('Models', 'models'),
           topic('Extend', 'extend'),
           topic('Deploy', 'deploy'),
