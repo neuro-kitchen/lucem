@@ -74,7 +74,7 @@ fn parse_number(text: &str) -> Option<f64> {
 #[allow(clippy::too_many_arguments)]
 pub fn scrub_number(
     state: &Entity<ScrubState>,
-    id: &'static str,
+    id: impl Into<String>,
     display: impl Into<SharedString>,
     edit_value: String,
     tooltip: &'static str,
@@ -82,23 +82,27 @@ pub fn scrub_number(
     on_set: impl Fn(f64, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
+    let id = id.into();
     let s = state.read(cx);
-    if s.active_id.as_deref() == Some(id) {
+    if s.active_id.as_deref() == Some(id.as_str()) {
         return div().w(px(76.)).child(Input::new(&s.input).xsmall()).into_any_element();
     }
     let st_edit = state.clone();
     let on_set: Rc<dyn Fn(f64, &mut Window, &mut App)> = Rc::new(on_set);
+    let tip_id = SharedString::from(format!("scrub-tip-{id}"));
+    let field_id = format!("scrub-{id}");
     div()
-        .id(SharedString::from(format!("scrub-tip-{id}")))
+        .id(tip_id)
         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip).build(window, cx))
         .child(scrub_field(
-            format!("scrub-{id}"),
+            field_id,
             display.into(),
             on_step,
             move |window, cx| {
                 let initial = edit_value.clone();
                 let cb = on_set.clone();
-                st_edit.update(cx, |s, cx| s.begin_edit(id.to_string(), initial, cb, window, cx));
+                let edit_id = id.clone();
+                st_edit.update(cx, |s, cx| s.begin_edit(edit_id, initial, cb, window, cx));
             },
         ))
         .into_any_element()

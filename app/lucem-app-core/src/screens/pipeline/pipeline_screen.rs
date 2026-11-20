@@ -22,8 +22,9 @@ use crate::data::store::{AppEvent, Store};
 use crate::domain::command::Command;
 use crate::domain::graph::{NodeKind, ViewStyle};
 use crate::ui::param_editor::{Commit, EditOps as _, ParamEditor};
+use crate::ui::scrub_input::{scrub_number, ScrubState};
 use crate::ui::theme::{self, color};
-use crate::ui::widgets::{divider_v, row, stepper, MenuSelect, Section};
+use crate::ui::widgets::{divider_v, row, MenuSelect, Section};
 use kitchen_shell::{CommandSpec, MenuItem, MenuSpec, Registry};
 use kitchen_ui::widgets::{CodeChanged, CodeLanguage, CodeView};
 use serde_json::json;
@@ -478,7 +479,20 @@ impl PipelineView {
             })
             .child(sep())
             .child(tool("tool-fit", IconName::Maximize, "Fit the graph (F)", false, |c, cx| c.fit(cx)))
-            .child(run);
+            .child(run)
+            .child({
+                let st = self.store.clone();
+                let mut b = Button::new("tool-make-recipe")
+                    .ghost()
+                    .small()
+                    .icon(Icon::new(IconName::Package))
+                    .tooltip("Save this pipeline as a shareable .lucem-recipe.json")
+                    .on_click(move |_, _, cx| save_pipeline_recipe(&st, cx));
+                if !column {
+                    b = b.label("Make recipe");
+                }
+                b
+            });
         // Only the pill takes the pointer: the strip it sits in covers no control. The bottom
         // place clears the canvas' own bar (zoom, fit, grid, minimap) under it.
         let strip = div().id("pipeline-toolbar").absolute().flex();
@@ -561,11 +575,85 @@ impl Render for PipelineView {
     }
 }
 
+/// Shared action for both the floating Pipeline toolbar and the unselected Inspector:
+/// packages the enabled GPU op chain as a shareable `.lucem-recipe.json`.
+fn save_pipeline_recipe(store: &Entity<Store>, cx: &mut App) {
+    let (name, steps) = {
+        let s = store.read(cx);
+        let img_name = s.doc.active().map_or_else(|| "pipeline".to_string(), |i| i.name.clone());
+        let stem = img_name.split('.').next().unwrap_or("pipeline");
+        let ops: Vec<lucem_pipeline::Op> = s
+            .doc
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.kind {
+                NodeKind::Op { enabled: true, op } => Some(op.clone()),
+                _ => None,
+            })
+            .collect();
+        (format!("{stem}_recipe"), ops)
+    };
+    if steps.is_empty() {
+        store.update(cx, |s, cx| {
+            s.set_status("Add at least one enabled GPU operation to save a recipe.", cx);
+        });
+        return;
+    }
+    let recipe = crate::data::recipes::Recipe {
+        schema: 1,
+        name,
+        family: "Recipe".to_string(),
+        description: format!("Exported pipeline with {} operation(s)", steps.len()),
+        steps,
+    };
+    #[cfg(not(target_family = "wasm"))]
+    {
+        match crate::data::recipes::save_recipe(&recipe) {
+            Ok(path) => store.update(cx, |s, cx| {
+                s.set_status(format!("Saved recipe to {}", path.display()), cx);
+            }),
+            Err(e) => store.update(cx, |s, cx| {
+                s.set_status(format!("Could not save recipe: {e}"), cx);
+            }),
+        }
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        if crate::data::remote::runs_alone() {
+            if let Ok(json) = serde_json::to_string_pretty(&recipe) {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(json));
+                store.update(cx, |s, cx| {
+                    s.set_status("Copied .lucem-recipe.json to clipboard.", cx);
+                });
+            }
+        } else {
+            let st = store.clone();
+            cx.spawn(async move |cx| {
+                match crate::data::server_api::save_server_recipe(&recipe).await {
+                    Ok(path) => {
+                        let _ = cx.update(|cx| {
+                            st.update(cx, |s, cx| s.set_status(format!("Saved recipe to {path}"), cx));
+                        });
+                    }
+                    Err(e) => {
+                        let _ = cx.update(|cx| {
+                            st.update(cx, |s, cx| s.set_status(format!("Could not save recipe: {e}"), cx));
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+}
+
 /// The selected node: what it is, its values, its result.
 pub struct Inspector {
     store: Entity<Store>,
     canvas: Entity<GraphCanvas>,
     params: Entity<ParamEditor>,
+    scrub: Entity<ScrubState>,
     name: Entity<InputState>,
     name_for: String,
     /// The code of the selected script node: its file, the editor, the text on disk, and the
@@ -586,7 +674,9 @@ struct ScriptCode {
 impl Inspector {
     fn new(store: Entity<Store>, canvas: Entity<GraphCanvas>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx));
+        let scrub = cx.new(|cx| ScrubState::new(window, cx));
         let subs = vec![
+            cx.observe(&scrub, |_, _, cx| cx.notify()),
             cx.subscribe(&canvas, |_, _, _: &CanvasEvent, cx| cx.notify()),
             cx.subscribe(&store, |_, _, e: &AppEvent, cx| {
                 if matches!(e, AppEvent::Document(_) | AppEvent::Results) {
@@ -610,7 +700,7 @@ impl Inspector {
                 }
             }),
         ];
-        Self { store, canvas, params: cx.new(|_| ParamEditor::new()), name, name_for: String::new(), code: None, _subs: subs }
+        Self { store, canvas, params: cx.new(|_| ParamEditor::new()), scrub, name, name_for: String::new(), code: None, _subs: subs }
     }
 
     fn exec(store: &Entity<Store>, cmd: Command, cx: &mut App) {
@@ -747,76 +837,7 @@ impl Inspector {
                 .icon(Icon::new(IconName::Package))
                 .label("Make recipe")
                 .tooltip("Save this pipeline as a shareable .lucem-recipe.json")
-                .on_click(move |_, _, cx| {
-                    let (name, steps) = {
-                        let s = store_recipe.read(cx);
-                        let img_name = s.doc.active().map_or_else(|| "pipeline".to_string(), |i| i.name.clone());
-                        let stem = img_name.split('.').next().unwrap_or("pipeline");
-                        let ops: Vec<lucem_pipeline::Op> = s
-                            .doc
-                            .graph
-                            .nodes
-                            .iter()
-                            .filter_map(|n| match &n.kind {
-                                NodeKind::Op { enabled: true, op } => Some(op.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        (format!("{stem}_recipe"), ops)
-                    };
-                    if steps.is_empty() {
-                        store_recipe.update(cx, |s, cx| {
-                            s.set_status("Add at least one enabled GPU operation to save a recipe.", cx);
-                        });
-                        return;
-                    }
-                    let recipe = crate::data::recipes::Recipe {
-                        schema: 1,
-                        name,
-                        family: "Recipe".to_string(),
-                        description: format!("Exported pipeline with {} operation(s)", steps.len()),
-                        steps,
-                    };
-                    #[cfg(not(target_family = "wasm"))]
-                    {
-                        match crate::data::recipes::save_recipe(&recipe) {
-                            Ok(path) => store_recipe.update(cx, |s, cx| {
-                                s.set_status(format!("Saved recipe to {}", path.display()), cx);
-                            }),
-                            Err(e) => store_recipe.update(cx, |s, cx| {
-                                s.set_status(format!("Could not save recipe: {e}"), cx);
-                            }),
-                        }
-                    }
-                    #[cfg(target_family = "wasm")]
-                    {
-                        if crate::data::remote::runs_alone() {
-                            if let Ok(json) = serde_json::to_string_pretty(&recipe) {
-                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(json));
-                                store_recipe.update(cx, |s, cx| {
-                                    s.set_status("Copied .lucem-recipe.json to clipboard.", cx);
-                                });
-                            }
-                        } else {
-                            let st = store_recipe.clone();
-                            cx.spawn(async move |cx| {
-                                match crate::data::server_api::save_server_recipe(&recipe).await {
-                                    Ok(path) => {
-                                        let _ = cx.update(|cx| {
-                                            st.update(cx, |s, cx| s.set_status(format!("Saved recipe to {path}"), cx));
-                                        });
-                                    }
-                                    Err(e) => {
-                                        let _ = cx.update(|cx| {
-                                            st.update(cx, |s, cx| s.set_status(format!("Could not save recipe: {e}"), cx));
-                                        });
-                                    }
-                                }
-                            })
-                            .detach();
-                        }
-                    }
-                });
+                .on_click(move |_, _, cx| save_pipeline_recipe(&store_recipe, cx));
             let quick_ops: Vec<AnyElement> = ["rolling_ball", "gaussian_blur", "clahe", "otsu_threshold", "li_threshold", "canny"]
                 .iter()
                 .filter_map(|tag| lucem_pipeline::Op::by_tag(tag))
@@ -1074,7 +1095,23 @@ impl Inspector {
                         let v = *v;
                         s1(&move |st: &mut ViewStyle| st.visible = v, cx)
                     }))
-                    .child(row("Opacity", stepper("view-opacity", format!("{:.0} %", style.opacity * 100.0), move |d, _, cx| s2(&move |st: &mut ViewStyle| st.opacity = (st.opacity + d * 0.1).clamp(0.0, 1.0), cx))))
+                    .child(row("Opacity", {
+                        let s2_set = s2.clone();
+                        let pct = style.opacity * 100.0;
+                        scrub_number(
+                            &self.scrub,
+                            "view-opacity",
+                            format!("{pct:.0} %"),
+                            format!("{pct:.0}"),
+                            "Drag to scrub opacity, or click to type a percentage",
+                            move |d, _, cx| s2(&move |st: &mut ViewStyle| st.opacity = (st.opacity + d * 0.05).clamp(0.0, 1.0), cx),
+                            move |v, _, cx| {
+                                let clamped = (v as f32 / 100.0).clamp(0.0, 1.0);
+                                s2_set(&move |st: &mut ViewStyle| st.opacity = clamped, cx);
+                            },
+                            cx,
+                        )
+                    }))
                     .child(row(
                         "Colours",
                         MenuSelect::new("view-lut", COLORMAPS.iter().map(|m| SharedString::from(*m)).collect(), lut_idx, move |i, _, cx| s3(&move |st: &mut ViewStyle| st.colormap = COLORMAPS[i].to_string(), cx)),
@@ -1196,18 +1233,38 @@ impl Inspector {
                 let mut nums = v_flex().gap(px(theme::XS));
                 for (i, q) in params.iter().enumerate() {
                     let (store, id, kind) = (self.store.clone(), id.clone(), kind.clone());
-                    // A step of 1 % of the value (0.01 near zero); drag the number
+                    let (store_set, id_set, kind_set) = (self.store.clone(), id.clone(), kind.clone());
+                    // A step of 1 % of the value (0.01 near zero); drag or click to type
                     let step = (q.value.abs() * 0.01).max(0.01);
+                    let display = crate::ui::param_editor::trim_number(q.value);
                     nums = nums.child(row(
                         q.name.clone(),
-                        stepper(&format!("script-param-{i}"), crate::ui::param_editor::trim_number(q.value), move |d, _, cx| {
-                            let mut k = kind.clone();
-                            if let NodeKind::Script { params, .. } = &mut k
-                                && let Some(p) = params.get_mut(i) {
+                        scrub_number(
+                            &self.scrub,
+                            format!("script-param-{i}"),
+                            display.clone(),
+                            display,
+                            "Drag horizontally to scrub, or click to type an exact value",
+                            move |d, _, cx| {
+                                let mut k = kind.clone();
+                                if let NodeKind::Script { params, .. } = &mut k
+                                    && let Some(p) = params.get_mut(i)
+                                {
                                     p.value += d as f64 * step;
                                 }
-                            Self::exec(&store, Command::SetScript { id: id.clone(), kind: k }, cx);
-                        }),
+                                Self::exec(&store, Command::SetScript { id: id.clone(), kind: k }, cx);
+                            },
+                            move |v, _, cx| {
+                                let mut k = kind_set.clone();
+                                if let NodeKind::Script { params, .. } = &mut k
+                                    && let Some(p) = params.get_mut(i)
+                                {
+                                    p.value = v;
+                                }
+                                Self::exec(&store_set, Command::SetScript { id: id_set.clone(), kind: k }, cx);
+                            },
+                            cx,
+                        ),
                     ));
                 }
                 let declared = inputs.iter().map(|q| format!("{}: {}", q.name, q.port.name())).collect::<Vec<_>>().join(", ");

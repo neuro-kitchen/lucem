@@ -1560,7 +1560,8 @@ impl Store {
                 Some(a) => a,
                 None => Arc::new(super::results::analyze_remote(&doc, &pyramid, &req.image, req.z)),
             };
-            let layers = (latest.load(Ordering::Acquire) == generation && show).then(|| super::results::compute_remote(&doc, &pyramid, &req));
+            let layers = (latest.load(Ordering::Acquire) == generation && show)
+                .then(|| super::results::compute_remote(&doc, &pyramid, &req, &latest, generation));
             Some((analysis, layers))
         });
         cx.spawn(async move |this, cx| {
