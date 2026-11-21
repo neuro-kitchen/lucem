@@ -267,6 +267,8 @@ jobs:
           pattern: wheel-lucem-*
           path: dist
           merge-multiple: true
+      - name: Keep only lucem wheels (lucem-hist publishes in its own job)
+        run: rm -f dist/lucem_hist-*.whl
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sdist
