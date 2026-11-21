@@ -65,8 +65,9 @@ jobs:
         with:
           command: check
 
-  # The Python packages (bindings/python): `lucem` is the core; `lucem-hist` is the same extension
-  # built with histology. abi3, so one wheel per platform serves every CPython >= 3.12.
+  # The Python packages (`bindings/python`): `lucem` (core) and `lucem-hist` (histology). abi3,
+  # so one wheel per platform serves every CPython >= 3.12. ML model plugins (`lucem-ml-*`) ship
+  # as Rust binaries rather than PyPI wheels.
   wheels:
     name: Wheel ${{ matrix.wheel }} (${{ matrix.os }})
     needs: check
@@ -102,9 +103,9 @@ jobs:
           name: wheel-${{ matrix.wheel }}-${{ matrix.os }}
           path: ${{ matrix.project }}/dist
 
-  # Programs in wheels: the desktop app (`lucem[app]`) and the model plugins (`lucem[stardist]`,
-  # `lucem[sam]`). Their own job: a failure here leaves that platform without them and doesn't hold
-  # up the rest of the release. Built on the runner itself (the GUI's system libraries are there).
+  # Desktop app wheel (`lucem[app]`). Its own job: a failure here leaves that platform without
+  # it and doesn't hold up the rest of the release. Built on the runner itself (the GUI's system
+  # libraries are there).
   program-wheels:
     name: Program wheel ${{ matrix.wheel }} (${{ matrix.os }})
     needs: check
@@ -115,7 +116,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, windows-latest, macos-latest]
-        wheel: [lucem-app, lucem-ml-stardist, lucem-ml-sam, lucem-ml-instanseg]
+        wheel: [lucem-app]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: System libraries for the app
@@ -251,9 +252,9 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-  # `lucem` and `lucem-hist`. PyPI refuses a file that is already there: a re-run skips those.
+  # `lucem`. PyPI refuses a file that is already there: a re-run skips those.
   publish-pypi:
-    name: Publish lucem and lucem-hist to PyPI
+    name: Publish lucem to PyPI
     needs: [check, wheels, sdist]
     if: vars.PUBLISH_PYPI != 'false'
     runs-on: ubuntu-latest
@@ -263,7 +264,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: wheel-*
+          pattern: wheel-lucem-*
           path: dist
           merge-multiple: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -274,12 +275,12 @@ jobs:
         with:
           skip-existing: true
 
-  # The app, browser bundle and the model plugins, each in its own environment: PyPI lets one
+  # The desktop app, histology, and browser bundle, each in its own environment: PyPI lets one
   # workflow + environment be the pending publisher of only one new project, and a failure here
   # shouldn't hold up the rest of the release.
   publish-pypi-programs:
     name: Publish ${{ matrix.wheel }} to PyPI
-    needs: [check, program-wheels, web-wheel]
+    needs: [check, wheels, program-wheels, web-wheel]
     if: vars.PUBLISH_PYPI != 'false'
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -287,34 +288,108 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { wheel: lucem-app, environment: pypi-app }
-          - { wheel: lucem-web, environment: pypi-web }
-          - { wheel: lucem-ml-stardist, environment: pypi-ml-stardist }
-          - { wheel: lucem-ml-sam, environment: pypi-ml-sam }
-          - { wheel: lucem-ml-instanseg, environment: pypi-ml-instanseg }
+          - { wheel: lucem-hist, pattern: "wheel-lucem-hist-*", environment: pypi-hist }
+          - { wheel: lucem-app, pattern: "program-lucem-app-*", environment: pypi-app }
+          - { wheel: lucem-web, pattern: "program-lucem-web-*", environment: pypi-web }
     environment: ${{ matrix.environment }}
     permissions:
       id-token: write # trusted publishing
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: program-${{ matrix.wheel }}-*
+          pattern: ${{ matrix.pattern }}
           path: dist
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           skip-existing: true
 
+  # Prebuilt ML model plugin binaries (`lucem-ml-stardist`, `lucem-ml-instanseg`, `lucem-ml-sam`),
+  # shipped as GitHub Release assets with a SHA-256 manifest (`lucem plugins install all`),
+  # matching `dsp-kitchen`'s `dspk-cli-sorter` distribution model (never PyPI wheels).
+  ml-plugins:
+    name: ML plugin binaries (${{ matrix.target }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+    env:
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Link with mold (faster than the default linker)
+        if: runner.os == 'Linux'
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ml-plugins-${{ matrix.target }}
+          cache-directories: ~/.local/share/tracel
+      - name: Build ML plugins
+        run: cargo build --release --locked -p lucem-ml-stardist -p lucem-ml-instanseg -p lucem-ml-sam
+      - name: Package binaries by target
+        shell: bash
+        run: |
+          ext=""
+          if [ "${{ runner.os }}" = "Windows" ]; then ext=".exe"; fi
+          mkdir -p out
+          for bin in lucem-ml-stardist lucem-ml-instanseg lucem-ml-sam; do
+            cp "target/release/${bin}${ext}" "out/${bin}-${{ matrix.target }}${ext}"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ml-plugins-${{ matrix.target }}
+          path: out
+
   github-release:
     name: GitHub release
-    needs: [publish-crates, publish-pypi]
-    # PyPI's job is skipped while `PUBLISH_PYPI` is not `true`: the release follows the crates
+    needs: [ml-plugins, publish-crates, publish-pypi]
+    # PyPI's job is skipped while `PUBLISH_PYPI` is `false`: the release follows the crates
     if: ${{ !cancelled() && needs.publish-crates.result == 'success' && needs.publish-pypi.result != 'failure' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the release
+      contents: write # create the release and attach plugin binaries
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          pattern: ml-plugins-*
+          path: out
+          merge-multiple: true
+      # `lucem plugins install` reads this: per plugin and target, the file, SHA-256 and size
+      - name: Write ML plugins manifest
+        run: |
+          mkdir -p out
+          python3 - "${GITHUB_REF_NAME#v}" <<'PY'
+          import hashlib, json, os, sys
+          version, plugins = sys.argv[1], {}
+          for name in sorted(os.listdir("out")):
+              path = os.path.join("out", name)
+              if not os.path.isfile(path) or name.endswith(".json"):
+                  continue
+              stem = name.removesuffix(".exe")
+              for prog in ("lucem-ml-stardist", "lucem-ml-instanseg", "lucem-ml-sam"):
+                  if stem.startswith(prog + "-"):
+                      target = stem.removeprefix(prog + "-")
+                      digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+                      plugins.setdefault(prog, {})[target] = {
+                          "file": name,
+                          "sha256": digest,
+                          "size": os.path.getsize(path),
+                      }
+          if plugins:
+              json.dump({"version": version, "plugins": plugins}, open("out/lucem-ml-plugins-manifest.json", "w"), indent=2)
+              print(json.dumps(plugins, indent=2))
+          PY
       # CHANGELOG.md is the one source: this version's section ("## [0.0.2] - date") is the notes
       - name: Release notes from CHANGELOG.md
         run: |
@@ -327,16 +402,21 @@ jobs:
           The library crates from crates.io: `cargo add lucem` (core, io, ops, ml) and the others
           (`lucem-hist`, `lucem-pipeline`, `lucem-view`, `lucem-hub`). The app and the `lucem`
           command build from this tag: `cargo install --git https://github.com/neuro-kitchen/lucem --tag <this tag> lucem-cli`.
+          ML model plugins (`lucem-ml-stardist`, `lucem-ml-instanseg`, `lucem-ml-sam`) are attached
+          below and installed with `lucem plugins install all`.
           NOTES
           if [ "${{ vars.PUBLISH_PYPI }}" != "false" ]; then
-            printf '\nPython: `pip install lucem`, with extras `hist`, `app`, `web`, `stardist`, `sam`, `instanseg`, `ml` or `all` (`pip install "lucem[all]"`).\n' >> release-notes.md
+            printf '\nPython: `pip install lucem`, with extras `hist`, `app`, `web` or `all` (`pip install "lucem[all]"`).\n' >> release-notes.md
           fi
-      - name: Create the release
+      - name: Create the release and attach ML plugin binaries
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --verify-tag --notes-file release-notes.md
+          if ls out/* > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --clobber
+          fi
 
   # The page (the threaded browser build), for the container image: built with the nightly that
   # app/lucem-app-web/build.sh pins, and wasm-bindgen of Cargo.lock's version (as dsp-kitchen's).
@@ -365,6 +445,8 @@ jobs:
           # The same cache as docs.yml's build of the page (saved on main): the tag starts warm
           shared-key: web-page
       - name: Build
+        env:
+          LUCEM_BROTLI_Q: "11"
         run: app/lucem-app-web/build.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

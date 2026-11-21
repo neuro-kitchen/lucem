@@ -49,6 +49,8 @@ USAGE
                                          List a server's images, or read a tile of one
   lucem hist stains | tissue | cells <image> …
                                          Histology: stain vectors, tissue, cells (lucem hist)
+  lucem plugins [list | install <stardist|instanseg|sam|all> [--version V]]
+                                         Manage prebuilt ML model plugin binaries
   lucem ops [--json]                     Every pipeline operation: family, types, parameters
   lucem mcp [--runtime NAME]             lucem's tools for an agent (MCP over stdio), e.g.
                                          claude mcp add lucem -- lucem mcp
@@ -60,6 +62,7 @@ mod autotune;
 mod bench;
 mod hist;
 mod ops;
+mod plugins;
 mod session;
 mod web;
 
@@ -152,6 +155,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         "fetch" => fetch(args),
         "pair" => pair(args),
         "hist" => hist::hist(args),
+        "plugins" => plugins::run(args.rest),
         "session" => session::session(args),
         "ops" => ops::ops(args),
         "mcp" => mcp(args),

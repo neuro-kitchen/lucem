@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+pub mod plugins;
+
 /// The cache folder of a model family.
 pub fn cache_dir(family: &str) -> PathBuf {
     let base = std::env::var_os("LUCEM_MODELS").map(PathBuf::from).unwrap_or_else(|| {

@@ -15,15 +15,13 @@ requires-python = ">=3.12"
 dependencies = ["numpy>=2.5"]
 
 [project.optional-dependencies]
-# Pinned to this release; .github/workflows/release.yml checks them against the workspace version
+# Pinned to this release; .github/workflows/release.yml checks them against the workspace version.
+# ML model plugins (`lucem-ml-*`) ship as standalone Rust binaries on GitHub Releases
+# (`lucem plugins install all`), not as PyPI wheels.
 hist = ["lucem-hist==0.0.5"]
 app = ["lucem-app==0.0.5"]
 web = ["lucem-web==0.0.5"]
-stardist = ["lucem-ml-stardist==0.0.5"]
-sam = ["lucem-ml-sam==0.0.5"]
-instanseg = ["lucem-ml-instanseg==0.0.5"]
-ml = ["lucem-ml-stardist==0.0.5", "lucem-ml-sam==0.0.5", "lucem-ml-instanseg==0.0.5"]
-all = ["lucem-hist==0.0.5", "lucem-app==0.0.5", "lucem-web==0.0.5", "lucem-ml-stardist==0.0.5", "lucem-ml-sam==0.0.5", "lucem-ml-instanseg==0.0.5"]
+all = ["lucem-hist==0.0.5", "lucem-app==0.0.5", "lucem-web==0.0.5"]
 
 [project.scripts]
 lucem = "lucem._cli:main"

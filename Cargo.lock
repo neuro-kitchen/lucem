@@ -7407,6 +7407,7 @@ dependencies = [
  "image",
  "lucem-core",
  "lucem-hist",
+ "lucem-hub",
  "lucem-io",
  "lucem-mcp",
  "lucem-ml",
@@ -7439,7 +7440,10 @@ name = "lucem-engine-web"
 version = "0.0.5"
 dependencies = [
  "js-sys",
+ "lucem-core",
  "lucem-io",
+ "lucem-ops",
+ "lucem-pipeline",
  "lucem-stream",
  "prost",
  "serde_json",
@@ -7471,6 +7475,8 @@ name = "lucem-hub"
 version = "0.0.5"
 dependencies = [
  "flate2",
+ "serde",
+ "serde_json",
  "sha2 0.11.1",
  "tar",
  "ureq 3.5.2",
