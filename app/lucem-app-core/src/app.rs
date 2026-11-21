@@ -127,6 +127,90 @@ impl Render for ExploreBody {
     }
 }
 
+/// The About Lucem modal (`Help › About Lucem`): theme-aware cell logo, Matemasie wordmark,
+/// version, active compute runtime, and quick links to Docs & GitHub.
+pub struct AboutSheet {
+    store: Entity<Store>,
+    close: Rc<dyn Fn(&mut Window, &mut App)>,
+}
+
+impl AboutSheet {
+    fn new(store: Entity<Store>, close: Rc<dyn Fn(&mut Window, &mut App)>) -> Self {
+        Self { store, close }
+    }
+}
+
+impl Render for AboutSheet {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let close_bg = self.close.clone();
+        let close_btn = self.close.clone();
+        let s = self.store.read(cx);
+        let device = s.device.as_ref().map_or_else(|| "Idle (auto-select on demand)".to_string(), |d| d.label.clone());
+        let runtimes = lucem_core::ComputeTarget::available().iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
+        #[cfg(target_family = "wasm")]
+        let mode = if crate::data::remote::runs_alone() { "Browser standalone (WASM + WebGPU/WebGL2)" } else { "Browser client (connected to lucem serve)" };
+        #[cfg(not(target_family = "wasm"))]
+        let mode = "Desktop native (GPUI)";
+        div()
+            .id("about-sheet-backdrop")
+            .size_full()
+            .bg(gpui_kit::black().opacity(0.55))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(move |_, w, cx| close_bg(w, cx))
+            .child(
+                v_flex()
+                    .id("about-sheet-card")
+                    .occlude()
+                    .w(px(440.))
+                    .rounded(px(theme::RADIUS_LG))
+                    .border_1()
+                    .border_color(color::border())
+                    .bg(color::raised())
+                    .p(px(theme::LG))
+                    .gap(px(theme::MD))
+                    .items_center()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .child(Button::new("about-close").ghost().xsmall().icon(Icon::new(IconName::Close)).tooltip("Close (Esc)").on_click(move |_, w, cx| close_btn(w, cx))),
+                    )
+                    .child(gpui_kit::img(crate::ui::assets::logo_path()).size(px(72.)).rounded(px(16.)))
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(div().font_family(crate::ui::assets::BRAND_FONT).text_size(px(32.)).child("Lucem"))
+                            .child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(format!("v{}", env!("CARGO_PKG_VERSION"))))
+                            .child(div().text_sm().text_color(color::text_muted()).child("GPU workstation for histology and radiology.")),
+                    )
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .rounded(px(theme::RADIUS))
+                            .border_1()
+                            .border_color(color::border())
+                            .bg(color::panel())
+                            .p(px(theme::MD))
+                            .gap(px(theme::XS))
+                            .text_xs()
+                            .child(h_flex().justify_between().child(div().text_color(color::text_muted()).child("Mode")).child(div().text_color(color::text()).child(mode)))
+                            .child(h_flex().justify_between().child(div().text_color(color::text_muted()).child("Device")).child(div().font_family("monospace").text_color(color::text()).child(device)))
+                            .child(h_flex().justify_between().child(div().text_color(color::text_muted()).child("Runtimes")).child(div().font_family("monospace").text_color(color::text()).child(runtimes))),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(theme::SM))
+                            .child(Button::new("about-docs").outline().small().icon(Icon::new(IconName::BookOpen)).label("Documentation").on_click(|_, _, cx| cx.open_url("https://neuro-kitchen.github.io/lucem/")))
+                            .child(Button::new("about-github").outline().small().icon(Icon::new(IconName::ExternalLink)).label("GitHub").on_click(|_, _, cx| cx.open_url("https://github.com/neuro-kitchen/lucem"))),
+                    ),
+            )
+    }
+}
+
 /// The Keyboard & mouse sheet (F1), shown over the frame, with live search and keycap badges.
 pub struct HelpSheet {
     close: Rc<dyn Fn(&mut Window, &mut App)>,
@@ -299,7 +383,7 @@ impl LucemApp {
         // The commands, then the frame that draws them
         let registry = Registry::default();
         let shell_cell: Rc<std::cell::OnceCell<gpui_kit::WeakEntity<Shell>>> = Rc::default();
-        let help = {
+        let (help, about) = {
             let cell = shell_cell.clone();
             let close: Rc<dyn Fn(&mut Window, &mut App)> = {
                 let cell = cell.clone();
@@ -309,16 +393,26 @@ impl LucemApp {
                     }
                 })
             };
-            let sheet = cx.new(|cx| HelpSheet::new(close, window, cx));
-            let toggle: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| {
-                if let Some(s) = cell.get().and_then(|w| w.upgrade()) {
+            let help_sheet = cx.new(|cx| HelpSheet::new(close.clone(), window, cx));
+            let about_sheet = cx.new(|_| AboutSheet::new(store.clone(), close));
+            let cell_h = cell.clone();
+            let toggle_help: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| {
+                if let Some(s) = cell_h.get().and_then(|w| w.upgrade()) {
                     s.update(cx, |s, cx| {
-                        let view = (!s.has_overlay()).then(|| sheet.clone().into());
+                        let view = (!s.has_overlay()).then(|| help_sheet.clone().into());
                         s.set_overlay(view, window, cx)
                     });
                 }
             });
-            toggle
+            let toggle_about: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| {
+                if let Some(s) = cell.get().and_then(|w| w.upgrade()) {
+                    s.update(cx, |s, cx| {
+                        let view = (!s.has_overlay()).then(|| about_sheet.clone().into());
+                        s.set_overlay(view, window, cx)
+                    });
+                }
+            });
+            (toggle_help, toggle_about)
         };
         let ctx = Ctx {
             store: store.clone(),
@@ -327,6 +421,7 @@ impl LucemApp {
             #[cfg(not(target_family = "wasm"))]
             analyze: analyze.downgrade(),
             toggle_help: help,
+            toggle_about: about,
         };
         commands::register(&registry, &ctx);
         registry.extend(PipelineView::commands(pipeline.downgrade(), store.clone()));
@@ -359,7 +454,13 @@ impl LucemApp {
         let readings = cx.new(|cx| StatusReadings::new(store.clone(), explore.clone(), cx));
         let mut spec = ShellSpec::new("Lucem", registry.clone(), workspaces);
         spec.app_menu = commands::app_menu();
-        spec.help_menu = vec![kitchen_shell::MenuItem::command("help.keys")];
+        spec.help_menu = vec![
+            kitchen_shell::MenuItem::command("help.about"),
+            kitchen_shell::MenuItem::Separator,
+            kitchen_shell::MenuItem::command("help.keys"),
+            kitchen_shell::MenuItem::command("help.docs"),
+            kitchen_shell::MenuItem::command("help.issues"),
+        ];
         spec.settings = sections;
         spec.layout_toggles = vec![];
         spec.remote = Some(RemoteSpec { label: crate::platform::host_label().into(), icon: IconName::Server, menu: vec![kitchen_shell::MenuItem::command("remote.this"), kitchen_shell::MenuItem::Separator, kitchen_shell::MenuItem::command("remote.connect"), kitchen_shell::MenuItem::provided("remote.images")] });
@@ -582,6 +683,57 @@ impl Render for LucemApp {
             .child(self.shell.clone())
             // Floating Before <-> After animated hover preview card for any hovered op
             .child(self.op_hover_preview.clone())
+            // Floating determinate job progress card (anchored bottom-left above status bar)
+            .when_some(crate::data::jobs::running().into_iter().last(), |d, job| {
+                let job_id = job.id;
+                let pct = job.progress.map(|p| p.clamp(0.0, 1.0));
+                let pct_label = pct.map_or_else(|| "Working…".to_string(), |p| format!("{:.0}%", p * 100.0));
+                let bar_w = pct.map_or(0.35, |p| p.max(0.03));
+                let cancelled = job.cancel.load(std::sync::atomic::Ordering::Relaxed);
+                d.child(
+                    v_flex()
+                        .id("job-progress-card")
+                        .occlude()
+                        .absolute()
+                        .bottom(px(36.))
+                        .left(px(12.))
+                        .w(px(320.))
+                        .rounded(px(theme::RADIUS_LG))
+                        .border_1()
+                        .border_color(color::border())
+                        .bg(color::raised())
+                        .p(px(theme::SM))
+                        .gap(px(6.))
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(theme::XS))
+                                .child(Icon::new(IconName::Loader).small().text_color(color::accent_mark()))
+                                .child(div().flex_1().min_w_0().truncate().text_xs().font_weight(FontWeight::MEDIUM).text_color(color::text()).child(if cancelled { format!("Cancelling {}…", job.name) } else { job.name.clone() }))
+                                .child(div().flex_none().text_xs().font_family("monospace").text_color(color::text_muted()).child(pct_label))
+                                .child(
+                                    Button::new("job-cancel")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(Icon::new(IconName::Close))
+                                        .tooltip("Cancel job")
+                                        .on_click(move |_, _, cx| {
+                                            crate::data::jobs::cancel_id(job_id);
+                                            cx.refresh_windows();
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(4.))
+                                .rounded(px(2.))
+                                .bg(color::control())
+                                .overflow_hidden()
+                                .child(div().h_full().w(gpui_kit::relative(bar_w)).rounded(px(2.)).bg(color::accent_mark())),
+                        ),
+                )
+            })
             // Notification popover anchored above the bottom-bar Bell icon
             .when(notifications_open, |d| {
                 d.child(

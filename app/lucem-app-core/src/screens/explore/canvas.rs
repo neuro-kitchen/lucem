@@ -58,6 +58,108 @@ enum SamPrompt {
     Box([f64; 2], [f64; 2]),
 }
 
+/// Which edge, corner, or endpoint of a box/ellipse/ruler is being dragged to resize it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeHandle {
+    North,
+    South,
+    East,
+    West,
+    NorthWest,
+    NorthEast,
+    SouthWest,
+    SouthEast,
+    LineStart,
+    LineEnd,
+}
+
+impl ResizeHandle {
+    fn cursor(self) -> CursorStyle {
+        match self {
+            Self::North | Self::South => CursorStyle::ResizeUpDown,
+            Self::East | Self::West => CursorStyle::ResizeLeftRight,
+            Self::NorthWest | Self::SouthEast => CursorStyle::ResizeUpLeftDownRight,
+            Self::NorthEast | Self::SouthWest => CursorStyle::ResizeUpRightDownLeft,
+            Self::LineStart | Self::LineEnd => CursorStyle::PointingHand,
+        }
+    }
+}
+
+/// Computes a resized rectangle, ellipse, or ruler line when dragging `handle` to level-0 point `p`.
+/// When `keep_aspect` is true on a corner handle, preserves the original aspect ratio (or 1:1 square).
+fn resized_shape(orig: &Shape, handle: ResizeHandle, p: [f64; 2], keep_aspect: bool) -> Shape {
+    if let Shape::Line { x0, y0, x1, y1 } = orig {
+        return match handle {
+            ResizeHandle::LineStart => Shape::Line { x0: p[0], y0: p[1], x1: *x1, y1: *y1 },
+            ResizeHandle::LineEnd => Shape::Line { x0: *x0, y0: *y0, x1: p[0], y1: p[1] },
+            _ => orig.clone(),
+        };
+    }
+    let (ox0, oy0, ox1, oy1) = orig.bounds();
+    let orig_aspect = ((ox1 - ox0).abs() / (oy1 - oy0).abs().max(1e-6)).max(1e-3);
+    let (mut x0, mut y0, mut x1, mut y1) = (ox0, oy0, ox1, oy1);
+    match handle {
+        ResizeHandle::North => y0 = p[1],
+        ResizeHandle::South => y1 = p[1],
+        ResizeHandle::West => x0 = p[0],
+        ResizeHandle::East => x1 = p[0],
+        ResizeHandle::NorthWest => {
+            x0 = p[0];
+            y0 = p[1];
+            if keep_aspect {
+                let dx = (x1 - x0).abs();
+                let dy = (y1 - y0).abs();
+                let (w, h) = if dx >= dy * orig_aspect { (dx, dx / orig_aspect) } else { (dy * orig_aspect, dy) };
+                x0 = x1 - w * (x1 - x0).signum();
+                y0 = y1 - h * (y1 - y0).signum();
+            }
+        }
+        ResizeHandle::NorthEast => {
+            x1 = p[0];
+            y0 = p[1];
+            if keep_aspect {
+                let dx = (x1 - x0).abs();
+                let dy = (y1 - y0).abs();
+                let (w, h) = if dx >= dy * orig_aspect { (dx, dx / orig_aspect) } else { (dy * orig_aspect, dy) };
+                x1 = x0 + w * (x1 - x0).signum();
+                y0 = y1 - h * (y1 - y0).signum();
+            }
+        }
+        ResizeHandle::SouthWest => {
+            x0 = p[0];
+            y1 = p[1];
+            if keep_aspect {
+                let dx = (x1 - x0).abs();
+                let dy = (y1 - y0).abs();
+                let (w, h) = if dx >= dy * orig_aspect { (dx, dx / orig_aspect) } else { (dy * orig_aspect, dy) };
+                x0 = x1 - w * (x1 - x0).signum();
+                y1 = y0 + h * (y1 - y0).signum();
+            }
+        }
+        ResizeHandle::SouthEast => {
+            x1 = p[0];
+            y1 = p[1];
+            if keep_aspect {
+                let dx = (x1 - x0).abs();
+                let dy = (y1 - y0).abs();
+                let (w, h) = if dx >= dy * orig_aspect { (dx, dx / orig_aspect) } else { (dy * orig_aspect, dy) };
+                x1 = x0 + w * (x1 - x0).signum();
+                y1 = y0 + h * (y1 - y0).signum();
+            }
+        }
+        ResizeHandle::LineStart | ResizeHandle::LineEnd => {}
+    }
+    let (nx0, nx1) = (x0.min(x1), x0.max(x1));
+    let (ny0, ny1) = (y0.min(y1), y0.max(y1));
+    let w = (nx1 - nx0).max(1e-3);
+    let h = (ny1 - ny0).max(1e-3);
+    match orig {
+        Shape::Rect { .. } => Shape::Rect { x: nx0, y: ny0, w, h },
+        Shape::Ellipse { .. } => Shape::Ellipse { cx: nx0 + w * 0.5, cy: ny0 + h * 0.5, rx: w * 0.5, ry: h * 0.5 },
+        _ => orig.clone(),
+    }
+}
+
 /// What the pointer is doing.
 #[derive(Debug, Clone)]
 enum Gesture {
@@ -68,6 +170,10 @@ enum Gesture {
     Path { tool: Tool, points: Vec<[f64; 2]>, radius: f64 },
     /// Moving the selected annotations.
     Move { start: [f64; 2], now: [f64; 2], moved: bool },
+    /// Resizing a selected rectangle, ellipse, or ruler line by an edge, corner, or endpoint.
+    Resize { id: String, handle: ResizeHandle, orig: Shape, current: Shape },
+    /// Dragging the vertical split-screen compare curtain.
+    Curtain,
     /// The wand painting: a mask grown from each stamp over similar pixels.
     Wand(Box<Wand>),
 }
@@ -590,6 +696,8 @@ pub struct ImageCanvas {
     pub threads: usize,
     /// The camera is being set from a linked view: not sent back.
     syncing: bool,
+    /// Vertical split-screen compare curtain position (0.0..1.0 of canvas width) when active.
+    curtain: Option<f32>,
     _subs: Vec<Subscription>,
 }
 
@@ -669,6 +777,7 @@ impl ImageCanvas {
             results_source: true,
             threads: TileService::default_threads(),
             syncing: false,
+            curtain: None,
             _subs: subs,
         }
     }
@@ -912,7 +1021,9 @@ impl ImageCanvas {
         let show_any = s.hist.show && ov.annotations;
         let n_cells = if show_any { s.hist.cell_count(&v.image) } else { 0 };
         let n_tiles = if show_any { s.hist.tile_count(&v.image) } else { 0 };
-        let key = format!("{}/{}/{}/{}/{}/{}", v.image, s.hist.rev, n_cells, n_tiles, ov.opacity, s.sel.objects.join(","));
+        let cell_style = s.hist.cell_style;
+        let cell_stroke_px = s.hist.cell_stroke_px;
+        let key = format!("{}/{}/{}/{}/{}/{:?}/{:.1}/{}", v.image, s.hist.rev, n_cells, n_tiles, ov.opacity, cell_style, cell_stroke_px, s.sel.objects.join(","));
         let (iw, ih) = (v.pyramid.width() as f64, v.pyramid.height() as f64);
         let view = self.visible();
         let ds_view = 1.0 / self.zoom.max(1e-9);
@@ -1011,7 +1122,7 @@ impl ImageCanvas {
         }
         let color = s.hist_color();
         let alpha = ov.opacity;
-        let work = cx.background_spawn(async move { crate::data::hist::cells_raster(&cells, &color, rect, ds, alpha, &selected) });
+        let work = cx.background_spawn(async move { crate::data::hist::cells_raster(&cells, &color, rect, ds, alpha, &selected, cell_style, cell_stroke_px) });
         self.cells_task = Some(cx.spawn(async move |this, cx| {
             let image = work.await;
             let _ = this.update(cx, |c, cx| {
@@ -1236,8 +1347,13 @@ impl ImageCanvas {
         let active = self.image_id(s);
         let pyramid = active.as_ref().and_then(|id| s.pyramids.get(id).cloned());
         let mut docs: Vec<ChannelDoc> = active.as_ref().and_then(|id| s.doc.image(id)).map(|i| i.channels.clone()).unwrap_or_default();
-        // A channel shown processed is drawn by its result, not raw (non-destructive processing)
-        if let Some(id) = &active {
+        // A channel shown processed is drawn by its result, not raw (non-destructive processing).
+        // When `show_results` is off (e.g. while holding "Hold to compare"), draw the raw channels
+        // directly so the original image is visible instead of black!
+        let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
+        if ov.results
+            && let Some(id) = &active
+        {
             for c in s.processed_channels(id).keys() {
                 if let Some(d) = docs.get_mut(*c) {
                     d.visible = false;
@@ -1592,6 +1708,74 @@ impl ImageCanvas {
         s.doc.annotations.iter().rev().filter(|a| a.image == image && a.on_plane(self.z) && s.doc.class(&a.class).is_none_or(|c| c.visible)).find(|a| a.shape.hit(p[0], p[1], tol)).map(|a| a.id.clone())
     }
 
+    /// Tests whether `p` is on an edge, corner, or endpoint of a selected resizable shape.
+    fn hit_resize_handle(&self, p: [f64; 2], tool: Tool, cx: &App) -> Option<(String, ResizeHandle, Shape)> {
+        if !matches!(tool, Tool::Select | Tool::Rect | Tool::Ellipse | Tool::Ruler) {
+            return None;
+        }
+        let image = self.viewer.as_ref()?.image.clone();
+        let s = self.store.read(cx);
+        let tol = 8.0 / self.zoom;
+        for a in s.doc.annotations.iter().rev() {
+            if a.image != image || !a.on_plane(self.z) || !s.sel.shapes.contains(&a.id) {
+                continue;
+            }
+            if s.doc.class(&a.class).is_some_and(|c| !c.visible) {
+                continue;
+            }
+            if let Shape::Line { x0, y0, x1, y1 } = &a.shape {
+                if !matches!(tool, Tool::Select | Tool::Ruler) {
+                    continue;
+                }
+                if (p[0] - x0).hypot(p[1] - y0) <= tol {
+                    return Some((a.id.clone(), ResizeHandle::LineStart, a.shape.clone()));
+                }
+                if (p[0] - x1).hypot(p[1] - y1) <= tol {
+                    return Some((a.id.clone(), ResizeHandle::LineEnd, a.shape.clone()));
+                }
+                continue;
+            }
+            let eligible = match (&a.shape, tool) {
+                (Shape::Rect { .. }, Tool::Select | Tool::Rect) => true,
+                (Shape::Ellipse { .. }, Tool::Select | Tool::Ellipse) => true,
+                _ => false,
+            };
+            if !eligible {
+                continue;
+            }
+            let (x0, y0, x1, y1) = a.shape.bounds();
+            let near_l = (p[0] - x0).abs() <= tol;
+            let near_r = (p[0] - x1).abs() <= tol;
+            let near_t = (p[1] - y0).abs() <= tol;
+            let near_b = (p[1] - y1).abs() <= tol;
+            let in_x = p[0] >= x0 - tol && p[0] <= x1 + tol;
+            let in_y = p[1] >= y0 - tol && p[1] <= y1 + tol;
+            let handle = if near_l && near_t {
+                Some(ResizeHandle::NorthWest)
+            } else if near_r && near_t {
+                Some(ResizeHandle::NorthEast)
+            } else if near_l && near_b {
+                Some(ResizeHandle::SouthWest)
+            } else if near_r && near_b {
+                Some(ResizeHandle::SouthEast)
+            } else if near_t && in_x {
+                Some(ResizeHandle::North)
+            } else if near_b && in_x {
+                Some(ResizeHandle::South)
+            } else if near_l && in_y {
+                Some(ResizeHandle::West)
+            } else if near_r && in_y {
+                Some(ResizeHandle::East)
+            } else {
+                None
+            };
+            if let Some(h) = handle {
+                return Some((a.id.clone(), h, a.shape.clone()));
+            }
+        }
+        None
+    }
+
     fn close_polygon(&mut self, cx: &mut Context<Self>) {
         let pts = std::mem::take(&mut self.polygon);
         if pts.len() >= 3 {
@@ -1608,6 +1792,16 @@ impl ImageCanvas {
         let local = self.local(e.position);
         let p = self.to_image(local);
         let tool = self.tool(cx);
+        if e.button == MouseButton::Left
+            && let Some(frac) = self.curtain
+        {
+            let cx_px = frac * self.view_size().0;
+            if (local.0 - cx_px).abs() <= 10.0 {
+                self.gesture = Some(Gesture::Curtain);
+                cx.notify();
+                return;
+            }
+        }
         if e.button == MouseButton::Middle || self.space || tool == Tool::Hand {
             self.gesture = Some(Gesture::Pan { mouse: local, center: self.center });
             return;
@@ -1638,6 +1832,13 @@ impl ImageCanvas {
                 }
             }
             Tool::Select => {
+                if !e.modifiers.shift
+                    && let Some((id, handle, shape)) = self.hit_resize_handle(p, tool, cx)
+                {
+                    self.gesture = Some(Gesture::Resize { id, handle, orig: shape.clone(), current: shape });
+                    cx.notify();
+                    return;
+                }
                 match self.hit(p, cx) {
                     Some(id) => {
                         let sel = self.store.read(cx).sel.shapes.clone();
@@ -1673,7 +1874,14 @@ impl ImageCanvas {
                     }
                 }
             }
-            Tool::Rect | Tool::Ellipse | Tool::Ruler | Tool::Segment | Tool::Marquee => self.gesture = Some(Gesture::Drag { tool, a: p, b: p }),
+            Tool::Rect | Tool::Ellipse | Tool::Ruler => {
+                if let Some((id, handle, shape)) = self.hit_resize_handle(p, tool, cx) {
+                    self.gesture = Some(Gesture::Resize { id, handle, orig: shape.clone(), current: shape });
+                } else {
+                    self.gesture = Some(Gesture::Drag { tool, a: p, b: p });
+                }
+            }
+            Tool::Segment | Tool::Marquee => self.gesture = Some(Gesture::Drag { tool, a: p, b: p }),
             Tool::Lasso => self.gesture = Some(Gesture::Path { tool, points: vec![p], radius: 0.0 }),
             Tool::Brush | Tool::Eraser => {
                 // Holding Alt flips Brush <-> Eraser on the fly (Photoshop/Affinity workflow)
@@ -1760,6 +1968,13 @@ impl ImageCanvas {
                     *moved = true;
                 }
             }
+            Some(Gesture::Resize { handle, orig, current, .. }) => {
+                *current = resized_shape(orig, *handle, p, e.modifiers.shift);
+            }
+            Some(Gesture::Curtain) => {
+                let vw = self.view_size().0.max(1.0);
+                self.curtain = Some((local.0 / vw).clamp(0.05, 0.95));
+            }
             None => {}
         }
         if repaint_live {
@@ -1839,6 +2054,17 @@ impl ImageCanvas {
                     });
                 }
             }
+            Gesture::Curtain => {}
+            Gesture::Resize { id, orig, current, .. } => {
+                if current != orig {
+                    self.store.update(cx, |s, cx| {
+                        if let Some(mut ann) = s.doc.annotations.iter().find(|a| a.id == id).cloned() {
+                            ann.shape = current;
+                            let _ = s.execute(Command::SetAnnotation { annotation: ann }, cx);
+                        }
+                    });
+                }
+            }
         }
         cx.notify();
     }
@@ -1892,7 +2118,13 @@ impl ImageCanvas {
             "backspace" if !self.polygon.is_empty() => {
                 self.polygon.pop();
             }
-            "delete" | "backspace" => self.store.update(cx, |s, cx| s.delete_selection(cx)),
+            "delete" | "backspace" => self.store.update(cx, |s, cx| {
+                if !s.sel.shapes.is_empty() {
+                    s.delete_selection(cx);
+                } else if !s.sel.objects.is_empty() {
+                    s.hist_delete_selected_objects(cx);
+                }
+            }),
             "pageup" => self.set_z(self.z.saturating_sub(1), cx),
             "pagedown" => self.set_z(self.z + 1, cx),
             // Overlay toggles: A annotations, Shift+F fill, Shift+N names
@@ -1998,7 +2230,11 @@ impl ImageCanvas {
             if matches!(a.shape, Shape::Stroke { .. }) && !selected {
                 continue;
             }
-            let shape = if selected && delta != (0.0, 0.0) { a.shape.translated(delta.0, delta.1) } else { a.shape.clone() };
+            let shape = match &self.gesture {
+                Some(Gesture::Resize { id, current, .. }) if a.id == *id => current.clone(),
+                _ if selected && delta != (0.0, 0.0) => a.shape.translated(delta.0, delta.1),
+                _ => a.shape.clone(),
+            };
             let (bx0, by0, bx1, by1) = shape.bounds();
             if bx1 < rect[0] || by1 < rect[1] || bx0 > rect[0] + rect[2] || by0 > rect[1] + rect[3] {
                 continue;
@@ -2007,7 +2243,7 @@ impl ImageCanvas {
             if let Shape::Stroke { points, radius, erase: false } = &shape {
                 for outline in self.stroke_outlines(&a.id, points, *radius) {
                     let pts: Vec<(f32, f32)> = outline.iter().map(|p| self.to_screen(*p)).collect();
-                    out.push(Stroke { points: geometry::thin(&pts, 1.5), closed: true, fill: None, width: 2.0, color: c, selected: true, dot: false });
+                    out.push(Stroke { points: geometry::thin(&pts, 1.5), closed: true, fill: None, width: 2.0, color: c, selected: true, dot: false, handles: Vec::new() });
                 }
                 continue;
             }
@@ -2041,7 +2277,7 @@ impl ImageCanvas {
             if let Some(m) = self.mouse {
                 pts.push(m);
             }
-            out.push(Stroke { points: pts, closed: false, fill: None, width: 1.5, color: live, selected: true, dot: false });
+            out.push(Stroke { points: pts, closed: false, fill: None, width: 1.5, color: live, selected: true, dot: false, handles: Vec::new() });
         }
         out
     }
@@ -2059,9 +2295,13 @@ impl ImageCanvas {
             }
         };
         for a in s.doc.annotations.iter().filter(|a| a.image == v.image && a.on_plane(self.z)) {
-            match &a.shape {
+            let live_shape = match &self.gesture {
+                Some(Gesture::Resize { id, current, .. }) if a.id == *id => current,
+                _ => &a.shape,
+            };
+            match live_shape {
                 Shape::Line { x0, y0, x1, y1 } => {
-                    let len = a.shape.length().unwrap_or(0.0);
+                    let len = live_shape.length().unwrap_or(0.0);
                     push(self.to_screen([(x0 + x1) / 2.0, (y0 + y1) / 2.0]), format_length(len, um));
                 }
                 shape if s.sel.shapes.contains(&a.id) && shape.is_region() => {
@@ -2092,10 +2332,29 @@ impl ImageCanvas {
     }
 
     fn cursor(&self, cx: &App) -> CursorStyle {
-        match (&self.gesture, self.tool(cx)) {
+        let tool = self.tool(cx);
+        if matches!(self.gesture, Some(Gesture::Curtain)) {
+            return CursorStyle::ResizeLeftRight;
+        }
+        if self.gesture.is_none()
+            && let (Some(frac), Some(m)) = (self.curtain, self.mouse)
+            && (m.0 - frac * self.view_size().0).abs() <= 10.0
+        {
+            return CursorStyle::ResizeLeftRight;
+        }
+        match (&self.gesture, tool) {
             (Some(Gesture::Pan { .. }), _) => CursorStyle::ClosedHand,
+            (Some(Gesture::Resize { handle, .. }), _) => handle.cursor(),
             _ if self.space => CursorStyle::OpenHand,
             (_, Tool::Hand) => CursorStyle::OpenHand,
+            (None, Tool::Select | Tool::Rect | Tool::Ellipse | Tool::Ruler) => {
+                if let Some(m) = self.mouse
+                    && let Some((_, handle, _)) = self.hit_resize_handle(self.to_image(m), tool, cx)
+                {
+                    return handle.cursor();
+                }
+                if tool == Tool::Select { CursorStyle::Arrow } else { CursorStyle::Crosshair }
+            }
             (_, Tool::Select) => CursorStyle::Arrow,
             (_, Tool::Zoom) => CursorStyle::PointingHand,
             _ => CursorStyle::Crosshair,
@@ -2154,6 +2413,8 @@ struct Stroke {
     selected: bool,
     /// A point marker.
     dot: bool,
+    /// Explicit resize handle positions (corners + edge midpoints for selected boxes/ellipses).
+    handles: Vec<(f32, f32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -2164,14 +2425,36 @@ enum Fill {
 fn stroke_of(shape: &Shape, color: Hsla, selected: bool, _zoom: f32, to_screen: impl Fn([f64; 2]) -> (f32, f32)) -> Stroke {
     // At screen resolution: a long stroke seen zoomed out is a few points to draw
     let points: Vec<(f32, f32)> = geometry::thin(&shape.outline().into_iter().map(&to_screen).collect::<Vec<_>>(), 1.5);
+    let handles = if selected {
+        match shape {
+            Shape::Rect { .. } | Shape::Ellipse { .. } => {
+                let (x0, y0, x1, y1) = shape.bounds();
+                let (mx, my) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+                vec![
+                    to_screen([x0, y0]),
+                    to_screen([mx, y0]),
+                    to_screen([x1, y0]),
+                    to_screen([x1, my]),
+                    to_screen([x1, y1]),
+                    to_screen([mx, y1]),
+                    to_screen([x0, y1]),
+                    to_screen([x0, my]),
+                ]
+            }
+            Shape::Line { x0, y0, x1, y1 } => vec![to_screen([*x0, *y0]), to_screen([*x1, *y1])],
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
     match shape {
-        Shape::Point { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: true },
-        Shape::Line { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: false },
+        Shape::Point { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: true, handles },
+        Shape::Line { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: false, handles },
         // A selected stroke: its path (the paint itself is a raster)
-        Shape::Stroke { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: false },
+        Shape::Stroke { .. } => Stroke { points, closed: false, fill: None, width: 1.5, color, selected, dot: false, handles },
         // Faint fills (≤ 15 %): the image under a region stays readable; the selection is
         // its thicker outline and handles (`simultaneous-contrast`)
-        _ => Stroke { points, closed: true, fill: Some(Fill::Area(if selected { 0.14 } else { 0.10 })), width: if selected { 2.0 } else { 1.5 }, color, selected, dot: false },
+        _ => Stroke { points, closed: true, fill: Some(Fill::Area(if selected { 0.14 } else { 0.10 })), width: if selected { 2.0 } else { 1.5 }, color, selected, dot: false, handles },
     }
 }
 
@@ -2225,7 +2508,14 @@ fn paint_stroke(window: &mut Window, o: gpui_kit::Point<Pixels>, s: &Stroke) {
             window.paint_path(p, c);
         }
     }
-    if s.selected && s.fill.is_some() {
+    if s.selected && !s.handles.is_empty() {
+        for h in &s.handles {
+            let p = at(h);
+            let r = 3.5;
+            window.paint_quad(fill(Bounds { origin: point(p.x - px(r + 1.0), p.y - px(r + 1.0)), size: size(px(2.0 * (r + 1.0)), px(2.0 * (r + 1.0))) }, gpui_kit::black().opacity(0.65)));
+            window.paint_quad(fill(Bounds { origin: point(p.x - px(r), p.y - px(r)), size: size(px(2.0 * r), px(2.0 * r)) }, gpui_kit::white()));
+        }
+    } else if s.selected && s.fill.is_some() {
         for p in pts.iter().step_by((pts.len() / 24).max(1)) {
             let r = 3.0;
             window.paint_quad(fill(Bounds { origin: point(p.x - px(r), p.y - px(r)), size: size(px(2.0 * r), px(2.0 * r)) }, gpui_kit::white()));
@@ -2340,6 +2630,8 @@ impl Render for ImageCanvas {
         } else {
             None
         };
+        let has_overlays = !overlays.is_empty();
+        let curtain = self.curtain.filter(|_| has_overlays);
         let drops = std::mem::take(&mut self.drops);
         let bounds_cell = self.bounds.clone();
         let plane = canvas(
@@ -2370,11 +2662,30 @@ impl Render for ImageCanvas {
                         let b = Bounds { origin: point(o.x + b.origin.x, o.y + b.origin.y), size: b.size };
                         let _ = window.paint_image(bounds, b, Corners::default(), img, 0, false);
                     }
-                    for (r, img) in overlays {
-                        let sx = ((r[0] - center.0) * zoom + vw as f64 / 2.0) as f32;
-                        let sy = ((r[1] - center.1) * zoom + vh as f64 / 2.0) as f32;
-                        let b = Bounds { origin: point(o.x + px(sx), o.y + px(sy)), size: size(px((r[2] * zoom) as f32), px((r[3] * zoom) as f32)) };
-                        let _ = window.paint_image(bounds, b, Corners::default(), img, 0, false);
+                    let overlay_clip = match curtain {
+                        Some(frac) => {
+                            let split_x = bounds.size.width * frac;
+                            Bounds { origin: point(o.x + split_x, o.y), size: size(bounds.size.width - split_x, bounds.size.height) }
+                        }
+                        None => bounds,
+                    };
+                    window.with_content_mask(Some(gpui_kit::ContentMask { bounds: overlay_clip }), |window| {
+                        for (r, img) in overlays {
+                            let sx = ((r[0] - center.0) * zoom + vw as f64 / 2.0) as f32;
+                            let sy = ((r[1] - center.1) * zoom + vh as f64 / 2.0) as f32;
+                            let b = Bounds { origin: point(o.x + px(sx), o.y + px(sy)), size: size(px((r[2] * zoom) as f32), px((r[3] * zoom) as f32)) };
+                            let _ = window.paint_image(overlay_clip, b, Corners::default(), img, 0, false);
+                        }
+                    });
+                    if let Some(frac) = curtain {
+                        let cx_px = bounds.size.width * frac;
+                        let bh = bounds.size.height;
+                        // Crisp vertical split curtain divider with dark halo & centered grab handle
+                        window.paint_quad(fill(Bounds { origin: point(o.x + cx_px - px(2.0), o.y), size: size(px(4.0), bh) }, gpui_kit::black().opacity(0.55)));
+                        window.paint_quad(fill(Bounds { origin: point(o.x + cx_px - px(1.0), o.y), size: size(px(2.0), bh) }, gpui_kit::white().opacity(0.95)));
+                        let cy = o.y + bh * 0.5;
+                        window.paint_quad(fill(Bounds { origin: point(o.x + cx_px - px(5.0), cy - px(16.0)), size: size(px(10.0), px(32.0)) }, gpui_kit::black().opacity(0.75)));
+                        window.paint_quad(fill(Bounds { origin: point(o.x + cx_px - px(3.0), cy - px(12.0)), size: size(px(6.0), px(24.0)) }, gpui_kit::white()));
                     }
                     for st in &strokes {
                         paint_stroke(window, o, st);
@@ -2492,6 +2803,74 @@ impl Render for ImageCanvas {
             })
             .flatten();
 
+        // Hover Cell Tooltip: lightweight floating card when hovering a detected cell
+        let cell_hud = (self.gesture.is_none() && s.hist.show && tool.tool != Tool::Probe)
+            .then(|| {
+                let m = self.mouse?;
+                let img_id = self.viewer.as_ref()?.image.as_str();
+                let cells = s.hist.cells.get(img_id)?;
+                if cells.is_empty() {
+                    return None;
+                }
+                let pt = self.to_image(m);
+                let cell = cells.iter().find(|c| {
+                    let (x0, y0, x1, y1) = lucem_hist::polygon::bounds(&c.roi);
+                    pt[0] >= x0 && pt[0] <= x1 && pt[1] >= y0 && pt[1] <= y1 && lucem_hist::polygon::contains(&c.roi, pt)
+                })?;
+                let mut parts = vec![format!("Cell #{}", cell.id)];
+                if let Some(cls) = &cell.class {
+                    parts.push(cls.clone());
+                } else if let Some(ic) = cell.intensity {
+                    parts.push(format!("{ic:?}"));
+                }
+                let area_px = lucem_hist::polygon::area(&cell.roi);
+                if area_px > 0.0 {
+                    parts.push(crate::ui::widgets::format_area(area_px, um));
+                }
+                let x = (m.0 + 14.0).clamp(8.0, (vw - 220.0).max(8.0));
+                let y = (m.1 - 30.0).clamp(8.0, (vh - 34.0).max(8.0));
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(6.))
+                        .bg(gpui_kit::black().opacity(0.78))
+                        .border_1()
+                        .border_color(gpui_kit::white().opacity(0.18))
+                        .text_xs()
+                        .text_color(gpui_kit::white())
+                        .whitespace_nowrap()
+                        .child(parts.join(" · ")),
+                )
+            })
+            .flatten();
+        // Swipe Curtain Compare toggle pill (shown when overlays exist)
+        let curtain_btn = (!self.compact && has_overlays).then(|| {
+            let active = curtain.is_some();
+            let me = cx.entity().downgrade();
+            div()
+                .id("canvas-curtain-toggle")
+                .absolute()
+                .right(px(theme::LG))
+                .top(px(theme::LG))
+                .px(px(10.))
+                .py(px(5.))
+                .rounded(px(999.))
+                .cursor_pointer()
+                .bg(if active { color::accent_mark() } else { gpui_kit::black().opacity(0.55) })
+                .text_xs()
+                .text_color(gpui_kit::white())
+                .child(if active { "Split curtain: On" } else { "Split curtain" })
+                .on_click(move |_, _, cx| {
+                    let _ = me.update(cx, |c, cx| {
+                        c.curtain = if c.curtain.is_some() { None } else { Some(0.5) };
+                        cx.notify();
+                    });
+                })
+        });
         let plane_el = div()
             .id("image-plane")
             .relative()
@@ -2515,7 +2894,9 @@ impl Render for ImageCanvas {
             .children(label_elems)
             .children(empty)
             .children(scale_bar)
-            .children(probe_hud);
+            .children(probe_hud)
+            .children(cell_hud)
+            .children(curtain_btn);
 
         // Rulers
         let rulers = tool.rulers && image.is_some();

@@ -312,6 +312,7 @@ impl Service {
                 let mut answer = counts(&analysis);
                 // The regions themselves (few, small): the caller shows them as annotations
                 answer["regions"] = json!(analysis.tissue);
+                #[cfg(not(target_family = "wasm"))]
                 let n_cells = analysis.cells.len();
                 self.analyses.lock().unwrap_or_else(|e| e.into_inner()).insert(path, analysis);
                 answer["outcome"] = serde_json::to_value(outcome.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;

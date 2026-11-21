@@ -37,7 +37,7 @@ command -v brotli > /dev/null || { echo "brotli not found"; exit 1; }
 rustup run "$TOOLCHAIN" rustc --version > /dev/null 2>&1 || rustup toolchain install "$TOOLCHAIN" --profile minimal --component rust-src --target wasm32-unknown-unknown
 
 mkdir -p "$dist"
-cp "$here/index.html" "$here/loader.js" "$here/isolate-sw.js" "$dist/"
+cp "$here/index.html" "$here/loader.js" "$here/isolate-sw.js" "$here/matemasie-lucem.woff2" "$dist/"
 # A page on its own says so; `lucem serve` answers this address itself
 echo '{"server": null}' > "$dist/lucem-serve.json"
 

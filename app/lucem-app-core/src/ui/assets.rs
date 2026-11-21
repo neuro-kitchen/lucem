@@ -8,9 +8,31 @@ gpui_kit::assets::icon_assets!(
     [AppWindow, Bell, Box, BrainCircuit, Brush, Camera, ChartBar, ChartCandlestick, ChartColumn, ChartGantt, ChartScatter, Circle, Clock, Code, Columns2, Columns3, Combine, Contrast, Crosshair, Download, Eraser, Expand, FileCode, FileInput, FileOutput, FilePlus, Flame, Gauge, GitCompare, Gpu, Grid2x2, Grid3x3, Grip, Hand, Image, ImagePlus, Keyboard, Lasso, Layers, Layers2, LayoutGrid, Link, MapPin, Microscope, Monitor, MousePointer2, Package, PaintBucket, PanelLeft, Pencil, Pentagon, Pipette, Power, RotateCcw, Rows2, Ruler, Save, Scan, ScanSearch, Server, Shapes, Sheet, Shrink, SlidersHorizontal, Sparkles, SquareDashed, SquareMousePointer, SquarePen, SquarePlus, SquaresExclude, SquaresIntersect, SquaresSubtract, SquaresUnite, StickyNote, Table2, Tag, Trash, Type, Unlink, WandSparkles, Workflow, Wrench, X, ZoomIn, ZoomOut]
 );
 
-/// What the app ships: gpui-kit's component icons and [`ExtraIcons`].
+/// Brand wordmark font (used strictly for the "Lucem" title/wordmark).
+pub const BRAND_FONT: &str = "Matemasie";
+
+/// Asset paths for the dark and light (cream-background) cell logos.
+pub const LOGO_DARK_PATH: &str = "brand/logo-dark.svg";
+pub const LOGO_LIGHT_PATH: &str = "brand/logo-light.svg";
+
+/// Returns the cell logo path matching the active theme (dark or light cream).
+pub fn logo_path() -> &'static str {
+    if crate::ui::theme::is_dark() { LOGO_DARK_PATH } else { LOGO_LIGHT_PATH }
+}
+
+/// Registers the embedded brand wordmark font (`Matemasie`) with GPUI's text system.
+pub fn register_brand_fonts(cx: &gpui_kit::App) {
+    let _ = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(
+        include_bytes!("../../assets/fonts/Matemasie-Regular.ttf").as_slice(),
+    )]);
+}
+
+/// What the app ships: gpui-kit's component icons, [`ExtraIcons`], and the dark/light brand logos.
 pub fn app_assets() -> kitchen_ui::icons::AppAssets {
-    kitchen_ui::icons::AppAssets::new().icons(ExtraIcons)
+    kitchen_ui::icons::AppAssets::new()
+        .icons(ExtraIcons)
+        .file(LOGO_DARK_PATH, include_bytes!("../../assets/brand/logo-dark.svg"))
+        .file(LOGO_LIGHT_PATH, include_bytes!("../../assets/brand/logo-light.svg"))
 }
 
 #[cfg(test)]

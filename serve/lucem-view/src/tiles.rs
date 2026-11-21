@@ -111,13 +111,36 @@ impl RawCache {
     }
 }
 
+/// Locks `m` without ever calling `Atomics.wait` on the `wasm32` browser main thread.
+/// On native builds (and inside Web Workers on `wasm32`, or when uncontended), this acquires the
+/// lock immediately; on `wasm32` if a background worker holds the lock for a few microseconds, we
+/// spin with `try_lock` so the browser main thread never throws
+/// `RuntimeError: Atomics.wait cannot be called in this context`.
+#[inline]
+fn lock_main_safe<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, std::sync::PoisonError<std::sync::MutexGuard<'_, T>>> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        m.lock()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        loop {
+            match m.try_lock() {
+                Ok(g) => return Ok(g),
+                Err(std::sync::TryLockError::Poisoned(p)) => return Err(p),
+                Err(std::sync::TryLockError::WouldBlock) => core::hint::spin_loop(),
+            }
+        }
+    }
+}
+
 /// The raw cache of a pyramid, shared by every service of it: views of the same image read a
 /// tile from disk once and share one memory budget.
 fn shared_raw_cache(pyramid: &Arc<Pyramid>) -> Arc<Mutex<RawCache>> {
     type Caches = Vec<(Weak<Pyramid>, Weak<Mutex<RawCache>>)>;
     static CACHES: Mutex<Caches> = Mutex::new(Vec::new());
     let new = || Arc::new(Mutex::new(RawCache { map: HashMap::new(), bytes: 0, budget: RAW_BUDGET, clock: 0 }));
-    let Ok(mut caches) = CACHES.lock() else { return new() };
+    let Ok(mut caches) = lock_main_safe(&CACHES) else { return new() };
     caches.retain(|(p, c)| p.strong_count() > 0 && c.strong_count() > 0);
     if let Some(c) = caches.iter().find(|(p, _)| p.upgrade().is_some_and(|p| Arc::ptr_eq(&p, pyramid))).and_then(|(_, c)| c.upgrade()) {
         return c;
@@ -183,7 +206,7 @@ impl TileService {
 
     /// Replaces the waiting tiles with `keys` (made in this order) at revision `rev`.
     pub fn request(&self, rev: u64, displays: Arc<Vec<ChannelDisplay>>, keys: Vec<TileKey>) {
-        let mut q = self.shared.queue.lock().expect("tile queue");
+        let mut q = lock_main_safe(&self.shared.queue).expect("tile queue");
         *q = Some(Request { rev, displays, keys: keys.into() });
         self.shared.ready.notify_all();
     }
@@ -197,7 +220,8 @@ impl TileService {
             return vec![None; py.channels.len()];
         }
         let (tx, ty) = (x / l.tile_w, y / l.tile_h);
-        let Ok(mut raw) = self.shared.raw.lock() else { return Vec::new() };
+        // Never block the browser main thread on `Atomics.wait` if a tile worker is inserting.
+        let Ok(mut raw) = self.shared.raw.try_lock() else { return vec![None; py.channels.len()] };
         (0..py.channels.len())
             .map(|c| {
                 raw.get(&RawKey { level, z, channel: c, tx, ty }).and_then(|(d, w, _)| d.get((y - ty * l.tile_h) * w + (x - tx * l.tile_w)).copied())
@@ -226,7 +250,7 @@ impl TileService {
         }
         let mut out = vec![0.0f32; w * h];
         let mut any_hit = false;
-        let mut raw = self.shared.raw.lock().ok()?;
+        let Ok(mut raw) = lock_main_safe(&self.shared.raw) else { return None };
         for ty in y0 / l.tile_h..=(y1 - 1) / l.tile_h {
             for tx in x0 / l.tile_w..=(x1 - 1) / l.tile_w {
                 let rk = RawKey { level, z, channel, tx, ty };
@@ -282,7 +306,7 @@ impl TileService {
 
     /// Bytes held by the raw tile cache.
     pub fn cached_bytes(&self) -> usize {
-        self.shared.raw.lock().map(|r| r.bytes).unwrap_or(0)
+        self.shared.raw.try_lock().map(|r| r.bytes).unwrap_or(0)
     }
 }
 
@@ -341,7 +365,7 @@ fn read_region(py: &Arc<Pyramid>, raw: &Mutex<RawCache>, level: usize, z: usize,
 
 impl Drop for TileService {
     fn drop(&mut self) {
-        if let Ok(mut c) = self.shared.closed.lock() {
+        if let Ok(mut c) = lock_main_safe(&self.shared.closed) {
             *c = true;
         }
         self.shared.ready.notify_all();

@@ -21,4 +21,5 @@ self.onmessage = (e) => {
   });
 };
 // "" when operators can run here, else why not
-self.postMessage({ ready: engine.start() });
+const why = await engine.start();
+self.postMessage({ ready: why });

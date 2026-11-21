@@ -32,4 +32,6 @@ pub use limits::{device_elements, MAX_DEVICE_ELEMENTS};
 pub use pinning::{pin_tuned_choices, tuned_choices_pinned, PinnedChoices};
 pub use pointwise::{apply_pointwise, POINTWISE_AFFINE, POINTWISE_CLAMP, POINTWISE_GAMMA, POINTWISE_RESCALE};
 pub use special::{negative_infinity, positive_infinity, NEGATIVE_INFINITY_BITS, POSITIVE_INFINITY_BITS};
-pub use target::{configure_runtime, open_device, shutdown_devices, ComputeTask, CACHE_DIR_ENV, KERNEL_CACHE_ENV};
+#[cfg(all(target_family = "wasm", feature = "wgpu"))]
+pub use target::open_browser_gpu;
+pub use target::{browser_gpu_lost, configure_runtime, open_device, shutdown_devices, ComputeTask, CACHE_DIR_ENV, KERNEL_CACHE_ENV};

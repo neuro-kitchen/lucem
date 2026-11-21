@@ -20,6 +20,7 @@ cuda = ["lucem-core/cuda", "lucem-ops/cuda"]
 hip = ["lucem-core/hip", "lucem-ops/hip"]
 
 [dependencies]
+lucem-hub.workspace = true
 lucem-ml.workspace = true
 image.workspace = true
 lucem-core = { workspace = true, features = ["compute"] }

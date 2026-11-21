@@ -114,6 +114,96 @@ pub fn panel(store: &Entity<Store>, cx: &App) -> AnyElement {
     if brightfield {
         slide = slide.child(h_flex().child(secondary(store, "hist-fit-stains", IconName::Pipette, "Fit stains to the selected region", idle && regions > 0, Store::hist_estimate_stains)));
     }
+    if count > 0 {
+        let style_labels: Vec<SharedString> = crate::data::hist::CellStyle::ALL.iter().map(|st| SharedString::from(st.label())).collect();
+        let cur_style = crate::data::hist::CellStyle::ALL.iter().position(|st| *st == s.hist.cell_style);
+        let st_style = store.clone();
+        let style_pick = MenuSelect::new("hist-cell-style", style_labels, cur_style, move |i, _, cx| {
+            let pick = crate::data::hist::CellStyle::ALL[i];
+            st_style.update(cx, |s, cx| {
+                s.hist.cell_style = pick;
+                cx.notify();
+            });
+        });
+        let stroke_val = s.hist.cell_stroke_px;
+        let st_stroke = store.clone();
+        let stroke_step = stepper("hist-cell-stroke", format!("{stroke_val:.1} px"), move |d, _, cx| {
+            st_stroke.update(cx, |s, cx| {
+                s.hist.cell_stroke_px = (s.hist.cell_stroke_px + d as f32 * 0.5).clamp(1.0, 3.0);
+                cx.notify();
+            });
+        });
+        slide = slide
+            .child(row("Cells LOD", style_pick))
+            .child(row("Outline", stroke_step));
+        let sel_n = s.sel.objects.len();
+        if sel_n > 0 {
+            let st_del = store.clone();
+            let st_merge = store.clone();
+            slide = slide.child(
+                h_flex()
+                    .gap(px(theme::XS))
+                    .items_center()
+                    .child(div().flex_1().text_xs().text_color(color::text_muted()).child(format!("{sel_n} cell(s) selected")))
+                    .when(sel_n >= 2, |h| {
+                        h.child(Button::new("hist-merge-cells").outline().xsmall().icon(Icon::new(IconName::Combine)).label("Merge").tooltip("Merge selected cells into one").on_click(move |_, _, cx| st_merge.update(cx, |s, cx| s.hist_merge_selected_objects(cx))))
+                    })
+                    .child(Button::new("hist-del-cells").outline().xsmall().icon(Icon::new(IconName::Trash)).label("Delete").tooltip("Remove selected cells").on_click(move |_, _, cx| st_del.update(cx, |s, cx| s.hist_delete_selected_objects(cx)))),
+            );
+            // Pinned Single-Cell Inspector when exactly 1 cell is selected
+            if sel_n == 1
+                && let Some(tag) = s.sel.objects.first()
+                && let Some(id_str) = tag.strip_prefix('c')
+                && let Ok(cid) = id_str.parse::<u32>()
+                && let Some(cell) = cells.iter().find(|c| c.id == cid)
+            {
+                let area_px = lucem_hist::polygon::area(&cell.roi);
+                let perim_px = lucem_hist::polygon::perimeter(&cell.roi);
+                let circ = if perim_px > 1e-6 { (4.0 * std::f64::consts::PI * area_px / (perim_px * perim_px)).clamp(0.0, 1.0) } else { 0.0 };
+                let label = cell.class.clone().or_else(|| cell.intensity.map(|i| format!("{i:?}"))).unwrap_or_else(|| "Unclassified".into());
+                let mut meas: Vec<(&String, f64)> = cell.measurements.iter().map(|(k, &v)| (k, v)).collect();
+                meas.sort_by(|a, b| a.0.cmp(b.0));
+                let max_val = meas.iter().map(|(_, v)| v.abs()).fold(1.0f64, f64::max);
+                let mut card = v_flex()
+                    .w_full()
+                    .p(px(theme::SM))
+                    .gap(px(4.))
+                    .rounded(px(theme::RADIUS))
+                    .border_1()
+                    .border_color(color::border())
+                    .bg(color::panel())
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child(format!("Cell #{cid}")))
+                            .child(div().text_xs().text_color(color::accent_mark()).child(label)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(color::text_muted())
+                            .child(format!("Area {} · Circ {:.2}", crate::ui::widgets::format_area(area_px, um), circ)),
+                    );
+                for (k, v) in meas.into_iter().take(6) {
+                    let frac = (v.abs() / max_val).clamp(0.02, 1.0) as f32;
+                    card = card.child(
+                        v_flex()
+                            .gap(px(2.))
+                            .child(
+                                h_flex()
+                                    .justify_between()
+                                    .text_xs()
+                                    .child(div().flex_1().min_w_0().truncate().text_color(color::text_muted()).child(k.clone()))
+                                    .child(div().font_family("monospace").child(trim(v))),
+                            )
+                            .child(div().w_full().h(px(3.)).rounded(px(2.)).bg(color::control()).child(div().h_full().w(gpui_kit::relative(frac)).rounded(px(2.)).bg(color::accent_mark()))),
+                    );
+                }
+                slide = slide.child(card);
+            }
+        }
+    }
 
     // ---- Recipes ------------------------------------------------------------
     let open = s.hist.recipe;
@@ -212,6 +302,18 @@ fn recipe_body(store: &Entity<Store>, s: &Store, r: Recipe, img: &str, cells: &[
                     st.update(cx, |s, cx| s.hist_set_detector(d, cx))
                 }),
             ));
+            #[cfg(target_family = "wasm")]
+            if crate::data::remote::runs_alone() {
+                body = body.child(
+                    div()
+                        .p(px(theme::SM))
+                        .rounded(px(theme::RADIUS_SM))
+                        .bg(color::control())
+                        .text_xs()
+                        .text_color(color::text_muted())
+                        .child("Browser-only viewer: classical threshold/watershed detection runs locally here. Deep-learning detectors (StarDist, InstanSeg, SAM 2) require the desktop app or `lucem serve --web` (`lucem plugins install all`)."),
+                );
+            }
             if s.hist.detector.is_some() && cur.is_none() {
                 body = body.child(div().text_xs().text_color(color::warning()).child("The chosen model does not fit this image; choose another."));
             }

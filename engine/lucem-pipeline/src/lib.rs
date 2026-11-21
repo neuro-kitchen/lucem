@@ -14,7 +14,7 @@ pub mod spec;
 pub mod stitch;
 pub mod table;
 
-pub use eval::{align_region, at_downsample, crop_and_download, evaluate, evaluate_all, evaluate_cached, halo, EvalCache, EvalTimings, Plan, PlanNode, READ_GRID};
+pub use eval::{align_region, at_downsample, crop_and_download, crop_and_download_async, evaluate, evaluate_all, evaluate_cached, halo, EvalCache, EvalTimings, Plan, PlanNode, READ_GRID};
 #[cfg(not(target_family = "wasm"))]
 pub use executor::{PipelineExecutionResult, PipelineExecutor};
 pub use modifier::{ModifierKind, ModifierNode};

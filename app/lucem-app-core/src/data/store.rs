@@ -1465,9 +1465,11 @@ impl Store {
             }
             return;
         }
-        // A page served by `lucem serve`: its server computes (even if WebGPU was also opened).
+        // In a browser page (both `lucem serve --web` and the standalone GitHub Pages engine
+        // worker), pipeline compute runs through the page's link (server or engine worker) rather
+        // than blocking the main thread on `web_client::PageLink::request`.
         #[cfg(target_family = "wasm")]
-        if super::remote::page_link().is_some() && !super::remote::runs_alone() {
+        if super::remote::page_link().is_some() {
             return self.recompute_on_server(req, cx);
         }
         let Some(device) = self.device.clone() else {

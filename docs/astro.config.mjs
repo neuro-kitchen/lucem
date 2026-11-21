@@ -35,7 +35,7 @@ export default defineConfig({
     starlight({
       title: 'lucem',
       description: 'GPU image analysis for histology and microscopy: an app, a command line and headless pipelines.',
-      logo: { src: './src/assets/logo.svg' },
+      logo: { dark: './src/assets/logo.svg', light: './src/assets/logo-light.svg' },
       favicon: '/favicon.svg',
       social: [{ icon: 'github', label: 'GitHub', href: repo }],
       editLink: { baseUrl: `${repo}/edit/main/docs/` },

@@ -14,7 +14,10 @@ crate-type = ["cdylib", "rlib"]
 # Everything is for the browser (a single-thread module run in a dedicated worker); on other
 # targets the crate is empty, so the workspace builds
 [target.'cfg(target_family = "wasm")'.dependencies]
+lucem-core = { workspace = true, default-features = false, features = ["compute", "wgpu"] }
 lucem-io.workspace = true
+lucem-ops = { workspace = true, default-features = false, features = ["wgpu"] }
+lucem-pipeline.workspace = true
 lucem-stream = { workspace = true, default-features = false, features = ["web"] }
 prost.workspace = true
 wasm-bindgen.workspace = true

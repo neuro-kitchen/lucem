@@ -56,6 +56,8 @@ jobs:
           shared-key: web-page
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build (the app, its engine worker, the samples)
+        env:
+          LUCEM_BROTLI_Q: "11"
         run: app/lucem-app-web/build.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

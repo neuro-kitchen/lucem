@@ -168,6 +168,7 @@ pub fn start() {
     log::info!("lucem: threads in this build: {threads}, drawing: {:?}", backend());
     application.with_assets(lucem_app_core::ui::assets::app_assets()).run(|cx: &mut App| {
         cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("AdwaitaSans-Regular.ttf").as_slice())]).expect("the font");
+        lucem_app_core::ui::assets::register_brand_fonts(cx);
         gpui_kit::init(cx);
         gpui_kit::component::Theme::global_mut(cx).font_family = FONT.into();
         actions::bind_keys(cx);

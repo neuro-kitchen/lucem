@@ -7,7 +7,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{div, px, App, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
+use gpui_kit::{div, img, px, App, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window};
 use lucem_io::{discover_workspace_data_paths, PhantomKind};
 
 use crate::data::store::{display_name, sample_name, Store};
@@ -68,14 +68,29 @@ pub fn home(store: &Entity<Store>, open_file: impl Fn(&mut Window, &mut App) + '
             v_flex()
                 .items_center()
                 .gap(px(theme::SM))
-                .child(div().text_size(px(28.)).font_weight(FontWeight::SEMIBOLD).child("Lucem"))
+                .child(img(crate::ui::assets::logo_path()).size(px(64.)).rounded(px(14.)))
+                .child(div().font_family(crate::ui::assets::BRAND_FONT).text_size(px(34.)).child("Lucem"))
                 .child(div().text_sm().text_color(color::text_muted()).child("GPU workstation for histology and radiology: open an image, annotate, build pipelines.")),
         )
         .child(
             h_flex()
                 .gap(px(theme::SM))
-                .child(Button::new("home-open").primary().icon(IconName::FolderOpen).label("Open image or OME-Zarr…").on_click(move |_, w, cx| open_file(w, cx)))
-                .child(Button::new("home-project").outline().icon(IconName::Folder).label("Open project…").on_click(move |_, w, cx| open_project(w, cx))),
+                .child(
+                    Button::new("home-open")
+                        .primary()
+                        .icon(IconName::File)
+                        .label(if crate::platform::LOCAL_FILES { "Open image…" } else { "Open image file…" })
+                        .tooltip("Open a single image file (TIFF, PNG, JPEG)")
+                        .on_click(move |_, w, cx| open_file(w, cx)),
+                )
+                .child(
+                    Button::new("home-project")
+                        .outline()
+                        .icon(IconName::FolderOpen)
+                        .label("Open OME-Zarr / folder…")
+                        .tooltip("Open an OME-Zarr folder or Lucem project directory")
+                        .on_click(move |_, w, cx| open_project(w, cx)),
+                ),
         )
         .child(
             h_flex()

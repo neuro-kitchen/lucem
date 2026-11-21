@@ -5,6 +5,48 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+## [0.0.6] - 2026-11-21
+
+Multi-resolution **Cell Overlay LOD Pyramid** (density heatmap → anti-aliased centroids → crisp
+contours with dark halo & nucleus/cytoplasm distinction), **Plugin-Contributed Pipeline Tabs**
+(`Histology` tab right after `Process`), **Async WebGPU CubeCL Compute** in the standalone browser
+worker, **ML Plugin Binary Distribution** (`lucem plugins list|install`), **Spatial Inspection &
+Editing UX** (Split curtain compare, Hover Cell Tooltip, Pinned Single-Cell Inspector, interactive
+box/ellipse/ruler edge & corner resizing), **Determinate Job Progress Card**, and refreshed
+**Lucem branding** (hand-sketched cell logo with dark + cream light theme, `Matemasie` wordmark,
+and `Help › About Lucem`).
+
+### Added
+
+- **Multi-resolution Cell Overlay Pyramid (LOD):** detected cells now render smoothly across all
+  zoom levels — macro spatial density heatmap → mid-zoom anti-aliased centroid disks → micro-zoom
+  crisp contours with dark outer halo, configurable outline width, and nucleus/cytoplasm distinction
+  (`Auto LOD`, `Outlines`, `Fill + outline`, `Centroids`, `Density`).
+- **Plugin-contributed Pipeline tabs:** domain plugins add their own menu tab directly in the
+  Pipeline bar (`Edit · Sources · Process · Histology · Script · Model · Output`).
+- **Spatial inspection & editing UX:**
+  - Interactive edge, corner, and endpoint resizing for rectangles, ellipses, and rulers (with
+    `Shift` aspect-ratio lock and `Escape` cancel).
+  - Draggable vertical **Split curtain** compare mode alongside **Hold to compare**.
+  - Floating **Hover Cell Tooltip** and **Pinned Single-Cell Inspector** (morphology + per-channel
+    measurement bars) with one-click **Merge** and **Delete** cell editing.
+- **Determinate Job Progress Card:** floating non-blocking progress card showing active stage,
+  determinate progress bar, percentage, and one-click Cancel.
+- **Help › About Lucem & refreshed branding:** theme-aware hand-sketched cell logo (dark + cream
+  light mode), `Matemasie` wordmark, GPU-composited web loader, and `Help › About Lucem`,
+  `Documentation`, and `Report an issue`.
+- **ML plugin binary distribution (`lucem plugins`):** `lucem plugins list` and
+  `lucem plugins install <stardist|instanseg|sam|all>` download SHA-256 verified binaries from
+  GitHub Releases.
+- **Async WebGPU CubeCL compute in standalone browser worker:** `lucem-engine-web` opens WebGPU
+  asynchronously and evaluates GPU pipelines directly in the browser without a server.
+
+### Fixed
+
+- Avoided `Atomics.wait` main-thread panics in standalone browser WASM (`TileService`, `ChunkCache`).
+- Fixed **Hold to compare** turning the canvas black when raw channels were hidden without active results.
+- Fixed Chrome web loader SVG freezing half-drawn during WebGL2 startup.
+
 ## [0.0.5] - 2026-11-20
 
 Publication-ready **Figure** composer workspace, **Zero-Freeze ML Cell Detection** (`StarDist` and

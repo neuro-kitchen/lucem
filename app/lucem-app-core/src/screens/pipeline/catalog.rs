@@ -44,6 +44,19 @@ pub struct Category {
     pub items: Vec<Item>,
 }
 
+/// A domain plugin tab contributed to the Pipeline menu bar (placed right after `Process`).
+#[derive(Debug, Clone, Copy)]
+pub struct PluginTab {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub provider: &'static str,
+}
+
+/// Active domain plugin tabs contributed to the Pipeline menu bar.
+pub fn plugin_tabs() -> Vec<PluginTab> {
+    vec![PluginTab { id: "histology", title: "Histology", provider: "pipeline.histology" }]
+}
+
 /// The families of operators, in menu order.
 pub const FAMILIES: [&str; 7] = ["Filter", "Intensity", "Restore", "Threshold", "Mask", "Segment", "Measure"];
 

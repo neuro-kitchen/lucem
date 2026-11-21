@@ -169,27 +169,45 @@ impl Default for ChunkCache {
     }
 }
 
+/// Acquires `m` without ever calling `Atomics.wait` on the `wasm32` browser main thread.
+#[inline]
+fn lock_cache<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    #[cfg(target_family = "wasm")]
+    {
+        loop {
+            match m.try_lock() {
+                Ok(g) => return g,
+                Err(std::sync::TryLockError::Poisoned(p)) => return p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => core::hint::spin_loop(),
+            }
+        }
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 impl Drop for ChunkCache {
     fn drop(&mut self) {
-        if let Ok(mut c) = GLOBAL_CHUNK_CACHE.lock() {
-            let pid = self.pyramid_id;
-            let mut freed = 0usize;
-            c.map.retain(|k, v| {
-                if k.0 == pid {
-                    freed += v.0.len() * 4;
-                    false
-                } else {
-                    true
-                }
-            });
-            c.bytes = c.bytes.saturating_sub(freed);
-        }
+        let mut c = lock_cache(&GLOBAL_CHUNK_CACHE);
+        let pid = self.pyramid_id;
+        let mut freed = 0usize;
+        c.map.retain(|k, v| {
+            if k.0 == pid {
+                freed += v.0.len() * 4;
+                false
+            } else {
+                true
+            }
+        });
+        c.bytes = c.bytes.saturating_sub(freed);
     }
 }
 
 impl ChunkCache {
     fn get(&self, key: &(usize, Vec<usize>)) -> Option<Arc<Vec<f32>>> {
-        let mut c = GLOBAL_CHUNK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut c = lock_cache(&GLOBAL_CHUNK_CACHE);
         c.clock += 1;
         let clock = c.clock;
         c.map.get_mut(&(self.pyramid_id, key.0, key.1.clone())).map(|e| {
@@ -205,7 +223,7 @@ impl ChunkCache {
         if entry_bytes > limit / 4 {
             return;
         }
-        let mut c = GLOBAL_CHUNK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut c = lock_cache(&GLOBAL_CHUNK_CACHE);
         let gkey = (self.pyramid_id, key.0, key.1);
         if let Some(old) = c.map.remove(&gkey) {
             c.bytes = c.bytes.saturating_sub(old.0.len() * 4);
