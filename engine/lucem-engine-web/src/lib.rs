@@ -15,16 +15,22 @@
 //!   lucem-core does not do yet. The answer says so, and the page shows where it runs.
 #![cfg(target_family = "wasm")]
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 use std::sync::Arc;
 
+use lucem_core::cubecl::prelude::Client;
+use lucem_core::memory::DeviceArray;
+use lucem_core::{ComputeTarget, Shape};
 use lucem_io::{Pyramid, ZarrStore};
+use lucem_pipeline::{align_region, at_downsample, crop_and_download_async, evaluate_cached, halo, EvalCache, PipelineSpec, Value};
 use lucem_stream::wire;
 use prost::Message as _;
 use wasm_bindgen::prelude::*;
 
-/// Why processing does not run in the page's own engine.
-const NO_PROCESSING: &str = "processing needs the container or the desktop app (this page views images only)";
+/// Why ML model plugins / server-only plugins do not run in the standalone browser worker.
+const NO_PLUGINS: &str = "ML model plugins and server scripts require the desktop app (`lucem app`) or `lucem serve --web`";
 
 /// A picked file, read whole with the worker's synchronous reader.
 struct FileBytes(web_sys::File);
@@ -99,8 +105,7 @@ pub extern "C" fn _initialize() {
     unsafe { __wasm_call_ctors() }
 }
 
-/// The engine of one page: the files it was given and the images it opened.
-#[derive(Default)]
+/// The engine of one page: the files it was given, opened images, and the browser's WebGPU compute client.
 struct Inner {
     /// The files picked, by their path ("<folder picked>/<path inside>", or a file's name): a map,
     /// so adding an OME-Zarr's thousands of chunk files is not quadratic, and a folder's files are
@@ -108,6 +113,24 @@ struct Inner {
     files: BTreeMap<String, web_sys::File>,
     /// Opened images, by path.
     open: HashMap<String, Arc<Pyramid>>,
+    /// Browser WebGPU CubeCL client once opened by [`Engine::start`].
+    client: Option<Client>,
+    /// LRU cache of device-resident pipeline inputs and intermediates.
+    cache: Arc<EvalCache>,
+    /// Why GPU compute is unavailable, if WebGPU did not open.
+    no_compute: Option<String>,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            files: BTreeMap::new(),
+            open: HashMap::new(),
+            client: None,
+            cache: Arc::new(EvalCache::default()),
+            no_compute: Some("WebGPU not opened yet".into()),
+        }
+    }
 }
 
 impl Inner {
@@ -176,42 +199,97 @@ impl Inner {
         Ok(pyramid)
     }
 
-    fn answer(&mut self, request: wire::Request) -> wire::Response {
+    async fn answer_kind(inner: &RefCell<Inner>, request: wire::Request) -> Result<wire::response::Kind, String> {
         use wire::request::Kind as Ask;
         use wire::response::Kind as Say;
-        let answer = || -> Result<Say, String> {
-            Ok(match request.kind.ok_or("an empty request")? {
-                Ask::List(_) => Say::Images(wire::ImageList { paths: self.list() }),
-                Ask::Info(i) => Say::Info(wire::info_to_wire(&lucem_stream::protocol::describe(self.open(&i.path)?.as_ref()))),
-                Ask::Tile(t) => {
-                    if t.processing.is_some() {
-                        return Err(NO_PROCESSING.into());
+        Ok(match request.kind.ok_or("an empty request")? {
+            Ask::List(_) => Say::Images(wire::ImageList { paths: inner.borrow().list() }),
+            Ask::Info(i) => Say::Info(wire::info_to_wire(&lucem_stream::protocol::describe(inner.borrow_mut().open(&i.path)?.as_ref()))),
+            Ask::Tile(t) => {
+                if let Some(proc) = t.processing.as_ref() {
+                    let spec_json = proc.spec_json.as_str();
+                    let (p, client, cache, no_compute) = {
+                        let mut me = inner.borrow_mut();
+                        let p = me.open(&t.path)?;
+                        (p, me.client.clone(), me.cache.clone(), me.no_compute.clone())
+                    };
+                    if let Some(why) = lucem_core::compute::browser_gpu_lost() {
+                        return Err(format!("the browser took its GPU back ({why}): reload the page to process again"));
                     }
-                    let p = self.open(&t.path)?;
-                    let tile = p.read_tile_at(t.level as usize, t.channel as usize, t.z as usize, t.tx as usize, t.ty as usize).map_err(|e| e.to_string())?;
-                    Say::Tile(wire::encode_tile(tile.width, tile.height, &tile.data, &p.dtype))
+                    let Some(client) = client else {
+                        return Err(format!("processing needs WebGPU: {}", no_compute.unwrap_or_else(|| "no WebGPU adapter".into())));
+                    };
+                    let (w, h, data) = run_pipeline_tile_async(&client, &cache, &p, spec_json, t.level as usize, t.z as usize, t.tx as usize, t.ty as usize).await?;
+                    return Ok(Say::Tile(wire::encode_tile(w, h, &data, "float32")));
                 }
-                Ask::Plane(q) => {
-                    let p = self.open(&q.path)?;
-                    let axis = [lucem_io::PlaneAxis::Z, lucem_io::PlaneAxis::Y, lucem_io::PlaneAxis::X].get(q.axis as usize).copied().ok_or("no such axis")?;
-                    let plane = p.read_plane(q.level as usize, q.channel as usize, axis, q.index as usize).map_err(|e| e.to_string())?;
-                    Say::Tile(wire::encode_tile(plane.width, plane.height, &plane.data, &p.dtype))
-                }
-                Ask::Plugin(_) => return Err(NO_PROCESSING.into()),
-            })
-        };
-        match answer() {
-            Ok(kind) => wire::Response { kind: Some(kind) },
-            Err(reason) => wire::error(reason),
-        }
+                let p = inner.borrow_mut().open(&t.path)?;
+                let tile = p.read_tile_at(t.level as usize, t.channel as usize, t.z as usize, t.tx as usize, t.ty as usize).map_err(|e| e.to_string())?;
+                Say::Tile(wire::encode_tile(tile.width, tile.height, &tile.data, &p.dtype))
+            }
+            Ask::Plane(q) => {
+                let p = inner.borrow_mut().open(&q.path)?;
+                let axis = [lucem_io::PlaneAxis::Z, lucem_io::PlaneAxis::Y, lucem_io::PlaneAxis::X].get(q.axis as usize).copied().ok_or("no such axis")?;
+                let plane = p.read_plane(q.level as usize, q.channel as usize, axis, q.index as usize).map_err(|e| e.to_string())?;
+                Say::Tile(wire::encode_tile(plane.width, plane.height, &plane.data, &p.dtype))
+            }
+            Ask::Plugin(_) => return Err(NO_PLUGINS.into()),
+        })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_pipeline_tile_async(
+    client: &Client,
+    cache: &EvalCache,
+    image: &Pyramid,
+    spec_json: &str,
+    level: usize,
+    z: usize,
+    tx: usize,
+    ty: usize,
+) -> Result<(usize, usize, Vec<f32>), String> {
+    if spec_json.contains("\"script_node\"") {
+        return Err("Python/Rust script nodes require the desktop app (`lucem app`) or `lucem serve --web`".into());
+    }
+    let spec: PipelineSpec = serde_json::from_str(spec_json).map_err(|e| format!("the pipeline: {e}"))?;
+    spec.validate()?;
+    let l = image.levels.get(level).ok_or_else(|| format!("no level {level}"))?.clone();
+    let (x0, y0) = (tx * l.tile_w, ty * l.tile_h);
+    if x0 >= l.width || y0 >= l.height || z >= l.depth {
+        return Err(format!("tile {tx},{ty} (plane {z}) is outside level {level}"));
+    }
+    let (w, h) = ((l.width - x0).min(l.tile_w), (l.height - y0).min(l.tile_h));
+    let plan = at_downsample(&spec.plan(), l.downsample);
+    let reach = halo(&plan, &spec.target);
+    let (rx0, ry0, rw, rh) = align_region(
+        x0.saturating_sub(reach),
+        y0.saturating_sub(reach),
+        (x0 + w + reach).min(l.width),
+        (y0 + h + reach).min(l.height),
+        l.width,
+        l.height,
+    );
+    let image_id = image.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| format!("{:p}", image as *const Pyramid));
+    let region_tag = format!("{image_id}|L{level}|Z{z}|{rx0},{ry0},{rw},{rh}|norm:{}", spec.normalize);
+    let (value, _) = evaluate_cached(client, &plan, &spec.target, &region_tag, cache, &mut |id: &str| {
+        let channel = *spec.sources.get(id).ok_or_else(|| format!("{id} is neither a source nor a node"))?;
+        let mut values = image.read_region_at(level, channel, z, rx0, ry0, rw, rh).map_err(|e| e.to_string())?;
+        let top = image.channels.get(channel).map_or(1.0, |c| c.range.1);
+        if spec.normalize && top > 1.0 {
+            let k = 1.0 / top;
+            values.iter_mut().for_each(|v| *v *= k);
+        }
+        DeviceArray::from_host(client, Shape::new([rh, rw]), values).map(Value::Image).map_err(|e| e.to_string())
+    })?;
+    let (out, _) = crop_and_download_async(client, &value, rx0, ry0, rw, rh, x0, y0, w, h).await?;
+    Ok((w, h, out))
 }
 
 /// The engine, as the worker script holds it (`engine-worker.js`); it answers one request at a
 /// time (the script queues them).
 #[wasm_bindgen]
 pub struct Engine {
-    inner: std::cell::RefCell<Inner>,
+    inner: Rc<RefCell<Inner>>,
 }
 
 impl Default for Engine {
@@ -225,12 +303,34 @@ impl Engine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Engine {
         std::panic::set_hook(Box::new(|info| console_error(&info.to_string())));
-        Engine { inner: std::cell::RefCell::new(Inner::default()) }
+        Engine { inner: Rc::new(RefCell::new(Inner::default())) }
     }
 
-    /// Why processing cannot run here ("" when it can): it cannot yet.
-    pub fn start(&self) -> String {
-        NO_PROCESSING.to_string()
+    /// Opens the browser's WebGPU device for computing. Resolves to `""` when ops can run, else why not.
+    pub fn start(&self) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let why = match lucem_core::compute::open_browser_gpu().await {
+                Ok(()) => match ComputeTarget::Wgpu.client() {
+                    Ok(client) => {
+                        let mut me = inner.borrow_mut();
+                        me.client = Some(client);
+                        me.no_compute = None;
+                        String::new()
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        inner.borrow_mut().no_compute = Some(msg.clone());
+                        msg
+                    }
+                },
+                Err(e) => {
+                    inner.borrow_mut().no_compute = Some(e.clone());
+                    e
+                }
+            };
+            Ok(JsValue::from_str(&why))
+        })
     }
 
     /// Files the user picked, as `{path, file}`, added to earlier ones (a file of the same path
@@ -245,16 +345,23 @@ impl Engine {
             }
         }
         inner.open.clear();
+        inner.cache.clear();
     }
 
     /// Answers a protobuf `Request` with a protobuf `Response` (an error is a `Response` too).
     pub fn answer(&self, request: Vec<u8>) -> js_sys::Promise {
-        let response = match wire::Request::decode(request.as_slice()) {
-            Ok(request) => self.inner.borrow_mut().answer(request),
-            Err(e) => wire::error(format!("a request that could not be read: {e}")),
-        };
-        let bytes: JsValue = js_sys::Uint8Array::from(response.encode_to_vec().as_slice()).into();
-        js_sys::Promise::resolve(&bytes)
+        let inner = self.inner.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let response = match wire::Request::decode(request.as_slice()) {
+                Ok(request) => match Inner::answer_kind(&inner, request).await {
+                    Ok(kind) => wire::Response { kind: Some(kind) },
+                    Err(reason) => wire::error(reason),
+                },
+                Err(e) => wire::error(format!("a request that could not be read: {e}")),
+            };
+            let bytes: JsValue = js_sys::Uint8Array::from(response.encode_to_vec().as_slice()).into();
+            Ok(bytes)
+        })
     }
 }
 

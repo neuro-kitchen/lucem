@@ -61,6 +61,36 @@ fn configure_runtime_files() {
     });
 }
 
+/// Opens the browser's GPU for the wgpu runtime. A browser hands its GPU out only asynchronously,
+/// so a worker awaits this once before the first client ([`ComputeTarget::client`] then opens the
+/// device it set up); on other targets the device opens on first use and this is not needed.
+#[cfg(all(target_family = "wasm", feature = "wgpu"))]
+pub async fn open_browser_gpu() -> Result<(), String> {
+    configure_runtime();
+    cubecl::wgpu::try_init_setup_async::<cubecl::wgpu::AutoGraphicsApi>(&cubecl::wgpu::WgpuDevice::default(), Default::default())
+        .await
+        .map(|setup| {
+            setup.device.set_device_lost_callback(|reason, message| {
+                let why = format!("{reason:?}: {message}");
+                *BROWSER_GPU_LOST.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+            });
+        })
+        .map_err(|e| match e {
+            cubecl::wgpu::WgpuInitError::AdapterUnavailable { message, .. } | cubecl::wgpu::WgpuInitError::RequestDevice { message } => {
+                format!("this browser offers no WebGPU for computing ({message})")
+            }
+            other => format!("WebGPU could not start for computing ({other})"),
+        })
+}
+
+/// Why the browser took its GPU back, once it has.
+static BROWSER_GPU_LOST: Mutex<Option<String>> = Mutex::new(None);
+
+/// Why the browser's GPU was lost, if it was: nothing can be computed on it after that.
+pub fn browser_gpu_lost() -> Option<String> {
+    BROWSER_GPU_LOST.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Work to run on whichever runtime a [`ComputeTarget`] selects.
 pub trait ComputeTask {
     type Output;
@@ -93,6 +123,7 @@ impl ComputeTarget {
 /// Devices a client was made for, shut down at exit.
 static OPENED: Mutex<Vec<Device>> = Mutex::new(Vec::new());
 
+#[cfg(not(target_family = "wasm"))]
 unsafe extern "C" {
     /// The C library's exit-handler registration (handlers run in reverse order of registration).
     fn atexit(handler: extern "C" fn()) -> std::ffi::c_int;
@@ -103,6 +134,7 @@ unsafe extern "C" {
 /// runners are left running: ending a runner thread drops CubeCL's kernel-cache connection during
 /// thread-local teardown, where turso can abort the process ("thread local panicked on drop",
 /// tracel-ai/cubecl#1981); the process exit ends them without their thread-local destructors.
+#[cfg(not(target_family = "wasm"))]
 extern "C" fn shutdown_at_exit() {
     shutdown_devices_where(|device| matches!(device, Device::Wgpu(_)));
 }
@@ -120,6 +152,7 @@ fn opened(device: &Device) {
     }
     devices.push(device.clone());
     drop(devices);
+    #[cfg(not(target_family = "wasm"))]
     // SAFETY: registers a plain `extern "C"` function; failure (no slot left) only means the
     // device is not shut down at exit, as before
     unsafe {

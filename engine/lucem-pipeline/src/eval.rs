@@ -547,6 +547,49 @@ pub fn crop_and_download(
     Ok((pixels, ms(t)))
 }
 
+/// Non-blocking version of [`crop_and_download`] for `wasm32` WebGPU (uses `to_host_async`).
+#[allow(clippy::too_many_arguments)]
+pub async fn crop_and_download_async(
+    client: &Client,
+    value: &Value,
+    rx0: usize,
+    ry0: usize,
+    rw: usize,
+    rh: usize,
+    vx0: usize,
+    vy0: usize,
+    vw: usize,
+    vh: usize,
+) -> Result<(Vec<f32>, f64), String> {
+    let t = Instant::now();
+    let ox = vx0.checked_sub(rx0).ok_or_else(|| format!("crop x0 ({vx0}) < region x0 ({rx0})"))?;
+    let oy = vy0.checked_sub(ry0).ok_or_else(|| format!("crop y0 ({vy0}) < region y0 ({ry0})"))?;
+    let right = rw.checked_sub(ox + vw).ok_or_else(|| format!("crop x1 ({}) exceeds region width {rw}", ox + vw))?;
+    let bottom = rh.checked_sub(oy + vh).ok_or_else(|| format!("crop y1 ({}) exceeds region height {rh}", oy + vh))?;
+    let no_crop = ox == 0 && oy == 0 && right == 0 && bottom == 0;
+    let pixels = match value {
+        Value::Image(a) => {
+            if no_crop {
+                a.to_host_async(client).await?
+            } else {
+                let cropped = lucem_ops::intensity::convert::crop(client, a, &[(oy, bottom), (ox, right)]).map_err(|e| e.to_string())?;
+                cropped.to_host_async(client).await?
+            }
+        }
+        Value::Mask(a) | Value::Labels(a) => {
+            let raw = if no_crop {
+                a.to_host_async(client).await?
+            } else {
+                let cropped = lucem_ops::intensity::convert::crop(client, a, &[(oy, bottom), (ox, right)]).map_err(|e| e.to_string())?;
+                cropped.to_host_async(client).await?
+            };
+            raw.into_iter().map(|v| v as f32).collect()
+        }
+        Value::Table(_) => return Err("a table is not a raster".into()),
+    };
+    Ok((pixels, ms(t)))
+}
+
 /// Every node of `targets` (and what they need), each computed once; a node that fails gives its
 /// error and the others go on.
 pub fn evaluate_all(client: &Client, plan: &Plan, targets: &[String], source: &mut dyn FnMut(&str) -> Result<Value, String>) -> BTreeMap<String, Result<Value, String>> {

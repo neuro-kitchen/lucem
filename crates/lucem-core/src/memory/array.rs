@@ -67,6 +67,11 @@ impl<E: CubeElement> DeviceArray<E> {
         buffer::download_prefix(client, self.handle.clone(), self.len())
     }
 
+    /// Host copy of the whole array without blocking (required on `wasm32` WebGPU).
+    pub async fn to_host_async(&self, client: &Client) -> Result<Vec<E>, String> {
+        buffer::download_prefix_async(client, self.handle.clone(), self.len()).await
+    }
+
     /// Host copy of elements `start .. start + len` (C order): only those bytes are transferred.
     ///
     /// # Panics
