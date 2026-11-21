@@ -37,6 +37,8 @@ pub struct Ctx {
     pub analyze: WeakEntity<crate::screens::analyze::AnalyzeView>,
     /// Shows or hides the Keyboard & mouse sheet.
     pub toggle_help: Rc<dyn Fn(&mut Window, &mut App)>,
+    /// Shows or hides the About Lucem modal.
+    pub toggle_about: Rc<dyn Fn(&mut Window, &mut App)>,
 }
 
 impl Ctx {
@@ -558,9 +560,12 @@ pub fn register(registry: &Registry, c: &Ctx) {
     ]);
 
     // Help, Settings sections, where lucem runs
-    let (h, m1, r1) = (c.toggle_help.clone(), c.clone(), s.clone());
+    let (h, ab, m1, r1) = (c.toggle_help.clone(), c.toggle_about.clone(), c.clone(), s.clone());
     list.extend([
+        CommandSpec::new("help.about", "About Lucem", IconName::Info, move |w, cx| ab(w, cx)).group("Help").hint("Version, compute runtime, and links").read_only(),
         CommandSpec::new("help.keys", "Keyboard & mouse", IconName::Keyboard, move |w, cx| h(w, cx)).group("Help").hint("Every key and gesture").key("f1").read_only(),
+        CommandSpec::new("help.docs", "Documentation", IconName::BookOpen, |_, cx| cx.open_url("https://neuro-kitchen.github.io/lucem/")).group("Help").hint("Open the Lucem documentation in your browser").read_only(),
+        CommandSpec::new("help.issues", "Report an issue", IconName::ExternalLink, |_, cx| cx.open_url("https://github.com/neuro-kitchen/lucem/issues")).group("Help").hint("Open GitHub Issues to report a bug or request a feature").read_only(),
         CommandSpec::new("settings.models", "Models…", IconName::Sparkles, move |window, cx| {
             m1.shell(cx, |sh, cx| {
                 let i = sh.settings_index("Models");

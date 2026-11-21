@@ -15,8 +15,15 @@ model's own licence and with its own runtime. lucem finds them in `$LUCEM_PLUGIN
 | `lucem-ml-instanseg` | InstanSeg brightfield (`instanseg-brightfield`), InstanSeg single-channel (`instanseg-fluorescence`) | Nuclei as labels | Apache-2.0 |
 | `lucem-ml-sam` | Segment Anything 2 | An object from a click or a box | Apache-2.0 |
 
-From Python each is an extra: `pip install "lucem[stardist]"`, `"lucem[instanseg]"`,
-`"lucem[sam]"`, or `"lucem[ml]"` for all of them.
+Install model plugins from GitHub Releases (SHA-256 verified) with the CLI:
+
+```bash
+lucem plugins list
+lucem plugins install stardist   # or instanseg, sam, all
+```
+
+Binaries are installed into `~/.local/share/lucem/plugins` and discovered automatically by both the
+desktop app and `lucem serve`.
 
 ## Installing weights
 
