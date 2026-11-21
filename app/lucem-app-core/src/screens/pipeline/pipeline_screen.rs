@@ -319,6 +319,26 @@ impl PipelineView {
                 })
                 .collect()
         });
+        registry.provide("pipeline.histology", |_| {
+            let c = MenuItem::command;
+            vec![
+                MenuItem::label("Slide & tissue"),
+                c("hist.find_tissue"),
+                c("hist.superpixels"),
+                c("hist.density"),
+                c("hist.hotspots"),
+                MenuItem::Separator,
+                MenuItem::label("Cells & phenotyping"),
+                c("hist.find_cells"),
+                MenuItem::submenu_with_icon("Find cells with", IconName::Microscope, vec![MenuItem::provided("hist.detectors")]),
+                c("hist.intensity"),
+                c("hist.train"),
+                MenuItem::Separator,
+                MenuItem::label("Pixel classification"),
+                c("hist.train_pixels"),
+                c("hist.class_regions"),
+            ]
+        });
         registry.provide("pipeline.recipes", |_| {
             let recipes = crate::data::recipes::discover_recipes();
             if recipes.is_empty() {
@@ -372,10 +392,10 @@ impl PipelineView {
         });
     }
 
-    /// The Pipeline's menus: Edit (including canvas view toggles), Sources, Process, Script, Model, Output.
+    /// The Pipeline's menus: Edit, Sources, Process, active plugin tabs (e.g. Histology), Script, Model, Output.
     pub fn menu_specs() -> Vec<MenuSpec> {
         let c = MenuItem::command;
-        vec![
+        let mut menus = vec![
             MenuSpec::new(
                 "Edit",
                 vec![
@@ -396,10 +416,16 @@ impl PipelineView {
             ),
             MenuSpec::new("Sources", vec![MenuItem::provided("pipeline.sources")]),
             MenuSpec::new("Process", vec![c("process.find"), MenuItem::Separator, MenuItem::label("A node on the canvas"), MenuItem::provided("pipeline.families"), MenuItem::Separator, MenuItem::provided("pipeline.recipes")]),
+        ];
+        for tab in super::catalog::plugin_tabs() {
+            menus.push(MenuSpec::new(tab.title, vec![MenuItem::provided(tab.provider)]));
+        }
+        menus.extend([
             MenuSpec::new("Script", vec![MenuItem::label("A step written as a file; edit, save, it runs again"), c("script.new_python"), c("script.new_rust"), c("script.from_file"), MenuItem::Separator, MenuItem::provided("pipeline.plugin_scripts")]),
             MenuSpec::new("Model", vec![MenuItem::provided("pipeline.models")]),
             MenuSpec::new("Output", vec![c("pipeline.output")]),
-        ]
+        ]);
+        menus
     }
 
     /// Hands the Pipeline the app's commands (its own bar, docked in Explore, draws them).
