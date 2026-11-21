@@ -20,6 +20,14 @@ view's tab switch what it shows; **+** adds a view or arranges them all.
 **Add view or container** (<kbd>+</kbd> in a tab) arranges every view as tabs, side by side,
 stacked or in a grid. Views of one image can move and zoom together.
 
+![Multi-view channel layout in Explore](/lucem/screenshots/04_multiview.png)
+
+## Visual GPU operations
+
+Open **Process** or press <kbd>F3</kbd> to browse all 52 GPU operators with live Before/After hover previews before applying them non-destructively to a channel.
+
+![Visual GPU operations strip in Explore](/lucem/screenshots/03_ops.png)
+
 ## Tools
 
 The tool column on the left; the options bar above the views shows the active tool's settings.
@@ -41,6 +49,14 @@ The tool column on the left; the options bar above the views shows the active to
 
 With two or more shapes selected, the options bar offers **Add**, **Subtract**, **Intersect** and
 **Xor**: the selected shapes become one (one <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes it).
+
+![Brush annotation painting in Explore](/lucem/screenshots/05_tooling_brush.png)
+
+![Magic Wand flood-fill and smart-brush selection with smoothing and hole filling](/lucem/screenshots/05_tooling_magic-wand.png)
+
+![Floating Pixel Probe HUD showing calibrated coordinates and multi-channel intensity bars](/lucem/screenshots/05_tooling_pixel-probe.png)
+
+![Calibrated ruler measurement in Explore](/lucem/screenshots/05_tooling-ruler.png)
 
 ## Panels
 

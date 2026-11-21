@@ -52,6 +52,8 @@ pub enum AppEvent {
     ServerImages,
     /// Open the live 128 × 128 Visual Operation Gallery overlay.
     OpenOpGallery,
+    /// Switch to the Zed-style Code workspace and open the given script path.
+    OpenScriptInCode(String),
 }
 
 /// What a pane of Explore shows.
@@ -205,6 +207,9 @@ pub struct Store {
     pub hovered_op: Option<Op>,
     /// Whether the Instagram Edits-style non-blocking bottom Visual Effect Strip is open.
     pub visual_strip_open: bool,
+    /// Server-discovered plugin script ops (populated on wasm32 when connected to `lucem serve`).
+    #[cfg(target_family = "wasm")]
+    pub server_plugin_ops: Vec<crate::data::server_api::ServerPluginOp>,
     /// Names of images being opened.
     pub opening: Vec<String>,
     /// Images open for tile reads, by image id.
@@ -293,6 +298,8 @@ impl Store {
             walkthrough_explored_views: false,
             hovered_op: None,
             visual_strip_open: false,
+            #[cfg(target_family = "wasm")]
+            server_plugin_ops: Vec::new(),
             opening: Vec::new(),
             pyramids: HashMap::new(),
             opening_ids: HashSet::new(),
@@ -929,6 +936,35 @@ impl Store {
             return;
         }
         self.ml.scanning = true;
+        // A page: the plugins are the server's
+        #[cfg(target_family = "wasm")]
+        {
+            if crate::data::remote::runs_alone() {
+                self.ml.scanning = false;
+                self.ml.scanned = true;
+                cx.notify();
+                return;
+            }
+            cx.spawn(async move |this, cx| {
+                let r = crate::data::server_api::fetch_ml_plugins().await;
+                let _ = this.update(cx, |s, cx| {
+                    s.ml.scanning = false;
+                    s.ml.scanned = true;
+                    match r {
+                        Ok((plugins, problems)) => {
+                            s.ml.set_plugins(plugins);
+                            s.ml.problems = problems;
+                        }
+                        Err(e) => s.ml.problems = vec![format!("server: {e}")],
+                    }
+                    cx.emit(AppEvent::Status);
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
+        #[allow(unreachable_code)]
         let task = cx.background_spawn(async move { lucem_ml::discover() });
         cx.spawn(async move |this, cx| {
             let found = task.await;
@@ -979,6 +1015,25 @@ impl Store {
 
     /// Downloads and verifies a model's weights through its plugin.
     pub fn install_model(&mut self, program: String, model: String, cx: &mut Context<Self>) {
+        #[cfg(target_family = "wasm")]
+        if !crate::data::remote::runs_alone() {
+            self.ml.busy = Some((format!("Installing {model} on the server"), None));
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let r = crate::data::server_api::install_server_model(&program, &model).await;
+                let _ = this.update(cx, |s, cx| {
+                    s.ml.busy = None;
+                    match r {
+                        Ok(()) => s.set_status(format!("{model} installed on the server"), cx),
+                        Err(e) => s.set_status(format!("{model}: {e}"), cx),
+                    }
+                    s.scan_plugins(cx);
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
         let label = format!("Installing {model}");
         self.ml_job(
             program,
@@ -1110,8 +1165,24 @@ impl Store {
     pub fn add_script_node(&mut self, lang: crate::data::script::Language, cx: &mut Context<Self>) {
         #[cfg(target_family = "wasm")]
         {
-            let _ = lang;
-            self.set_status("Local Python/Rust script files run in the desktop app (browsers cannot spawn local processes)", cx);
+            if crate::data::remote::runs_alone() {
+                let _ = lang;
+                self.set_status("Standalone viewer has no server: connect to lucem serve --web or use the desktop app for scripts", cx);
+                return;
+            }
+            let ext = lang.extension();
+            self.set_status(format!("Creating {} script on server…", lang.title()), cx);
+            cx.spawn(async move |this, cx| {
+                match crate::data::server_api::new_server_script(ext).await {
+                    Ok((path, content)) => {
+                        let _ = this.update(cx, |s, cx| s.add_script_from_text(path, &content, cx));
+                    }
+                    Err(e) => {
+                        let _ = this.update(cx, |s, cx| s.set_status(format!("Could not create server script: {e}"), cx));
+                    }
+                }
+            })
+            .detach();
             return;
         }
         #[cfg(not(target_family = "wasm"))]
@@ -1126,12 +1197,45 @@ impl Store {
         }
     }
 
+    #[cfg(target_family = "wasm")]
+    fn add_script_from_text(&mut self, path: String, content: &str, cx: &mut Context<Self>) {
+        let h = match crate::data::script::read_header(content) {
+            Ok(h) => h,
+            Err(e) => return self.set_status(format!("{path}: {e}"), cx),
+        };
+        let kind = NodeKind::Script { path: path.clone(), inputs: h.inputs, output: h.output, params: h.params, enabled: true };
+        let y = self.doc.graph.next_row();
+        let before: std::collections::HashSet<String> = self.doc.graph.nodes.iter().map(|n| n.id.clone()).collect();
+        if self.execute(Command::AddNode { kind, x: 300.0, y, id: None, after: None }, cx).is_ok()
+            && let Some(id) = self.doc.graph.nodes.iter().find(|n| !before.contains(&n.id)).map(|n| n.id.clone())
+        {
+            self.set_workspace(Workspace::Pipeline, cx);
+            cx.emit(AppEvent::RevealNode(id));
+            self.set_status(format!("Opened {path} in the Pipeline script editor"), cx);
+        }
+    }
+
     /// A script node running an existing `.py` or `.rs` file.
     pub fn add_script_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         #[cfg(target_family = "wasm")]
         {
-            let _ = path;
-            self.set_status("Local Python/Rust script files run in the desktop app (browsers cannot spawn local processes)", cx);
+            if crate::data::remote::runs_alone() {
+                let _ = path;
+                self.set_status("Standalone viewer has no server: connect to lucem serve --web or use the desktop app for scripts", cx);
+                return;
+            }
+            let path_str = path.to_string_lossy().into_owned();
+            cx.spawn(async move |this, cx| {
+                match crate::data::server_api::read_server_script(&path_str).await {
+                    Ok(content) => {
+                        let _ = this.update(cx, |s, cx| s.add_script_from_text(path_str, &content, cx));
+                    }
+                    Err(e) => {
+                        let _ = this.update(cx, |s, cx| s.set_status(format!("Could not read server script: {e}"), cx));
+                    }
+                }
+            })
+            .detach();
             return;
         }
         #[cfg(not(target_family = "wasm"))]
@@ -1361,9 +1465,9 @@ impl Store {
             }
             return;
         }
-        // A page served by `lucem serve`: its server computes (a page has no compute of its own)
+        // A page served by `lucem serve`: its server computes (even if WebGPU was also opened).
         #[cfg(target_family = "wasm")]
-        if self.device.is_none() && super::remote::page_link().is_some() && !super::remote::runs_alone() {
+        if super::remote::page_link().is_some() && !super::remote::runs_alone() {
             return self.recompute_on_server(req, cx);
         }
         let Some(device) = self.device.clone() else {
@@ -1504,7 +1608,8 @@ impl Store {
                 Some(a) => a,
                 None => Arc::new(super::results::analyze_remote(&doc, &pyramid, &req.image, req.z)),
             };
-            let layers = (latest.load(Ordering::Acquire) == generation && show).then(|| super::results::compute_remote(&doc, &pyramid, &req));
+            let layers = (latest.load(Ordering::Acquire) == generation && show)
+                .then(|| super::results::compute_remote(&doc, &pyramid, &req, &latest, generation));
             Some((analysis, layers))
         });
         cx.spawn(async move |this, cx| {

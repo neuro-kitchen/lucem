@@ -34,6 +34,8 @@ pub mod server;
 pub mod tls;
 #[cfg(feature = "native")]
 pub mod web;
+#[cfg(feature = "native")]
+pub mod web_api;
 /// A browser page's connection to its server.
 #[cfg(all(feature = "web", target_family = "wasm"))]
 pub mod web_client;

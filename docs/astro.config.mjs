@@ -51,10 +51,29 @@ export default defineConfig({
       },
       plugins: [
         starlightSidebarTopics([
-          topic('Learn', 'learn', ['learn', chapter('Get started', 'learn/get-started'), chapter('Concepts', 'learn/concepts')]),
+          topic('Learn', 'learn', [
+            'learn',
+            chapter('Get started', 'learn/get-started'),
+            chapter('Concepts', 'learn/concepts'),
+            chapter('Python', 'learn/python'),
+            chapter('Migration guides', 'learn/migration'),
+            {
+              label: 'Course',
+              collapsed: false,
+              items: [
+                'learn/course',
+                chapter('Basics', 'learn/course/basics', true),
+                chapter('Filtering', 'learn/course/filtering', true),
+                chapter('Segmentation', 'learn/course/segmentation', true),
+                chapter('Pipelines', 'learn/course/pipelines', true),
+                chapter('Custom ops', 'learn/course/custom-ops', true),
+                chapter('Histology & ML', 'learn/course/histology-ml', true),
+              ],
+            },
+          ]),
           topic('App', 'app'),
           topic('Histology', 'histology'),
-          topic('Reference', 'reference', ['reference', 'reference/operations', chapter('Command line', 'reference/cli'), chapter('Files', 'reference/files'), chapter('Rust API', 'reference/rust', true)]),
+          topic('Reference', 'reference', ['reference', 'reference/operations', chapter('Python API', 'reference/python'), chapter('Command line', 'reference/cli'), chapter('Files', 'reference/files'), chapter('Rust API', 'reference/rust', true)]),
           topic('Models', 'models'),
           topic('Extend', 'extend'),
           topic('Deploy', 'deploy'),

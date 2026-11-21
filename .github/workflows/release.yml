@@ -52,11 +52,12 @@ jobs:
           test "v${version}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != workspace version ${version}"; exit 1; }
       - name: CHANGELOG.md has this version's section
         run: grep -q "^## \[${GITHUB_REF_NAME#v}\]" CHANGELOG.md || { echo "CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; exit 1; }
-      - name: lucem's extras pin this version
+      - name: lucem's extras and lucem-web pin this version
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "lucem-core") | .version')
           wrong=$(grep -oE '"lucem-[a-z-]+==[^"]+"' bindings/python/pyproject.toml | grep -v "==${version}\"" || true)
           test -z "$wrong" || { echo "bindings/python/pyproject.toml pins $wrong, the workspace is ${version}"; exit 1; }
+          grep -q "^version = \"${version}\"$" bindings/python/wheels/lucem-web/pyproject.toml || { echo "bindings/python/wheels/lucem-web/pyproject.toml version != ${version}"; exit 1; }
       - name: Package and verify the publishable crates
         run: cargo publish --dry-run --workspace
       # Nothing is published with a known vulnerability, a yanked crate or a licence not allowed
@@ -69,7 +70,7 @@ jobs:
   wheels:
     name: Wheel ${{ matrix.wheel }} (${{ matrix.os }})
     needs: check
-    if: vars.PUBLISH_PYPI == 'true'
+    if: vars.PUBLISH_PYPI != 'false'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -107,7 +108,7 @@ jobs:
   program-wheels:
     name: Program wheel ${{ matrix.wheel }} (${{ matrix.os }})
     needs: check
-    if: vars.PUBLISH_PYPI == 'true'
+    if: vars.PUBLISH_PYPI != 'false'
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
@@ -148,7 +149,7 @@ jobs:
   sdist:
     name: Source distribution
     needs: check
-    if: vars.PUBLISH_PYPI == 'true'
+    if: vars.PUBLISH_PYPI != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -161,6 +162,34 @@ jobs:
         with:
           name: sdist
           path: bindings/python/dist
+
+  # The platform-independent `lucem-web` wheel (`py3-none-any`), bundling the static browser WASM
+  # build from `web` (`index.html`, `loader.js`, `isolate-sw.js`, `mt/`) for `pip install "lucem[web]"`.
+  web-wheel:
+    name: Wheel lucem-web (py3-none-any)
+    needs: [check, web]
+    if: vars.PUBLISH_PYPI != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-app
+          path: bindings/python/wheels/lucem-web/src/lucem_web/dist
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Build lucem-web wheel
+        working-directory: bindings/python/wheels/lucem-web
+        run: |
+          rm -rf src/lucem_web/dist/engine src/lucem_web/dist/samples
+          find src/lucem_web/dist -name "*.br" -delete
+          python -m pip install --quiet hatchling build
+          python -m build --wheel --outdir dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: program-lucem-web-any
+          path: bindings/python/wheels/lucem-web/dist
 
   publish-crates:
     name: Publish to crates.io
@@ -226,7 +255,7 @@ jobs:
   publish-pypi:
     name: Publish lucem and lucem-hist to PyPI
     needs: [check, wheels, sdist]
-    if: vars.PUBLISH_PYPI == 'true'
+    if: vars.PUBLISH_PYPI != 'false'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -245,13 +274,13 @@ jobs:
         with:
           skip-existing: true
 
-  # The app and the model plugins, each in its own environment: PyPI lets one workflow +
-  # environment be the pending publisher of only one new project, and a failure here shouldn't
-  # hold up the rest of the release.
+  # The app, browser bundle and the model plugins, each in its own environment: PyPI lets one
+  # workflow + environment be the pending publisher of only one new project, and a failure here
+  # shouldn't hold up the rest of the release.
   publish-pypi-programs:
     name: Publish ${{ matrix.wheel }} to PyPI
-    needs: [check, program-wheels]
-    if: vars.PUBLISH_PYPI == 'true'
+    needs: [check, program-wheels, web-wheel]
+    if: vars.PUBLISH_PYPI != 'false'
     runs-on: ubuntu-latest
     continue-on-error: true
     strategy:
@@ -259,6 +288,7 @@ jobs:
       matrix:
         include:
           - { wheel: lucem-app, environment: pypi-app }
+          - { wheel: lucem-web, environment: pypi-web }
           - { wheel: lucem-ml-stardist, environment: pypi-ml-stardist }
           - { wheel: lucem-ml-sam, environment: pypi-ml-sam }
           - { wheel: lucem-ml-instanseg, environment: pypi-ml-instanseg }
@@ -298,8 +328,8 @@ jobs:
           (`lucem-hist`, `lucem-pipeline`, `lucem-view`, `lucem-hub`). The app and the `lucem`
           command build from this tag: `cargo install --git https://github.com/neuro-kitchen/lucem --tag <this tag> lucem-cli`.
           NOTES
-          if [ "${{ vars.PUBLISH_PYPI }}" = "true" ]; then
-            printf '\nPython: `pip install lucem`, with extras `hist`, `app`, `stardist`, `sam`, `instanseg`, `ml` or `all` (`pip install "lucem[all]"`).\n' >> release-notes.md
+          if [ "${{ vars.PUBLISH_PYPI }}" != "false" ]; then
+            printf '\nPython: `pip install lucem`, with extras `hist`, `app`, `web`, `stardist`, `sam`, `instanseg`, `ml` or `all` (`pip install "lucem[all]"`).\n' >> release-notes.md
           fi
       - name: Create the release
         env:

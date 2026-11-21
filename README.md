@@ -7,9 +7,9 @@ analysis headless over a folder of slides. Image operations are written once in
 CPU; models run on [Burn](https://burn.dev); the desktop app is built on GPUI.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/img/app/main-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/img/app/main-light.png">
-  <img alt="lucem-app: a multispectral lung-cancer scan (DAPI, FITC, CY3, Texas Red, CY5) in Explore, with a region drawn around the tissue, the channels and shapes in the Layers panel, and the GPU in the status bar" src="assets/img/app/main-dark.png">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/img/app/00_main_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/img/app/00_main_light.png">
+  <img alt="lucem-app: a multispectral lung-cancer scan (DAPI, FITC, CY3, Texas Red, CY5) in Explore, with a region drawn around the tissue, the channels and shapes in the Layers panel, and the GPU in the status bar" src="assets/img/app/00_main_dark.png">
 </picture>
 
 *`lucem-app` in Explore: a whole-slide multispectral scan (5 channels, 24960 × 34560 px) drawn

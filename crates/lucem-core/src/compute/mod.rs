@@ -15,6 +15,7 @@
 //! Algorithm crates (`lucem-ops`, `lucem-ml`, …) take a `Client` and use these; they never inspect or
 //! special-case the device.
 
+pub mod batch;
 pub mod bench;
 pub mod launch;
 pub mod limits;
@@ -25,6 +26,7 @@ mod target;
 pub mod tune;
 
 pub use crate::device::{ComputeError, ComputeTarget, RUNTIME_ENV, TEST_RUNTIMES_ENV};
+pub use batch::{canonical_batch_size, canonical_tile_side, plan_tile_grid, TileSlice};
 pub use launch::{cube_row, element_position, line_position, row_share, tile_point, unit_col, unit_row, LaunchGeometry, RowShare};
 pub use limits::{device_elements, MAX_DEVICE_ELEMENTS};
 pub use pinning::{pin_tuned_choices, tuned_choices_pinned, PinnedChoices};

@@ -333,8 +333,10 @@ fn apply_inner(doc: &mut ProjectDoc, cmd: Command) -> Result<Changed, CommandErr
         }
         C::EnableNode { id, enabled } => {
             match &mut doc.graph.node_mut(&id).ok_or_else(|| CommandError::NoNode(id.clone()))?.kind {
-                NodeKind::Op { enabled: e, .. } => *e = enabled,
-                _ => return Err(invalid(format!("{id} is not an op"))),
+                NodeKind::Op { enabled: e, .. }
+                | NodeKind::Script { enabled: e, .. }
+                | NodeKind::Model { enabled: e, .. } => *e = enabled,
+                _ => return Err(invalid(format!("{id} cannot be enabled or disabled"))),
             }
             Ok(Changed::Graph)
         }

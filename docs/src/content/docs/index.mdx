@@ -6,7 +6,9 @@ editUrl: false
 lastUpdated: false
 hero:
   title: GPU image analysis for slides and volumes
-  tagline: Look at whole-slide and 3D images, find tissue and cells, build pipelines, and run the same analysis on a server over a folder of slides.
+  tagline: Look at whole-slide and 3D OME-Zarr v0.5 volumes, preview 52 GPU operations live with Before ↔ After wipes, write Python & Rust ops in the built-in Code workspace, and run the same pipeline on a server.
+  image:
+    html: '<div class="hero-shot"><img class="light:sl-hidden" src="/lucem/screenshots/main-dark.png" alt="lucem-app in Explore: multispectral scan with channels and shapes in the Layers panel" /><img class="dark:sl-hidden" src="/lucem/screenshots/main-light.png" alt="lucem-app in Explore: multispectral scan with channels and shapes in the Layers panel" /></div>'
   actions:
     - text: Get started
       link: learn/
@@ -20,13 +22,23 @@ hero:
 ---
 
 import EntryPoints from '../../components/EntryPoints.astro';
+import { Card, CardGrid } from '@astrojs/starlight/components';
 
-<p class="install">Built from source with Rust: <code>cargo run -p lucem-app</code> for the app, <code>cargo build -p lucem-cli</code> for the <code>lucem</code> command.</p>
+<p class="install">Install with Python: <code>pip install "lucem[web]"</code> · Run the browser app locally: <code>lucem web</code> · Or build from source with Rust: <code>cargo run -p lucem-app</code>.</p>
 
-<figure>
-  <img class="light:sl-hidden" src="/lucem/screenshots/main-dark.png" alt="lucem-app in Explore: a multispectral lung-cancer scan with a tissue region drawn on it, the channels and shapes in the Layers panel" />
-  <img class="dark:sl-hidden" src="/lucem/screenshots/main-light.png" alt="lucem-app in Explore: a multispectral lung-cancer scan with a tissue region drawn on it, the channels and shapes in the Layers panel" />
-  <figcaption>Explore: a whole-slide multispectral scan (5 channels) drawn from its pyramid, a tissue region drawn on it. Sample image © PerkinElmer / Akoya Biosciences, <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</figcaption>
-</figure>
+<CardGrid>
+  <Card title="Pathologist & Biologist" icon="open-book">
+    Open gigapixel slides in the desktop or browser app, draw regions with the edge-snapping **Magic Wand**, run **StarDist / InstanSeg**, and export multi-panel layouts in **Figure**.
+    <br /><a href="/lucem/app/">Explore the App →</a> · <a href="/lucem/learn/migration/coming-from-qupath/">Coming from QuPath →</a>
+  </Card>
+  <Card title="Python Scientist" icon="laptop">
+    Read OME-Zarr pyramids lazily, chain 52 GPU ops, author custom <code>@lucem.op</code> transforms, and run the interactive 6-chapter course on synthetic slides.
+    <br /><a href="/lucem/learn/python/">Python Guide →</a> · <a href="/lucem/reference/python/">Python API →</a>
+  </Card>
+  <Card title="Systems & Server Admin" icon="setting">
+    Deploy <code>lucem serve</code> on a GPU host for instant multi-user viewing, CUDA StarDist/InstanSeg inference, and server-side viewport cell overlays for 1M+ cells.
+    <br /><a href="/lucem/deploy/">Deploy Server →</a> · <a href="/lucem/reference/rust/">Rust Crates →</a>
+  </Card>
+</CardGrid>
 
 <EntryPoints />

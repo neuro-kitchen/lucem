@@ -244,6 +244,8 @@ pub fn device() -> Result<Device, String> {
         "cuda" => Ok(Device::cuda(0)),
         #[cfg(feature = "cpu")]
         "cpu" => Ok(Device::cpu()),
+        #[cfg(feature = "cuda")]
+        "" | "auto" if !cfg!(target_os = "linux") || Path::new("/proc/driver/nvidia/version").exists() => Ok(Device::cuda(0)),
         #[cfg(feature = "wgpu")]
         "" | "auto" | "wgpu" | "vulkan" => Ok(Device::wgpu(DeviceKind::DefaultDevice)),
         other => Err(format!("LUCEM_RUNTIME={other:?}: this build runs on {}", runtimes().join(", "))),
@@ -304,10 +306,9 @@ pub struct Tiling {
 
 impl Default for Tiling {
     fn default() -> Self {
-        // 1088 + 2 × 96 = 1280: a full tile is exactly a multiple of SHAPE_STEP (no padding
-        // wasted). A 2048-wide tile (1856 + halos) is past what the matrix products of the 3 × 3
-        // layers can launch on a Turing GPU ("cube count too big").
-        Self { tile: 1088, halo: 96 }
+        // 384 + 2 × 64 = 512: canonical 512×512 tiles batched as a 4-tile volume [4, C, 512, 512]
+        // (~7× less VRAM than 1280² and zero per-ROI autotune stalls).
+        Self { tile: 384, halo: 64 }
     }
 }
 
@@ -440,74 +441,115 @@ impl InstanSeg {
 
     /// [`Self::network`], adding where its time went to `times`.
     pub fn network_timed(&self, planes: &[f32], w: usize, h: usize, t: Tiling, progress: &mut dyn FnMut(usize, usize), times: &mut Timings) -> Result<Vec<f32>, String> {
+        // Default batch=1 keeps peak VRAM low on shared 8 GB desktop/browser GPUs (zero PCIe
+        // VRAM swapping) with ONE canonical shape `[1, C, 512, 512]`. Set `LUCEM_ML_BATCH=4` on
+        // dedicated high-VRAM servers for 4-tile volume batching.
+        let max_batch: usize = std::env::var("LUCEM_ML_BATCH").ok().and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 8);
         let no = self.config.outputs();
         let nc = self.config.channels;
         let mut out = vec![0f32; no * w * h];
         let step = t.tile.max(net::DIVISOR);
         let (ny, nx) = (h.div_ceil(step), w.div_ceil(step));
+        let total = ny * nx;
+        let canon = (step + 2 * t.halo).div_ceil(SHAPE_STEP) * SHAPE_STEP;
+        let (ph, pw) = (canon, canon);
+        let tile_elems = nc * ph * pw;
+        let out_tile_elems = no * ph * pw;
         let mut computed = 0usize;
+        let mut batch_buf: Vec<f32> = Vec::new();
+        let want_timing = timing();
+
+        struct TileSpec {
+            y0: usize,
+            x0: usize,
+            y1: usize,
+            x1: usize,
+            ry0: usize,
+            rx0: usize,
+            rh: usize,
+            rw: usize,
+        }
+        let mut specs = Vec::with_capacity(total);
         for ty in 0..ny {
             for tx in 0..nx {
-                let t0 = Instant::now();
                 let (y0, x0) = (ty * step, tx * step);
                 let (y1, x1) = ((y0 + step).min(h), (x0 + step).min(w));
                 let (ry0, rx0) = (y0.saturating_sub(t.halo), x0.saturating_sub(t.halo));
                 let (ry1, rx1) = ((y1 + t.halo).min(h), (x1 + t.halo).min(w));
-                let (rh, rw) = (ry1 - ry0, rx1 - rx0);
-                let (ph, pw) = (rh.div_ceil(SHAPE_STEP) * SHAPE_STEP, rw.div_ceil(SHAPE_STEP) * SHAPE_STEP);
-                let mut input = vec![0f32; nc * ph * pw];
+                specs.push(TileSpec { y0, x0, y1, x1, ry0, rx0, rh: ry1 - ry0, rw: rx1 - rx0 });
+            }
+        }
+
+        let mut done = 0usize;
+        for chunk in specs.chunks(max_batch) {
+            let actual = chunk.len();
+            // Canonical batch size ∈ {1, max_batch}: never emit partial tail batch sizes.
+            let bsz = if actual == 1 { 1 } else { max_batch };
+            let t0 = Instant::now();
+            batch_buf.clear();
+            batch_buf.resize(bsz * tile_elems, 0.0);
+            for (bi, sp) in chunk.iter().enumerate() {
+                let base = bi * tile_elems;
                 for c in 0..nc {
+                    let plane_off = c * w * h;
+                    let dst_c = base + c * ph * pw;
                     for y in 0..ph {
-                        let sy = ry0 + reflect(y, rh);
+                        let sy = sp.ry0 + reflect(y, sp.rh);
+                        let src_row = plane_off + sy * w;
+                        let dst_row = dst_c + y * pw;
                         for x in 0..pw {
-                            input[(c * ph + y) * pw + x] = planes[c * w * h + sy * w + rx0 + reflect(x, rw)];
+                            batch_buf[dst_row + x] = planes[src_row + sp.rx0 + reflect(x, sp.rw)];
                         }
                     }
                 }
                 computed += ph * pw;
-                times.prepare += ms(t0);
-                // The tile through the network: its output, and the ms of compute and readback
-                let attempt = || -> Result<(Vec<f32>, f64, f64), String> {
-                    let t1 = Instant::now();
-                    // In the network's precision on the wire: half the bytes up and back in F16
-                    let data = TensorData::new(input.clone(), [1, nc, ph, pw]);
-                    // Created in that dtype: `from_data` would otherwise convert to the device's default
-                    let x = match self.precision {
-                        Precision::F32 => Tensor::<4>::from_data(data, &self.device),
-                        Precision::F16 => Tensor::<4>::from_data(data.convert::<burn::tensor::f16>(), (&self.device, burn::tensor::DType::F16)),
-                    };
-                    let y = self.model.fcn.forward(x);
-                    self.device.sync().map_err(|e| format!("the device: {e:?}"))?;
-                    let compute = ms(t1);
-                    let t2 = Instant::now();
-                    let y = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
-                    Ok((y, compute, ms(t2)))
-                };
-                // A matrix product this device cannot launch: Burn's own convolutions from now on
-                let (y, compute, readback) = match attempt() {
-                    Ok(r) => r,
-                    Err(e) if crate::gemm_cannot_launch(&e) && net::disable_gemm() => {
-                        eprintln!("instanseg: the matrix-product convolutions failed on this device, using Burn's own ({e})");
-                        attempt().map_err(crate::explain)?
-                    }
-                    Err(e) => return Err(crate::explain(e)),
-                };
-                times.compute += compute;
-                times.readback += readback;
-                if timing() {
-                    eprintln!("instanseg: tile {ph}×{pw}: network {compute:.0} ms, read back {readback:.0} ms");
-                }
-                let t3 = Instant::now();
-                for c in 0..no {
-                    for yy in y0..y1 {
-                        let ly = yy - ry0;
-                        let src = &y[(c * ph + ly) * pw + (x0 - rx0)..(c * ph + ly) * pw + (x1 - rx0)];
-                        out[c * w * h + yy * w + x0..c * w * h + yy * w + x1].copy_from_slice(src);
-                    }
-                }
-                times.prepare += ms(t3);
-                progress(ty * nx + tx + 1, ny * nx);
             }
+            times.prepare += ms(t0);
+            let attempt = |buf: &[f32]| -> Result<(Vec<f32>, f64, f64), String> {
+                let t1 = Instant::now();
+                let x = match self.precision {
+                    Precision::F32 => Tensor::<4>::from_data(TensorData::new(buf.to_vec(), [bsz, nc, ph, pw]), &self.device),
+                    Precision::F16 => {
+                        let halfs: Vec<burn::tensor::f16> = buf.iter().map(|&v| burn::tensor::f16::from_f32(v)).collect();
+                        Tensor::<4>::from_data(TensorData::new(halfs, [bsz, nc, ph, pw]), (&self.device, burn::tensor::DType::F16))
+                    }
+                };
+                let y = self.model.fcn.forward(x);
+                if want_timing {
+                    self.device.sync().map_err(|e| format!("the device: {e:?}"))?;
+                }
+                let compute = ms(t1);
+                let t2 = Instant::now();
+                let y = y.try_into_data().map_err(|e| format!("reading the network's output: {e:?}"))?.convert::<f32>().try_to_vec::<f32>().map_err(|e| format!("{e:?}"))?;
+                Ok((y, compute, ms(t2)))
+            };
+            let (y, compute, readback) = match attempt(&batch_buf) {
+                Ok(r) => r,
+                Err(e) if crate::gemm_cannot_launch(&e) && net::disable_gemm() => {
+                    eprintln!("instanseg: the matrix-product convolutions failed on this device, using Burn's own ({e})");
+                    attempt(&batch_buf).map_err(crate::explain)?
+                }
+                Err(e) => return Err(crate::explain(e)),
+            };
+            times.compute += compute;
+            times.readback += readback;
+            if timing() {
+                eprintln!("instanseg: batch {bsz}×{ph}×{pw}: network {compute:.0} ms, read back {readback:.0} ms");
+            }
+            let t3 = Instant::now();
+            for (bi, sp) in chunk.iter().enumerate() {
+                let out_base = bi * out_tile_elems;
+                for c in 0..no {
+                    for yy in sp.y0..sp.y1 {
+                        let ly = yy - sp.ry0;
+                        let src = &y[out_base + (c * ph + ly) * pw + (sp.x0 - sp.rx0)..out_base + (c * ph + ly) * pw + (sp.x1 - sp.rx0)];
+                        out[c * w * h + yy * w + sp.x0..c * w * h + yy * w + sp.x1].copy_from_slice(src);
+                    }
+                }
+            }
+            times.prepare += ms(t3);
+            done += actual;
+            progress(done, total);
         }
         times.tiles += ny * nx;
         times.overhead = computed as f64 / (w * h).max(1) as f64;

@@ -135,8 +135,11 @@ pub fn apply_instance_classes(objects: &mut [HistObject], model_labels: &[u32], 
 pub fn model_nuclei(send: &mut dyn FnMut(&lucem_ml::Request) -> Result<serde_json::Value, String>, model: &str, channels: usize, nuclear: usize, raw: &[Vec<f32>], ranges: &[f32], w: usize, h: usize, pixel_um: f64) -> HistResult<Vec<u32>> {
     let rgb: Vec<u8> = if channels == 1 {
         let v = raw.get(nuclear).ok_or_else(|| invalid(format!("no channel {nuclear}")))?;
-        let mut sorted: Vec<f32> = v.iter().copied().filter(|x| x.is_finite()).collect();
-        sorted.sort_by(f32::total_cmp);
+        // Sample at most ~16k evenly-spaced pixels for the 0.1st / 99.9th percentiles instead of
+        // cloning and sorting 4.2M floats per 2048×2048 tile on the CPU.
+        let step = (v.len() / 16_384).max(1);
+        let mut sorted: Vec<f32> = v.iter().step_by(step).copied().filter(|x| x.is_finite()).collect();
+        sorted.sort_unstable_by(f32::total_cmp);
         let (lo, hi) = match sorted.len() {
             0 => (0.0, 1.0),
             n => (sorted[n / 1000], sorted[(n - 1) * 999 / 1000]),
@@ -151,7 +154,12 @@ pub fn model_nuclei(send: &mut dyn FnMut(&lucem_ml::Request) -> Result<serde_jso
         (0..w * h).flat_map(|i| (0..3).map(move |c| (i, c))).map(|(i, c)| (raw[c][i] * scale[c]).round().clamp(0.0, 255.0) as u8).collect()
     };
     let channels = if channels == 1 { 1 } else { 3 };
-    let dir = std::env::temp_dir().join(format!("lucem-nuclei-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
+    // Prefer `/dev/shm` RAM disk on Linux so tile rasters & label maps never touch physical disk
+    let base_tmp = {
+        let shm = std::path::Path::new("/dev/shm");
+        if shm.is_dir() { shm.to_path_buf() } else { std::env::temp_dir() }
+    };
+    let dir = base_tmp.join(format!("lucem-nuclei-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
     std::fs::create_dir_all(&dir).map_err(|e| invalid(e.to_string()))?;
     let path = dir.join("tile.rgb");
     std::fs::write(&path, &rgb).map_err(|e| invalid(e.to_string()))?;
@@ -161,12 +169,22 @@ pub fn model_nuclei(send: &mut dyn FnMut(&lucem_ml::Request) -> Result<serde_jso
         pixel_um: Some(pixel_um),
         out_dir: dir.to_string_lossy().into_owned(),
     };
-    let value = send(&req).map_err(invalid)?;
-    let r: lucem_ml::InstancesResult = serde_json::from_value(value).map_err(|e| invalid(format!("the plugin's answer does not read: {e}")))?;
+    let value = send(&req).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&dir);
+        invalid(e)
+    })?;
+    let r: lucem_ml::InstancesResult = serde_json::from_value(value).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&dir);
+        invalid(format!("the plugin's answer does not read: {e}"))
+    })?;
     if r.classes.is_empty() {
+        let _ = std::fs::remove_dir_all(&dir);
         return Ok(vec![0; w * h]);
     }
-    let (labels, lw, lh) = labels_from_result(&r)?;
+    let (labels, lw, lh) = labels_from_result(&r).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&dir);
+    })?;
+    let _ = std::fs::remove_dir_all(&dir);
     if (lw, lh) != (w, h) {
         return Err(invalid(format!("the model answered {lw} × {lh} labels for a {w} × {h} tile")));
     }

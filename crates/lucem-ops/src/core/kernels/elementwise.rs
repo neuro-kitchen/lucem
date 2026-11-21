@@ -158,3 +158,69 @@ pub fn hypot_kernel<F: lucem_core::element::ImageFloat>(a: &[F], b: &[F], output
         output[i] = F::sqrt(va * va + vb * vb);
     }
 }
+
+/// Elementwise product: `output[i] = a[i] * b[i]`.
+#[cube(launch)]
+pub fn mul_kernel<F: lucem_core::element::ImageFloat>(a: &[F], b: &[F], output: &mut [F], len: u32) {
+    let i = element_position();
+    if (i as u32) < len {
+        output[i] = a[i] * b[i];
+    }
+}
+
+/// Elementwise ratio: `output[i] = a[i] / (max(b[i], 0) + eps)`.
+#[cube(launch)]
+pub fn ratio_kernel<F: lucem_core::element::ImageFloat>(a: &[F], b: &[F], output: &mut [F], eps: F, len: u32) {
+    let i = element_position();
+    if (i as u32) < len {
+        let denom = F::max(b[i], F::new(0.0f32)) + eps;
+        output[i] = a[i] / denom;
+    }
+}
+
+/// Elementwise normalized difference: `output[i] = (a[i] - b[i]) / (|a[i]| + |b[i]| + eps)`.
+#[cube(launch)]
+pub fn norm_diff_kernel<F: lucem_core::element::ImageFloat>(a: &[F], b: &[F], output: &mut [F], eps: F, len: u32) {
+    let i = element_position();
+    if (i as u32) < len {
+        let va = a[i];
+        let vb = b[i];
+        output[i] = (va - vb) / (F::abs(va) + F::abs(vb) + eps);
+    }
+}
+
+/// Applies a boolean `u32` mask to a float image: `output[i] = if mask[i] != 0 { a[i] } else { 0.0 }`.
+#[cube(launch)]
+pub fn mask_image_kernel<F: lucem_core::element::ImageFloat>(a: &[F], mask: &[u32], output: &mut [F], len: u32) {
+    let i = element_position();
+    if (i as u32) < len {
+        output[i] = if mask[i] != 0u32 { a[i] } else { F::new(0.0f32) };
+    }
+}
+
+/// Inverts a boolean `u32` mask: `output[i] = if mask[i] == 0 { 1 } else { 0 }`.
+#[cube(launch)]
+pub fn mask_invert_kernel(mask: &[u32], output: &mut [u32], len: u32) {
+    let i = element_position();
+    if (i as u32) < len {
+        output[i] = if mask[i] == 0u32 { 1u32 } else { 0u32 };
+    }
+}
+
+/// Binary boolean mask combination (`op`: `0` = union `|`, `1` = intersect `&`, `2` = subtract `& !`).
+#[cube(launch)]
+pub fn mask_pair_kernel(a: &[u32], b: &[u32], output: &mut [u32], len: u32, #[comptime] op: u32) {
+    let i = element_position();
+    if (i as u32) < len {
+        let va = a[i] != 0u32;
+        let vb = b[i] != 0u32;
+        let pass = if comptime!(op == 0u32) {
+            va || vb
+        } else if comptime!(op == 1u32) {
+            va && vb
+        } else {
+            va && !vb
+        };
+        output[i] = if pass { 1u32 } else { 0u32 };
+    }
+}

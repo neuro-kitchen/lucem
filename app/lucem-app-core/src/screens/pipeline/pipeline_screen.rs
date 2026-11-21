@@ -22,8 +22,9 @@ use crate::data::store::{AppEvent, Store};
 use crate::domain::command::Command;
 use crate::domain::graph::{NodeKind, ViewStyle};
 use crate::ui::param_editor::{Commit, EditOps as _, ParamEditor};
+use crate::ui::scrub_input::{scrub_number, ScrubState};
 use crate::ui::theme::{self, color};
-use crate::ui::widgets::{divider_v, row, stepper, MenuSelect, Section};
+use crate::ui::widgets::{divider_v, row, MenuSelect, Section};
 use kitchen_shell::{CommandSpec, MenuItem, MenuSpec, Registry};
 use kitchen_ui::widgets::{CodeChanged, CodeLanguage, CodeView};
 use serde_json::json;
@@ -194,16 +195,27 @@ impl PipelineView {
             .hint("A channel of an image, or an image's shapes as a mask, as a node"),
             CommandSpec::new("pipeline.output", "Result view", IconName::Eye, move |_, cx| add_view(cx)).group("Pipeline").hint("A result shown in Explore and Analyze"),
             CommandSpec::new("script.from_file", "Script from a file (.py, .rs)…", IconName::FileCode, move |_, cx| {
-                let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Script file".into()) });
-                let store = s1.clone();
-                cx.spawn(async move |cx| {
-                    if let Ok(Ok(Some(paths))) = rx.await
-                        && let Some(p) = paths.into_iter().next()
-                    {
-                        store.update(cx, |s, cx| s.add_script_file(p, cx));
-                    }
-                })
-                .detach();
+                #[cfg(target_family = "wasm")]
+                {
+                    s1.update(cx, |s, cx| {
+                        s.set_workspace(crate::navigation::route::Workspace::Code, cx);
+                        s.set_status("Browse and open server scripts in the Code workspace", cx);
+                    });
+                    return;
+                }
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Script file".into()) });
+                    let store = s1.clone();
+                    cx.spawn(async move |cx| {
+                        if let Ok(Ok(Some(paths))) = rx.await
+                            && let Some(p) = paths.into_iter().next()
+                        {
+                            store.update(cx, |s, cx| s.add_script_file(p, cx));
+                        }
+                    })
+                    .detach();
+                }
             })
             .group("Automate")
             .hint("A Python or Rust file as a step"),
@@ -274,6 +286,7 @@ impl PipelineView {
                 })
                 .collect()
         });
+        let st_plugins = store.clone();
         registry.provide("pipeline.models", move |cx| {
             let models: Vec<MenuItem> = store
                 .read(cx)
@@ -320,36 +333,72 @@ impl PipelineView {
                 .collect();
             vec![MenuItem::submenu_with_icon("Recipes", IconName::Package, items)]
         });
-        registry.provide("pipeline.plugin_scripts", |_| {
-            let scripts = crate::data::script::discover_plugin_ops();
-            if scripts.is_empty() {
-                return vec![MenuItem::label("No plugin scripts found (~/.config/lucem/plugins/ops)")];
+        registry.provide("pipeline.plugin_scripts", move |cx| {
+            #[cfg(target_family = "wasm")]
+            {
+                let ops = st_plugins.read(cx).server_plugin_ops.clone();
+                if ops.is_empty() {
+                    return vec![MenuItem::label("No server plugin scripts found (~/.config/lucem/plugins/ops)")];
+                }
+                let mut out = vec![MenuItem::label("Server plugin scripts (plugins/ops)")];
+                for sc in ops {
+                    let label = if sc.description.is_empty() {
+                        format!("{} · {}", sc.name, sc.family)
+                    } else {
+                        format!("{}   {}", sc.name, sc.description)
+                    };
+                    out.push(MenuItem::run(label, "script.from_plugin", json!({"path": sc.path})).icon(IconName::SquareTerminal));
+                }
+                return out;
             }
-            let mut out = vec![MenuItem::label("Plugin scripts (plugins/ops)")];
-            for sc in scripts {
-                let label = if sc.description.is_empty() {
-                    format!("{} · {}", sc.name, sc.family)
-                } else {
-                    format!("{}   {}", sc.name, sc.description)
-                };
-                out.push(MenuItem::run(label, "script.from_plugin", json!({"path": sc.path.to_string_lossy()})).icon(IconName::SquareTerminal));
+            #[cfg(not(target_family = "wasm"))]
+            {
+                let _ = (&st_plugins, cx);
+                let scripts = crate::data::script::discover_plugin_ops();
+                if scripts.is_empty() {
+                    return vec![MenuItem::label("No plugin scripts found (~/.config/lucem/plugins/ops)")];
+                }
+                let mut out = vec![MenuItem::label("Plugin scripts (plugins/ops)")];
+                for sc in scripts {
+                    let label = if sc.description.is_empty() {
+                        format!("{} · {}", sc.name, sc.family)
+                    } else {
+                        format!("{}   {}", sc.name, sc.description)
+                    };
+                    out.push(MenuItem::run(label, "script.from_plugin", json!({"path": sc.path.to_string_lossy()})).icon(IconName::SquareTerminal));
+                }
+                out
             }
-            out
         });
     }
 
-    /// The Pipeline's menus: Sources, Edit, Process (Find an operation, then a submenu per
-    /// family), Output, Script, Model, View.
+    /// The Pipeline's menus: Edit (including canvas view toggles), Sources, Process, Script, Model, Output.
     pub fn menu_specs() -> Vec<MenuSpec> {
         let c = MenuItem::command;
         vec![
+            MenuSpec::new(
+                "Edit",
+                vec![
+                    c("pipeline.duplicate"),
+                    c("pipeline.delete"),
+                    c("pipeline.delete_alone"),
+                    MenuItem::Separator,
+                    c("pipeline.select_all"),
+                    MenuItem::Separator,
+                    c("edit.undo"),
+                    c("edit.redo"),
+                    MenuItem::Separator,
+                    c("pipeline.fit"),
+                    c("pipeline.actual"),
+                    c("pipeline.grid"),
+                    c("pipeline.minimap"),
+                ],
+            ),
             MenuSpec::new("Sources", vec![MenuItem::provided("pipeline.sources")]),
-            MenuSpec::new("Edit", vec![c("pipeline.duplicate"), c("pipeline.delete"), c("pipeline.delete_alone"), MenuItem::Separator, c("pipeline.select_all"), MenuItem::Separator, c("edit.undo"), c("edit.redo")]),
             MenuSpec::new("Process", vec![c("process.find"), MenuItem::Separator, MenuItem::label("A node on the canvas"), MenuItem::provided("pipeline.families"), MenuItem::Separator, MenuItem::provided("pipeline.recipes")]),
-            MenuSpec::new("Output", vec![c("pipeline.output")]),
             MenuSpec::new("Script", vec![MenuItem::label("A step written as a file; edit, save, it runs again"), c("script.new_python"), c("script.new_rust"), c("script.from_file"), MenuItem::Separator, MenuItem::provided("pipeline.plugin_scripts")]),
             MenuSpec::new("Model", vec![MenuItem::provided("pipeline.models")]),
-            MenuSpec::new("View", vec![c("pipeline.fit"), c("pipeline.actual"), MenuItem::Separator, c("pipeline.grid"), c("pipeline.minimap")]),
+            MenuSpec::new("Output", vec![c("pipeline.output")]),
         ]
     }
 
@@ -445,7 +494,20 @@ impl PipelineView {
             })
             .child(sep())
             .child(tool("tool-fit", IconName::Maximize, "Fit the graph (F)", false, |c, cx| c.fit(cx)))
-            .child(run);
+            .child(run)
+            .child({
+                let st = self.store.clone();
+                let mut b = Button::new("tool-make-recipe")
+                    .ghost()
+                    .small()
+                    .icon(Icon::new(IconName::Package))
+                    .tooltip("Save this pipeline as a shareable .lucem-recipe.json")
+                    .on_click(move |_, _, cx| save_pipeline_recipe(&st, cx));
+                if !column {
+                    b = b.label("Make recipe");
+                }
+                b
+            });
         // Only the pill takes the pointer: the strip it sits in covers no control. The bottom
         // place clears the canvas' own bar (zoom, fit, grid, minimap) under it.
         let strip = div().id("pipeline-toolbar").absolute().flex();
@@ -528,11 +590,85 @@ impl Render for PipelineView {
     }
 }
 
+/// Shared action for both the floating Pipeline toolbar and the unselected Inspector:
+/// packages the enabled GPU op chain as a shareable `.lucem-recipe.json`.
+fn save_pipeline_recipe(store: &Entity<Store>, cx: &mut App) {
+    let (name, steps) = {
+        let s = store.read(cx);
+        let img_name = s.doc.active().map_or_else(|| "pipeline".to_string(), |i| i.name.clone());
+        let stem = img_name.split('.').next().unwrap_or("pipeline");
+        let ops: Vec<lucem_pipeline::Op> = s
+            .doc
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.kind {
+                NodeKind::Op { enabled: true, op } => Some(op.clone()),
+                _ => None,
+            })
+            .collect();
+        (format!("{stem}_recipe"), ops)
+    };
+    if steps.is_empty() {
+        store.update(cx, |s, cx| {
+            s.set_status("Add at least one enabled GPU operation to save a recipe.", cx);
+        });
+        return;
+    }
+    let recipe = crate::data::recipes::Recipe {
+        schema: 1,
+        name,
+        family: "Recipe".to_string(),
+        description: format!("Exported pipeline with {} operation(s)", steps.len()),
+        steps,
+    };
+    #[cfg(not(target_family = "wasm"))]
+    {
+        match crate::data::recipes::save_recipe(&recipe) {
+            Ok(path) => store.update(cx, |s, cx| {
+                s.set_status(format!("Saved recipe to {}", path.display()), cx);
+            }),
+            Err(e) => store.update(cx, |s, cx| {
+                s.set_status(format!("Could not save recipe: {e}"), cx);
+            }),
+        }
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        if crate::data::remote::runs_alone() {
+            if let Ok(json) = serde_json::to_string_pretty(&recipe) {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(json));
+                store.update(cx, |s, cx| {
+                    s.set_status("Copied .lucem-recipe.json to clipboard.", cx);
+                });
+            }
+        } else {
+            let st = store.clone();
+            cx.spawn(async move |cx| {
+                match crate::data::server_api::save_server_recipe(&recipe).await {
+                    Ok(path) => {
+                        let _ = cx.update(|cx| {
+                            st.update(cx, |s, cx| s.set_status(format!("Saved recipe to {path}"), cx));
+                        });
+                    }
+                    Err(e) => {
+                        let _ = cx.update(|cx| {
+                            st.update(cx, |s, cx| s.set_status(format!("Could not save recipe: {e}"), cx));
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+}
+
 /// The selected node: what it is, its values, its result.
 pub struct Inspector {
     store: Entity<Store>,
     canvas: Entity<GraphCanvas>,
     params: Entity<ParamEditor>,
+    scrub: Entity<ScrubState>,
     name: Entity<InputState>,
     name_for: String,
     /// The code of the selected script node: its file, the editor, the text on disk, and the
@@ -553,7 +689,9 @@ struct ScriptCode {
 impl Inspector {
     fn new(store: Entity<Store>, canvas: Entity<GraphCanvas>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx));
+        let scrub = cx.new(|cx| ScrubState::new(window, cx));
         let subs = vec![
+            cx.observe(&scrub, |_, _, cx| cx.notify()),
             cx.subscribe(&canvas, |_, _, _: &CanvasEvent, cx| cx.notify()),
             cx.subscribe(&store, |_, _, e: &AppEvent, cx| {
                 if matches!(e, AppEvent::Document(_) | AppEvent::Results) {
@@ -577,7 +715,7 @@ impl Inspector {
                 }
             }),
         ];
-        Self { store, canvas, params: cx.new(|_| ParamEditor::new()), name, name_for: String::new(), code: None, _subs: subs }
+        Self { store, canvas, params: cx.new(|_| ParamEditor::new()), scrub, name, name_for: String::new(), code: None, _subs: subs }
     }
 
     fn exec(store: &Entity<Store>, cmd: Command, cx: &mut App) {
@@ -590,7 +728,10 @@ impl Inspector {
     /// of its last run marked on their lines.
     fn script_code(&mut self, id: &str, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.code.as_ref().is_none_or(|c| c.path != path) {
+            #[cfg(not(target_family = "wasm"))]
             let text = std::fs::read_to_string(path).unwrap_or_default();
+            #[cfg(target_family = "wasm")]
+            let text = String::from("# Loading script from server…\n");
             let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or_default();
             let view = cx.new(|cx| CodeView::new(CodeLanguage::from_name(ext), text.clone(), window, cx).editable(true));
             let sub = cx.subscribe(&view, |this, _, e: &CodeChanged, cx| {
@@ -600,6 +741,25 @@ impl Inspector {
                 cx.notify();
             });
             self.code = Some(ScriptCode { path: path.to_string(), view, saved: text, error: None, dirty: false, _sub: sub });
+            #[cfg(target_family = "wasm")]
+            if !crate::data::remote::runs_alone() {
+                let p = path.to_string();
+                cx.spawn_in(window, async move |this, cx| {
+                    if let Ok(content) = crate::data::server_api::read_server_script(&p).await {
+                        let _ = this.update_in(cx, |insp, window, cx| {
+                            if let Some(c) = &mut insp.code
+                                && c.path == p
+                            {
+                                c.saved = content.clone();
+                                c.dirty = false;
+                                c.view.update(cx, |v, cx| v.set_text(content, window, cx));
+                                cx.notify();
+                            }
+                        });
+                    }
+                })
+                .detach();
+            }
         }
         let error = self.store.read(cx).analysis.as_ref().and_then(|a| a.errors.get(id).cloned());
         if let Some(c) = &mut self.code
@@ -610,35 +770,6 @@ impl Inspector {
             c.error = error;
             c.view.update(cx, |v, cx| v.set_errors(marks, cx));
         }
-    }
-
-    /// Writes the editor's text to the script's file and runs the node again.
-    fn save_script(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(c) = &mut self.code else { return };
-        let text = c.view.read(cx).text(cx);
-        match std::fs::write(&c.path, &text) {
-            Ok(()) => {
-                c.saved = text;
-                c.dirty = false;
-                self.store.update(cx, |s, cx| s.reload_script(id, cx));
-            }
-            Err(e) => {
-                let msg = format!("Could not save {}: {e}", crate::domain::paths::short_path(std::path::Path::new(&c.path)));
-                self.store.update(cx, |s, cx| s.set_status(msg, cx));
-            }
-        }
-        cx.notify();
-    }
-
-    /// Puts back the text on disk.
-    fn revert_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(c) = &mut self.code {
-            let text = std::fs::read_to_string(&c.path).unwrap_or_else(|_| c.saved.clone());
-            c.saved = text.clone();
-            c.dirty = false;
-            c.view.update(cx, |v, cx| v.set_text(text, window, cx));
-        }
-        cx.notify();
     }
 
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -714,6 +845,14 @@ impl Inspector {
                 .icon(Icon::new(IconName::Play))
                 .label("Run on view")
                 .on_click(move |_, _, cx| store_run.update(cx, |s, cx| s.recompute(cx)));
+            let store_recipe = self.store.clone();
+            let recipe_btn = Button::new("inspector-make-recipe")
+                .outline()
+                .small()
+                .icon(Icon::new(IconName::Package))
+                .label("Make recipe")
+                .tooltip("Save this pipeline as a shareable .lucem-recipe.json")
+                .on_click(move |_, _, cx| save_pipeline_recipe(&store_recipe, cx));
             let quick_ops: Vec<AnyElement> = ["rolling_ball", "gaussian_blur", "clahe", "otsu_threshold", "li_threshold", "canny"]
                 .iter()
                 .filter_map(|tag| lucem_pipeline::Op::by_tag(tag))
@@ -733,7 +872,7 @@ impl Inspector {
                         .border_1()
                         .border_color(color::border())
                         .bg(color::panel())
-                        .hover(|d| d.border_color(color::accent_mark()).bg(color::raised()))
+                        .hover(|d| d.bg(color::raised()))
                         .cursor_pointer()
                         .text_xs()
                         .text_color(color::text())
@@ -758,7 +897,7 @@ impl Inspector {
                         .child(row("Image", div().min_w_0().truncate().text_sm().child(active_name)))
                         .child(row("Graph", div().text_sm().font_family("monospace").child(format!("{n_nodes} nodes · {n_edges} edges")))),
                 )
-                .child(h_flex().gap(px(theme::SM)).flex_wrap().child(add_btn).child(run_btn))
+                .child(h_flex().gap(px(theme::SM)).flex_wrap().child(add_btn).child(run_btn).child(recipe_btn))
                 .child(
                     v_flex()
                         .p(px(theme::SM))
@@ -781,7 +920,15 @@ impl Inspector {
         let (title, sub, icon) = describe(&node.kind, &doc);
         let analysis = s.analysis.clone();
         let layer = s.results.get(&id).cloned();
-        let preview = analysis.as_ref().and_then(|a| a.previews.get(&id).cloned());
+        let preview = analysis
+            .as_ref()
+            .and_then(|a| a.previews.get(&id).cloned())
+            .or_else(|| layer.as_ref().and_then(|r| r.layer.clone()))
+            .or_else(|| {
+                g.outputs(&id)
+                    .iter()
+                    .find_map(|(out_id, _)| s.results.get(*out_id).and_then(|r| r.layer.clone()))
+            });
         let header = v_flex()
             .gap(px(2.))
             .child(h_flex().gap(px(theme::SM)).child(Icon::new(icon).small()).child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title)))
@@ -840,7 +987,7 @@ impl Inspector {
                             .border_1()
                             .border_color(color::border())
                             .bg(color::panel())
-                            .hover(|d| d.border_color(color::accent_mark()).bg(color::raised()))
+                            .hover(|d| d.bg(color::raised()))
                             .cursor_pointer()
                             .text_xs()
                             .text_color(color::text())
@@ -963,7 +1110,23 @@ impl Inspector {
                         let v = *v;
                         s1(&move |st: &mut ViewStyle| st.visible = v, cx)
                     }))
-                    .child(row("Opacity", stepper("view-opacity", format!("{:.0} %", style.opacity * 100.0), move |d, _, cx| s2(&move |st: &mut ViewStyle| st.opacity = (st.opacity + d * 0.1).clamp(0.0, 1.0), cx))))
+                    .child(row("Opacity", {
+                        let s2_set = s2.clone();
+                        let pct = style.opacity * 100.0;
+                        scrub_number(
+                            &self.scrub,
+                            "view-opacity",
+                            format!("{pct:.0} %"),
+                            format!("{pct:.0}"),
+                            "Drag to scrub opacity, or click to type a percentage",
+                            move |d, _, cx| s2(&move |st: &mut ViewStyle| st.opacity = (st.opacity + d * 0.05).clamp(0.0, 1.0), cx),
+                            move |v, _, cx| {
+                                let clamped = (v as f32 / 100.0).clamp(0.0, 1.0);
+                                s2_set(&move |st: &mut ViewStyle| st.opacity = clamped, cx);
+                            },
+                            cx,
+                        )
+                    }))
                     .child(row(
                         "Colours",
                         MenuSelect::new("view-lut", COLORMAPS.iter().map(|m| SharedString::from(*m)).collect(), lut_idx, move |i, _, cx| s3(&move |st: &mut ViewStyle| st.colormap = COLORMAPS[i].to_string(), cx)),
@@ -1014,7 +1177,15 @@ impl Inspector {
                 if names.len() == 3 {
                     options.push(("Colour (all three channels)".into(), Vec::new()));
                 }
-                options.extend(names.iter().enumerate().map(|(i, n)| (SharedString::from(format!("Channel {}: {n}", i + 1)), vec![i])));
+                let processed_map = doc.graph.processed_channels(image, names.len());
+                options.extend(names.iter().enumerate().map(|(i, n)| {
+                    let label = if processed_map.contains_key(&i) {
+                        format!("Channel {}: {n} (preprocessed)", i + 1)
+                    } else {
+                        format!("Channel {}: {n}", i + 1)
+                    };
+                    (SharedString::from(label), vec![i])
+                }));
                 let current = options.iter().position(|(_, c)| c == channels).or_else(|| channels.is_empty().then_some(0));
                 let (store_c, id_c, kind_c) = (self.store.clone(), id.clone(), node.kind.clone());
                 let picks: Vec<Vec<usize>> = options.iter().map(|(_, c)| c.clone()).collect();
@@ -1085,22 +1256,44 @@ impl Inspector {
                 let mut nums = v_flex().gap(px(theme::XS));
                 for (i, q) in params.iter().enumerate() {
                     let (store, id, kind) = (self.store.clone(), id.clone(), kind.clone());
-                    // A step of 1 % of the value (0.01 near zero); drag the number
+                    let (store_set, id_set, kind_set) = (self.store.clone(), id.clone(), kind.clone());
+                    // A step of 1 % of the value (0.01 near zero); drag or click to type
                     let step = (q.value.abs() * 0.01).max(0.01);
+                    let display = crate::ui::param_editor::trim_number(q.value);
                     nums = nums.child(row(
                         q.name.clone(),
-                        stepper(&format!("script-param-{i}"), crate::ui::param_editor::trim_number(q.value), move |d, _, cx| {
-                            let mut k = kind.clone();
-                            if let NodeKind::Script { params, .. } = &mut k
-                                && let Some(p) = params.get_mut(i) {
+                        scrub_number(
+                            &self.scrub,
+                            format!("script-param-{i}"),
+                            display.clone(),
+                            display,
+                            "Drag horizontally to scrub, or click to type an exact value",
+                            move |d, _, cx| {
+                                let mut k = kind.clone();
+                                if let NodeKind::Script { params, .. } = &mut k
+                                    && let Some(p) = params.get_mut(i)
+                                {
                                     p.value += d as f64 * step;
                                 }
-                            Self::exec(&store, Command::SetScript { id: id.clone(), kind: k }, cx);
-                        }),
+                                Self::exec(&store, Command::SetScript { id: id.clone(), kind: k }, cx);
+                            },
+                            move |v, _, cx| {
+                                let mut k = kind_set.clone();
+                                if let NodeKind::Script { params, .. } = &mut k
+                                    && let Some(p) = params.get_mut(i)
+                                {
+                                    p.value = v;
+                                }
+                                Self::exec(&store_set, Command::SetScript { id: id_set.clone(), kind: k }, cx);
+                            },
+                            cx,
+                        ),
                     ));
                 }
                 let declared = inputs.iter().map(|q| format!("{}: {}", q.name, q.port.name())).collect::<Vec<_>>().join(", ");
                 let kind_on = kind.clone();
+                let path_code = path.clone();
+                let st_code = self.store.clone();
                 v_flex()
                     .gap(px(theme::MD))
                     .child(Checkbox::new("inspector-script-on").checked(on).label("On (off: passes its first input through)").on_click(move |v: &bool, _, cx| {
@@ -1110,36 +1303,40 @@ impl Inspector {
                         }
                         Self::exec(&store, Command::SetScript { id: id2.clone(), kind: k }, cx)
                     }))
+                    .when(!params.is_empty(), |d| d.child(Section::new("Parameters").child(nums)))
+                    .when(params.is_empty(), |d| {
+                        d.child(div().text_xs().text_color(color::text_muted()).child("No parameters declared yet. Add `@lucem.param(\"sigma\", 3.0)` or `# lucem: param sigma = 3.0` in the Code tab."))
+                    })
                     .child(row("Language", div().text_sm().child(lang)))
                     .child(row("File", div().text_xs().font_family("monospace").truncate().child(path.clone())))
-                    .children(self.code.as_ref().map(|c| {
-                        let dirty = c.dirty;
-                        let (save_id, me, me2) = (id.clone(), cx.entity().downgrade(), cx.entity().downgrade());
-                        Section::new(if dirty { "Code · not saved" } else { "Code" })
-                            .child(div().h(px(340.)).rounded(px(theme::RADIUS)).overflow_hidden().border_1().border_color(color::border()).child(c.view.clone()))
-                            .child(
-                                h_flex()
-                                    .gap(px(theme::SM))
-                                    .child(Button::new("script-save").small().primary().icon(Icon::new(IconName::Save)).label("Save and run").disabled(!dirty).on_click(move |_, _, cx| {
-                                        let _ = me.update(cx, |i, cx| i.save_script(&save_id, cx));
-                                    }))
-                                    .child(Button::new("script-revert").small().ghost().label("Revert").disabled(!dirty).on_click(move |_, window, cx| {
-                                        let _ = me2.update(cx, |i, cx| i.revert_script(window, cx));
-                                    })),
-                            )
-                    }))
                     .child(
                         h_flex()
                             .gap(px(theme::SM))
-                            .child(Button::new("script-open").small().ghost().icon(Icon::new(IconName::SquarePen)).label("External editor").on_click(move |_, _, cx| {
-                                if let Err(e) = crate::data::script::open_in_editor(&open_p) {
-                                    st_open.update(cx, |s, cx| s.set_status(format!("Could not open the editor: {e}"), cx));
-                                }
-                            }))
-                            .child(Button::new("script-reload").small().ghost().icon(Icon::new(IconName::RefreshCw)).label("Reload").tooltip("Read the header again and run (saving the file does it too)").on_click(move |_, _, cx| st_reload.update(cx, |s, cx| s.reload_script(&id_reload, cx)))),
+                            .flex_wrap()
+                            .child(
+                                Button::new("script-open-code")
+                                    .outline()
+                                    .small()
+                                    .icon(Icon::new(IconName::Code))
+                                    .label("Open in Code tab")
+                                    .on_click(move |_, _, cx| {
+                                        let p = path_code.clone();
+                                        st_code.update(cx, |s, cx| {
+                                            s.set_workspace(crate::navigation::route::Workspace::Code, cx);
+                                            cx.emit(AppEvent::OpenScriptInCode(p));
+                                        });
+                                    }),
+                            )
+                            .child(Button::new("script-reload").small().ghost().icon(Icon::new(IconName::RefreshCw)).label("Reload").tooltip("Read the header again and run").on_click(move |_, _, cx| st_reload.update(cx, |s, cx| s.reload_script(&id_reload, cx))))
+                            .when(cfg!(not(target_family = "wasm")), |h| {
+                                h.child(Button::new("script-open").small().ghost().icon(Icon::new(IconName::SquarePen)).label("External editor").on_click(move |_, _, cx| {
+                                    if let Err(e) = crate::data::script::open_in_editor(&open_p) {
+                                        st_open.update(cx, |s, cx| s.set_status(format!("Could not open the editor: {e}"), cx));
+                                    }
+                                }))
+                            }),
                     )
-                    .when(!params.is_empty(), |d| d.child(Section::new("Numbers").child(nums)))
-                    .child(div().text_xs().text_color(color::text_muted()).child(format!("Takes {} · gives {}. Declared in the file's `lucem:` lines.", if declared.is_empty() { "nothing".to_string() } else { declared }, output.name())))
+                    .child(div().text_xs().text_color(color::text_muted()).child(format!("Takes {} · gives {}. Declared with `@lucem.param` or `# lucem:`.", if declared.is_empty() { "nothing".to_string() } else { declared }, output.name())))
                     .into_any_element()
             }
         };

@@ -173,12 +173,26 @@ fn upload(client: &Client, loaded: LoadedBlock) -> Result<DeviceArray<f32>, RunE
     DeviceArray::from_host(client, Shape::new(loaded.block.read_dims()), loaded.data).map_err(|e| RunError::Function(e.to_string()))
 }
 
-/// Downloads a result and keeps the part the block owns.
-fn owned<T: lucem_core::cubecl::prelude::CubeElement + Copy>(client: &Client, out: &DeviceArray<T>, block: &Block, what: &str) -> Result<Vec<T>, RunError> {
+/// Downloads a result and keeps the part the block owns (cropping halo margins on the GPU for 2D blocks).
+fn owned<T: lucem_core::cubecl::prelude::Numeric + lucem_core::cubecl::prelude::CubeElement + Copy>(client: &Client, out: &DeviceArray<T>, block: &Block, what: &str) -> Result<Vec<T>, RunError> {
     if out.dims() != block.read_dims().as_slice() {
         return Err(RunError::Function(format!("{what} returned shape {:?} for a block of {:?}", out.dims(), block.read_dims())));
     }
-    Ok(crop(&out.to_host(client), block.read_size, block.inner_offset(), block.size))
+    let inner = block.inner_offset();
+    if out.ndim() == 2 {
+        let (rh, rw) = (block.read_size[1], block.read_size[2]);
+        let (oy, ox) = (inner[1], inner[2]);
+        let (sh, sw) = (block.size[1], block.size[2]);
+        let bottom = rh.saturating_sub(oy + sh);
+        let right = rw.saturating_sub(ox + sw);
+        if oy == 0 && ox == 0 && bottom == 0 && right == 0 {
+            return Ok(out.to_host(client));
+        }
+        if let Ok(cropped) = lucem_ops::intensity::convert::crop(client, out, &[(oy, bottom), (ox, right)]) {
+            return Ok(cropped.to_host(client));
+        }
+    }
+    Ok(crop(&out.to_host(client), block.read_size, inner, block.size))
 }
 
 /// Walks the image, giving each block on the device to `visit`.
@@ -320,8 +334,16 @@ pub fn run_spec(client: &Client, py: &Arc<Pyramid>, spec: &PipelineSpec, output:
             let (lo, hi) = if spec.normalize { py.channels[g.channel].range } else { (0.0, 1.0) };
             let span = (hi - lo).abs().max(1e-12);
             let channel = g.channel;
-            let scaled = LoadedBlock { data: g.data.into_iter().map(|v| (v - lo) / span).collect(), ..g };
-            arrays.insert(channel, upload(client, scaled)?);
+            let raw = upload(client, g)?;
+            let arr = if (lo - 0.0).abs() < 1e-12 && (span - 1.0).abs() < 1e-12 {
+                raw
+            } else {
+                let scaled = DeviceArray::<f32>::empty(client, raw.shape().clone()).map_err(|e| RunError::Function(e.to_string()))?;
+                let inv = 1.0 / span as f64;
+                lucem_ops::core::elementwise::scale_offset_into(client, &raw, &scaled, inv, -(lo as f64) * inv).map_err(|e| RunError::Function(e.to_string()))?;
+                scaled
+            };
+            arrays.insert(channel, arr);
         }
         let mut source = |id: &str| -> Result<Value, String> {
             let c = spec.sources.get(id).ok_or_else(|| format!("no source {id:?}"))?;

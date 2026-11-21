@@ -212,6 +212,68 @@ impl TileService {
         read_region(&self.shared.pyramid, &self.shared.raw, level, z, channel, x0, y0, w, h)
     }
 
+    /// Non-blocking cache-only read of a region at `level`: reads strictly from the raw tile cache
+    /// (falling back to any cached coarser level via nearest-neighbor when a tile at `level` isn't
+    /// cached yet). Never performs disk or network I/O, so it is safe on the UI thread (including
+    /// `wasm32`) for interactive tools like Magic Wand.
+    #[allow(clippy::too_many_arguments)]
+    pub fn read_region_cached(&self, level: usize, z: usize, channel: usize, x0: usize, y0: usize, w: usize, h: usize) -> Option<Vec<f32>> {
+        let py = &self.shared.pyramid;
+        let l = py.levels.get(level)?;
+        let (x1, y1) = ((x0 + w).min(l.width), (y0 + h).min(l.height));
+        if x0 >= x1 || y0 >= y1 || w == 0 || h == 0 {
+            return None;
+        }
+        let mut out = vec![0.0f32; w * h];
+        let mut any_hit = false;
+        let mut raw = self.shared.raw.lock().ok()?;
+        for ty in y0 / l.tile_h..=(y1 - 1) / l.tile_h {
+            for tx in x0 / l.tile_w..=(x1 - 1) / l.tile_w {
+                let rk = RawKey { level, z, channel, tx, ty };
+                let (ox, oy) = (tx * l.tile_w, ty * l.tile_h);
+                if let Some((data, tw, th)) = raw.get(&rk) {
+                    any_hit = true;
+                    let (ax0, ax1) = (x0.max(ox), x1.min(ox + tw));
+                    let (ay0, ay1) = (y0.max(oy), y1.min(oy + th));
+                    for y in ay0..ay1 {
+                        let src = (y - oy) * tw + (ax0 - ox);
+                        let dst = (y - y0) * w + (ax0 - x0);
+                        out[dst..dst + (ax1 - ax0)].copy_from_slice(&data[src..src + (ax1 - ax0)]);
+                    }
+                    continue;
+                }
+                // Fallback: nearest cached coarser level covering this tile's region
+                let (ax0, ax1) = (x0.max(ox), x1.min(ox + l.tile_w));
+                let (ay0, ay1) = (y0.max(oy), y1.min(oy + l.tile_h));
+                for cl in (level + 1)..py.levels.len() {
+                    let cl_info = &py.levels[cl];
+                    let ratio = cl_info.downsample / l.downsample;
+                    if ratio <= 0.0 {
+                        continue;
+                    }
+                    let cz = ((z as f64 * l.z_downsample / cl_info.z_downsample) as usize).min(cl_info.depth.saturating_sub(1));
+                    let ctx = ((ax0 as f64 / ratio) as usize) / cl_info.tile_w;
+                    let cty = ((ay0 as f64 / ratio) as usize) / cl_info.tile_h;
+                    let ck = RawKey { level: cl, z: cz, channel, tx: ctx, ty: cty };
+                    if let Some((cdata, ctw, cth)) = raw.get(&ck) {
+                        any_hit = true;
+                        let (cox, coy) = (ctx * cl_info.tile_w, cty * cl_info.tile_h);
+                        for y in ay0..ay1 {
+                            let cy = ((y as f64 / ratio) as usize).saturating_sub(coy).min(cth.saturating_sub(1));
+                            let dst_row = (y - y0) * w;
+                            for x in ax0..ax1 {
+                                let cx = ((x as f64 / ratio) as usize).saturating_sub(cox).min(ctw.saturating_sub(1));
+                                out[dst_row + (x - x0)] = cdata[cy * ctw + cx];
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        any_hit.then_some(out)
+    }
+
     /// A handle that reads regions through this service's raw cache from any thread (it does not
     /// keep the workers alive).
     pub fn region_reader(&self) -> RegionReader {

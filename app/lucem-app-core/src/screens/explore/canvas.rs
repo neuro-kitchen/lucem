@@ -72,8 +72,118 @@ enum Gesture {
     Wand(Box<Wand>),
 }
 
+/// Fast separable 2-pass box blur on a 2D `f32` buffer (used to suppress fluorescence shot noise
+/// before Magic Wand flood-filling so selections snap cleanly to anatomical boundaries).
+fn box_blur_f32(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+    if radius == 0 || w == 0 || h == 0 {
+        return src.to_vec();
+    }
+    let mut tmp = vec![0.0f32; w * h];
+    let mut dst = vec![0.0f32; w * h];
+    let r = radius as isize;
+    for y in 0..h {
+        let row = y * w;
+        for x in 0..w {
+            let x0 = (x as isize - r).max(0) as usize;
+            let x1 = (x as isize + r).min(w as isize - 1) as usize;
+            let mut sum = 0.0f32;
+            for xi in x0..=x1 {
+                sum += src[row + xi];
+            }
+            tmp[row + x] = sum / (x1 - x0 + 1) as f32;
+        }
+    }
+    for x in 0..w {
+        for y in 0..h {
+            let y0 = (y as isize - r).max(0) as usize;
+            let y1 = (y as isize + r).min(h as isize - 1) as usize;
+            let mut sum = 0.0f32;
+            for yi in y0..=y1 {
+                sum += tmp[yi * w + x];
+            }
+            dst[y * w + x] = sum / (y1 - y0 + 1) as f32;
+        }
+    }
+    dst
+}
+
+/// Computes a multi-channel Sobel edge-magnitude map (`0..=1+`) so the Magic Wand can stop cleanly
+/// at sharp anatomical boundaries (Affinity Photo "Snap to edges" / Photoshop Quick Selection).
+fn sobel_gradient_map(channels: &[Vec<f32>], w: usize, h: usize) -> Vec<f32> {
+    let mut grad = vec![0.0f32; w * h];
+    if w < 3 || h < 3 {
+        return grad;
+    }
+    for ch in channels {
+        for y in 1..h - 1 {
+            let r0 = (y - 1) * w;
+            let r1 = y * w;
+            let r2 = (y + 1) * w;
+            for x in 1..w - 1 {
+                let gx = -ch[r0 + x - 1] + ch[r0 + x + 1] - 2.0 * ch[r1 + x - 1] + 2.0 * ch[r1 + x + 1] - ch[r2 + x - 1] + ch[r2 + x + 1];
+                let gy = -ch[r0 + x - 1] - 2.0 * ch[r0 + x] - ch[r0 + x + 1] + ch[r2 + x - 1] + 2.0 * ch[r2 + x] + ch[r2 + x + 1];
+                let mag = (gx * gx + gy * gy).sqrt() * 0.25;
+                let idx = r1 + x;
+                if mag > grad[idx] {
+                    grad[idx] = mag;
+                }
+            }
+        }
+    }
+    grad
+}
+
+/// 1-pass morphological close (3×3 dilate then erode) on a cropped binary mask to smooth 1 px
+/// jagged edges before polygon contour tracing (Photoshop Auto-Enhance / Affinity Refine).
+fn morph_close_1px(mask: &[u8], w: usize, h: usize) -> Vec<u8> {
+    if w < 3 || h < 3 {
+        return mask.to_vec();
+    }
+    let mut dil = vec![0u8; w * h];
+    for y in 0..h {
+        let y0 = y.saturating_sub(1);
+        let y1 = (y + 1).min(h - 1);
+        for x in 0..w {
+            let x0 = x.saturating_sub(1);
+            let x1 = (x + 1).min(w - 1);
+            let mut any = 0u8;
+            'd: for ny in y0..=y1 {
+                let row = ny * w;
+                for nx in x0..=x1 {
+                    if mask[row + nx] != 0 {
+                        any = 1;
+                        break 'd;
+                    }
+                }
+            }
+            dil[y * w + x] = any;
+        }
+    }
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        let y0 = y.saturating_sub(1);
+        let y1 = (y + 1).min(h - 1);
+        for x in 0..w {
+            let x0 = x.saturating_sub(1);
+            let x1 = (x + 1).min(w - 1);
+            let mut all = 1u8;
+            'e: for ny in y0..=y1 {
+                let row = ny * w;
+                for nx in x0..=x1 {
+                    if dil[row + nx] == 0 {
+                        all = 0;
+                        break 'e;
+                    }
+                }
+            }
+            out[y * w + x] = all;
+        }
+    }
+    out
+}
+
 /// A wand stroke: the visible region of a level, its visible channels in display units (0–1),
-/// the painted mask and its bounds.
+/// Sobel gradient barrier map, the painted mask and its bounds.
 #[derive(Debug, Clone)]
 struct Wand {
     level: usize,
@@ -83,11 +193,17 @@ struct Wand {
     w: usize,
     h: usize,
     channels: Vec<Vec<f32>>,
+    /// Multi-channel Sobel edge magnitude (`0..=1+`) for Affinity/Photoshop "Snap to edges".
+    grad: Vec<f32>,
     mask: Vec<u8>,
     /// `x0, y0, x1, y1` (exclusive) of what is painted, region px.
     bbox: Option<(usize, usize, usize, usize)>,
-    /// Brush radius, level-0 px.
+    /// Brush radius, level-0 px (used when `flood == false`).
     radius: f64,
+    /// True = contiguous flood fill (Photoshop/QuPath Magic Wand); false = smart brush.
+    flood: bool,
+    /// True = stop growth at strong Sobel gradient barriers & refine jagged 1 px edges.
+    snap_edges: bool,
     last: [f64; 2],
     tolerance: f32,
     color: [u8; 3],
@@ -95,50 +211,168 @@ struct Wand {
 }
 
 impl Wand {
-    /// Paints the pixels within the brush that are connected to its centre and look like it.
-    fn stamp(&mut self, p: [f64; 2]) {
+    /// Edge-aware adaptive region growing inspired by Photoshop Quick Selection & Affinity Photo's
+    /// Selection Brush ("Snap to edges"):
+    /// - Samples a 3×3 neighborhood mean & std-dev around the seed instead of a single noisy pixel.
+    /// - Combines foreground similarity, step-to-step local continuity, and a Sobel gradient barrier
+    ///   when `snap_edges` is enabled.
+    /// - When `erase` is true (`Alt` held), subtracts from the mask instead of adding.
+    fn stamp(&mut self, p: [f64; 2], erase: bool) {
         let (cx, cy) = (p[0] / self.ds - self.x0 as f64, p[1] / self.ds - self.y0 as f64);
         if cx < 0.0 || cy < 0.0 || cx >= self.w as f64 || cy >= self.h as f64 {
             return;
         }
         let (sx, sy) = (cx as usize, cy as usize);
+        let target_val = if erase { 0u8 } else { 1u8 };
+        // In flood-fill drag mode, skip redundant flood if this pixel is already in the desired state
+        if self.flood && self.mask[sy * self.w + sx] == target_val {
+            self.last = p;
+            return;
+        }
         let r = (self.radius / self.ds).max(1.0);
-        let seed: Vec<f32> = self.channels.iter().map(|c| c[sy * self.w + sx]).collect();
+        let r2 = r * r;
+        let (w, h) = (self.w, self.h);
+
+        // 3×3 local neighborhood mean & std-dev around click seed (robust against fluorescence speckle)
+        let n_ch = self.channels.len();
+        let mut seed_mean = vec![0.0f32; n_ch];
+        let mut seed_std = vec![0.0f32; n_ch];
+        let x_lo = sx.saturating_sub(1);
+        let x_hi = (sx + 1).min(w - 1);
+        let y_lo = sy.saturating_sub(1);
+        let y_hi = (sy + 1).min(h - 1);
+        let count = ((x_hi - x_lo + 1) * (y_hi - y_lo + 1)) as f32;
+        for (ci, ch) in self.channels.iter().enumerate() {
+            let mut sum = 0.0f32;
+            for ny in y_lo..=y_hi {
+                for nx in x_lo..=x_hi {
+                    sum += ch[ny * w + nx];
+                }
+            }
+            let mean = sum / count;
+            let mut var = 0.0f32;
+            for ny in y_lo..=y_hi {
+                for nx in x_lo..=x_hi {
+                    let d = ch[ny * w + nx] - mean;
+                    var += d * d;
+                }
+            }
+            seed_mean[ci] = mean;
+            seed_std[ci] = (var / count).sqrt();
+        }
+
         let tol = self.tolerance;
-        let (w, h) = (self.w as isize, self.h as isize);
-        let mut seen = std::collections::HashSet::new();
-        let mut stack = vec![(sx as isize, sy as isize)];
-        seen.insert((sx as isize, sy as isize));
+        let local_step_tol = (tol * 0.85).max(0.035);
+        let edge_barrier = (tol * 1.15).max(0.08);
+        let mut seen = vec![0u8; w * h];
+        let mut queue = std::collections::VecDeque::new();
+        seen[sy * w + sx] = 1;
+        queue.push_back((sx, sy));
         let (mut bx0, mut by0, mut bx1, mut by1) = self.bbox.unwrap_or((usize::MAX, usize::MAX, 0, 0));
-        while let Some((x, y)) = stack.pop() {
-            let i = (y * w + x) as usize;
-            self.mask[i] = 1;
-            (bx0, by0, bx1, by1) = (bx0.min(x as usize), by0.min(y as usize), bx1.max(x as usize + 1), by1.max(y as usize + 1));
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let (nx, ny) = (x + dx, y + dy);
-                if nx < 0 || ny < 0 || nx >= w || ny >= h || seen.contains(&(nx, ny)) {
+        while let Some((x, y)) = queue.pop_front() {
+            let i = y * w + x;
+            self.mask[i] = target_val;
+            if !erase {
+                bx0 = bx0.min(x);
+                by0 = by0.min(y);
+                bx1 = bx1.max(x + 1);
+                by1 = by1.max(y + 1);
+            }
+            let gi = self.grad[i];
+            let neighbors = [
+                (x + 1 < w).then(|| (x + 1, y)),
+                (x > 0).then(|| (x - 1, y)),
+                (y + 1 < h).then(|| (x, y + 1)),
+                (y > 0).then(|| (x, y - 1)),
+            ];
+            for (nx, ny) in neighbors.into_iter().flatten() {
+                let j = ny * w + nx;
+                if seen[j] != 0 {
                     continue;
                 }
-                let (ddx, ddy) = (nx as f64 + 0.5 - cx, ny as f64 + 0.5 - cy);
-                if ddx * ddx + ddy * ddy > r * r {
+                if !self.flood {
+                    let (ddx, ddy) = (nx as f64 + 0.5 - cx, ny as f64 + 0.5 - cy);
+                    if ddx * ddx + ddy * ddy > r2 {
+                        continue;
+                    }
+                }
+                // Gradient barrier ("Snap to edges"): block climbing onto a sharp contrast cliff
+                if self.snap_edges && self.grad[j] > edge_barrier && self.grad[j] >= gi {
                     continue;
                 }
-                let j = (ny * w + nx) as usize;
-                if self.channels.iter().zip(&seed).all(|(c, s)| (c[j] - s).abs() <= tol) {
-                    seen.insert((nx, ny));
-                    stack.push((nx, ny));
+                let ok = self.channels.iter().enumerate().all(|(ci, ch)| {
+                    let vj = ch[j];
+                    let global_ok = (vj - seed_mean[ci]).abs() <= tol + 0.5 * seed_std[ci];
+                    let step_ok = !self.snap_edges || (vj - ch[i]).abs() <= local_step_tol;
+                    global_ok && step_ok
+                });
+                if ok {
+                    seen[j] = 1;
+                    queue.push_back((nx, ny));
                 }
             }
         }
-        if bx1 > bx0 {
+        if !erase && bx1 > bx0 && by1 > by0 {
             self.bbox = Some((bx0, by0, bx1, by1));
+            self.fill_holes(bx0, by0, bx1, by1);
         }
         self.last = p;
     }
 
-    /// Stamps along the segment from the last stamp to `p`.
-    fn stroke_to(&mut self, p: [f64; 2]) {
-        let step = (self.radius * 0.5).max(self.ds);
+    /// Fills enclosed interior holes inside `[bx0..bx1, by0..by1]` so fluorescence speckles don't
+    /// leave swiss-cheese cutouts in the selected region.
+    fn fill_holes(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        let (bw, bh) = (bx1 - bx0, by1 - by0);
+        if bw < 3 || bh < 3 {
+            return;
+        }
+        let mut outside = vec![0u8; bw * bh];
+        let mut q = std::collections::VecDeque::new();
+        let mut seed_bg = |lx: usize, ly: usize| {
+            let gi = (by0 + ly) * self.w + (bx0 + lx);
+            let li = ly * bw + lx;
+            if self.mask[gi] == 0 && outside[li] == 0 {
+                outside[li] = 1;
+                q.push_back((lx, ly));
+            }
+        };
+        for lx in 0..bw {
+            seed_bg(lx, 0);
+            seed_bg(lx, bh - 1);
+        }
+        for ly in 0..bh {
+            seed_bg(0, ly);
+            seed_bg(bw - 1, ly);
+        }
+        while let Some((lx, ly)) = q.pop_front() {
+            let nbs = [
+                (lx + 1 < bw).then(|| (lx + 1, ly)),
+                (lx > 0).then(|| (lx - 1, ly)),
+                (ly + 1 < bh).then(|| (lx, ly + 1)),
+                (ly > 0).then(|| (lx, ly - 1)),
+            ];
+            for (nx, ny) in nbs.into_iter().flatten() {
+                let li = ny * bw + nx;
+                let gi = (by0 + ny) * self.w + (bx0 + nx);
+                if outside[li] == 0 && self.mask[gi] == 0 {
+                    outside[li] = 1;
+                    q.push_back((nx, ny));
+                }
+            }
+        }
+        for ly in 0..bh {
+            for lx in 0..bw {
+                if outside[ly * bw + lx] == 0 {
+                    self.mask[(by0 + ly) * self.w + (bx0 + lx)] = 1;
+                }
+            }
+        }
+    }
+
+    /// Sweeps along the segment from the last stamp to `p`, adding (or erasing when `Alt` is held)
+    /// contiguous regions in both Flood fill (Quick Selection) and Smart brush modes.
+    fn stroke_to(&mut self, p: [f64; 2], erase: bool) {
+        let step = if self.flood { (self.ds * 8.0).max(1.0) } else { (self.radius * 0.5).max(self.ds) };
         let (a, d) = (self.last, (p[0] - self.last[0]).hypot(p[1] - self.last[1]));
         if d < step {
             return;
@@ -146,25 +380,50 @@ impl Wand {
         let n = (d / step).ceil() as usize;
         for k in 1..=n {
             let t = k as f64 / n as f64;
-            self.stamp([a[0] + t * (p[0] - a[0]), a[1] + t * (p[1] - a[1])]);
+            self.stamp([a[0] + t * (p[0] - a[0]), a[1] + t * (p[1] - a[1])], erase);
         }
         self.refresh_overlay();
     }
 
-    /// The painted part as an image over the canvas.
+    /// Selection preview: calm 24% translucent interior tint + crisp bright 1 px perimeter contour.
     fn refresh_overlay(&mut self) {
         let Some((bx0, by0, bx1, by1)) = self.bbox else { return };
         let (bw, bh) = (bx1 - bx0, by1 - by0);
-        let mut crop = Vec::with_capacity(bw * bh);
-        for y in by0..by1 {
-            crop.extend(self.mask[y * self.w + bx0..y * self.w + bx1].iter().map(|&v| v as f32));
+        let [r, g, b] = self.color;
+        // Brighten the perimeter color slightly toward white so it pops cleanly on dark fluorescence
+        let er = ((r as u16 + 255) / 2) as u8;
+        let eg = ((g as u16 + 255) / 2) as u8;
+        let eb = ((b as u16 + 255) / 2) as u8;
+        let mut out = vec![0u8; bw * bh * 4];
+        for ly in 0..bh {
+            let gy = by0 + ly;
+            for lx in 0..bw {
+                let gx = bx0 + lx;
+                if self.mask[gy * self.w + gx] == 0 {
+                    continue;
+                }
+                let is_edge = lx == 0
+                    || ly == 0
+                    || lx + 1 == bw
+                    || ly + 1 == bh
+                    || self.mask[gy * self.w + (gx - 1)] == 0
+                    || self.mask[gy * self.w + (gx + 1)] == 0
+                    || self.mask[(gy - 1) * self.w + gx] == 0
+                    || self.mask[(gy + 1) * self.w + gx] == 0;
+                let dst = (ly * bw + lx) * 4;
+                if is_edge {
+                    out[dst..dst + 4].copy_from_slice(&[eb, eg, er, 235]);
+                } else {
+                    out[dst..dst + 4].copy_from_slice(&[b, g, r, 62]);
+                }
+            }
         }
-        let img = lucem_view::render_layer(&crop, bw, bh, lucem_view::LayerStyle::Mask { color: self.color, alpha: 0.5 });
+        let img = lucem_view::bgra_image(bw, bh, out);
         let ds = self.ds;
         self.overlay = Some(([(self.x0 + bx0) as f64 * ds, (self.y0 + by0) as f64 * ds, bw as f64 * ds, bh as f64 * ds], img));
     }
 
-    /// The painted regions as level-0 polygons.
+    /// The painted regions as level-0 polygons (with optional 1 px morphological edge refine).
     fn polygons(&self) -> Vec<Vec<[f64; 2]>> {
         let Some((bx0, by0, bx1, by1)) = self.bbox else { return Vec::new() };
         let (bw, bh) = (bx1 - bx0, by1 - by0);
@@ -172,7 +431,8 @@ impl Wand {
         for y in by0..by1 {
             crop.extend_from_slice(&self.mask[y * self.w + bx0..y * self.w + bx1]);
         }
-        geometry::mask_to_polygons(&crop, bw, bh, 4)
+        let refined = if self.snap_edges && bw >= 4 && bh >= 4 { morph_close_1px(&crop, bw, bh) } else { crop };
+        geometry::mask_to_polygons(&refined, bw, bh, 4)
             .into_iter()
             .map(|p| geometry::simplify(&p, 0.6).into_iter().map(|[x, y]| [(x + (self.x0 + bx0) as f64) * self.ds, (y + (self.y0 + by0) as f64) * self.ds]).collect())
             .collect()
@@ -309,6 +569,9 @@ pub struct ImageCanvas {
     live: Option<([f64; 4], Arc<RenderImage>)>,
     /// Outlines of selected brush strokes (traced from their paint), by id and version.
     outlines: std::cell::RefCell<HashMap<String, Vec<Vec<[f64; 2]>>>>,
+    /// The last region whose raw tiles were read for channels drawn from results
+    /// (`level, x0, y0, w, h, plane, channels`), so the readout, probe and wand have their values.
+    prefetched: Option<(usize, usize, usize, usize, usize, usize, Vec<usize>)>,
     /// An image shown whatever is selected (`None`: the selected image).
     pub pinned: Option<String>,
     /// Only this channel is drawn (a cell of the Channels view).
@@ -397,6 +660,7 @@ impl ImageCanvas {
             paint_task: None,
             live: None,
             outlines: Default::default(),
+            prefetched: None,
             pinned: None,
             channel: None,
             compact: false,
@@ -572,12 +836,16 @@ impl ImageCanvas {
         if !self.syncing {
             cx.emit(CanvasEvent::Camera { zoom: self.zoom, center: self.center });
         }
-        if self.results_source {
-            self.refresh = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(200)).await;
-                let _ = this.update(cx, |c, cx| c.request_results(cx));
-            }));
-        }
+        let results = self.results_source;
+        self.refresh = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(200)).await;
+            let _ = this.update(cx, |c, cx| {
+                if results {
+                    c.request_results(cx);
+                }
+                c.prefetch_raw(cx);
+            });
+        }));
     }
 
     /// The Threshold tool's mask over the visible region, recomputed (off the UI thread) when
@@ -641,15 +909,15 @@ impl ImageCanvas {
         };
         let s = self.store.read(cx);
         let ov = self.overlays.unwrap_or_else(|| s.tool.overlays());
-        let cells: Vec<lucem_hist::HistObject> = if s.hist.show && ov.annotations { s.hist.cells.get(&v.image).into_iter().chain(s.hist.tiles.get(&v.image)).flatten().cloned().collect() } else { Vec::new() };
-        let key = format!("{}/{}/{}/{}", v.image, s.hist.rev, ov.opacity, s.sel.objects.join(","));
-        // Selected objects, by their index in the list drawn (cells, then tiles)
-        let n_cells = s.hist.cells.get(&v.image).map_or(0, Vec::len);
-        let selected: std::collections::HashSet<usize> = cells.iter().enumerate().filter(|(i, o)| s.sel.objects.contains(&format!("{}{}", if *i < n_cells { "c" } else { "t" }, o.id))).map(|(i, _)| i).collect();
+        let show_any = s.hist.show && ov.annotations;
+        let n_cells = if show_any { s.hist.cell_count(&v.image) } else { 0 };
+        let n_tiles = if show_any { s.hist.tile_count(&v.image) } else { 0 };
+        let key = format!("{}/{}/{}/{}/{}/{}", v.image, s.hist.rev, n_cells, n_tiles, ov.opacity, s.sel.objects.join(","));
         let (iw, ih) = (v.pyramid.width() as f64, v.pyramid.height() as f64);
         let view = self.visible();
         let ds_view = 1.0 / self.zoom.max(1e-9);
         let (vx0, vy0, vx1, vy1) = (view[0].max(0.0), view[1].max(0.0), (view[0] + view[2]).min(iw), (view[1] + view[3]).min(ih));
+        // Fast path BEFORE touching or cloning any HistObject: zero allocations on steady frames
         if let Some(p) = &self.cells {
             let covers = p.image.is_none() || (p.rect[0] <= vx0 && p.rect[1] <= vy0 && p.rect[0] + p.rect[2] >= vx1 && p.rect[1] + p.rect[3] >= vy1);
             let ratio = p.ds / ds_view;
@@ -668,6 +936,73 @@ impl ImageCanvas {
             return;
         }
         self.cells_want = want;
+        if n_cells == 0 && n_tiles == 0 {
+            if let Some(old) = self.cells.replace(PaintLayer { rect, ds, key, image: None }).and_then(|p| p.image) {
+                self.drops.push(old);
+            }
+            return;
+        }
+        // Server-side viewport rasterization (QuPath / Cytomine pattern): when connected to
+        // `lucem serve` on wasm32, ask the native server to rasterize the visible viewport into a
+        // ~20 KB PNG instead of doing polygon math on the single-threaded WASM main thread.
+        #[cfg(target_family = "wasm")]
+        if s.hist.remote_cells.get(&v.image).copied().unwrap_or(0) > 0 || s.hist.remote_tiles.get(&v.image).copied().unwrap_or(0) > 0 {
+            let served = v
+                .pyramid
+                .path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .and_then(|p| lucem_stream::split_remote(&p).map(|(_, s)| s.to_string()));
+            if let (Some(link), Some(path)) = (crate::data::remote::page_link(), served) {
+                let alpha = ov.opacity;
+                let selected = s.sel.objects.clone();
+                self.cells_task = Some(cx.spawn(async move |this, cx| {
+                    let image = crate::data::hist::server_cells_raster(&link, &path, rect, ds, alpha, selected).await;
+                    let _ = this.update(cx, |c, cx| {
+                        if let Some(old) = c.cells.replace(PaintLayer { rect, ds, key, image }).and_then(|p| p.image) {
+                            c.drops.push(old);
+                        }
+                        cx.notify();
+                    });
+                }));
+                return;
+            }
+        }
+        // Viewport-cull BEFORE cloning so 100k+ detected cells never OOM or stall the UI thread
+        const MAX_RASTER_CELLS: usize = 25_000;
+        let sel_set: std::collections::HashSet<&str> = s.sel.objects.iter().map(String::as_str).collect();
+        let mut visible_indices: Vec<(bool, usize)> = Vec::new();
+        if let Some(list) = s.hist.cells.get(&v.image) {
+            for (i, o) in list.iter().enumerate() {
+                let (bx0, by0, bx1, by1) = lucem_hist::polygon::bounds(&o.roi);
+                if bx1 >= x0 && by1 >= y0 && bx0 <= x1 && by0 <= y1 {
+                    visible_indices.push((true, i));
+                }
+            }
+        }
+        if let Some(list) = s.hist.tiles.get(&v.image) {
+            for (i, o) in list.iter().enumerate() {
+                let (bx0, by0, bx1, by1) = lucem_hist::polygon::bounds(&o.roi);
+                if bx1 >= x0 && by1 >= y0 && bx0 <= x1 && by0 <= y1 {
+                    visible_indices.push((false, i));
+                }
+            }
+        }
+        let stride = (visible_indices.len() / MAX_RASTER_CELLS).max(1);
+        let mut cells: Vec<lucem_hist::HistObject> = Vec::with_capacity(visible_indices.len().min(MAX_RASTER_CELLS));
+        let mut selected: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let raw_cells = s.hist.cells.get(&v.image);
+        let raw_tiles = s.hist.tiles.get(&v.image);
+        for (is_cell, idx) in visible_indices.into_iter().step_by(stride) {
+            let obj = if is_cell { raw_cells.and_then(|v| v.get(idx)) } else { raw_tiles.and_then(|v| v.get(idx)) };
+            if let Some(o) = obj {
+                let tag = format!("{}{}", if is_cell { "c" } else { "t" }, o.id);
+                if sel_set.contains(tag.as_str()) {
+                    selected.insert(cells.len());
+                }
+                cells.push(o.clone());
+            }
+        }
         if cells.is_empty() {
             if let Some(old) = self.cells.replace(PaintLayer { rect, ds, key, image: None }).and_then(|p| p.image) {
                 self.drops.push(old);
@@ -834,38 +1169,46 @@ impl ImageCanvas {
         self.store.update(cx, |s, cx| s.segment(job, through, cx));
     }
 
-    /// Starts a wand stroke at `p`: reads the visible region of the visible channels.
+    /// Starts a wand stroke at `p`: reads the visible region of the visible channels from cache
+    /// (falling back to cached coarser LOD tiles so it never blocks the UI thread on wasm32).
     fn start_wand(&mut self, p: [f64; 2], cx: &mut Context<Self>) -> Option<Wand> {
+        let shown = self.shown_channels(cx);
+        let (level, x0, y0, w, h, plane) = self.wand_region()?;
         let v = self.viewer.as_ref()?;
-        let py = v.pyramid.clone();
-        let level = py.level_for_zoom(self.zoom * self.scale as f64);
-        let l = py.levels[level].clone();
-        let ds = l.downsample;
-        let rect = self.visible();
-        let x0 = (rect[0] / ds).floor().max(0.0) as usize;
-        let y0 = (rect[1] / ds).floor().max(0.0) as usize;
-        let x1 = (((rect[0] + rect[2]) / ds).ceil().max(0.0) as usize).min(l.width);
-        let y1 = (((rect[1] + rect[3]) / ds).ceil().max(0.0) as usize).min(l.height);
-        if x1 <= x0 || y1 <= y0 {
-            return None;
-        }
-        let (w, h) = (x1 - x0, y1 - y0);
-        let plane = self.plane_at(level);
+        let ds = v.pyramid.levels[level].downsample;
         let mut channels = Vec::new();
-        for (c, d) in v.display_docs.iter().enumerate().filter(|(_, d)| d.visible) {
-            let mut raw = v.service.read_region(level, plane, c, x0, y0, w, h).ok()?;
+        for (c, d) in v.display_docs.iter().enumerate().filter(|(c, _)| shown.contains(c)) {
+            let cached = v.service.read_region_cached(level, plane, c, x0, y0, w, h);
+            #[cfg(not(target_family = "wasm"))]
+            let mut raw = match cached {
+                Some(buf) => buf,
+                None => v.service.read_region(level, plane, c, x0, y0, w, h).ok()?,
+            };
+            #[cfg(target_family = "wasm")]
+            let Some(mut raw) = cached else {
+                continue;
+            };
             let span = (d.max - d.min).max(1e-12);
             raw.iter_mut().for_each(|x| *x = ((*x - d.min) / span).clamp(0.0, 1.0));
-            channels.push(raw);
+            let smooth_r = self.store.read(cx).tool.wand_smooth.round().max(0.0) as usize;
+            let smoothed = if smooth_r > 0 { box_blur_f32(&raw, w, h, smooth_r) } else { raw };
+            channels.push(smoothed);
         }
         if channels.is_empty() {
+            self.prefetch_raw(cx);
+            self.store.update(cx, |s, cx| {
+                s.set_status("Wand: loading the pixels of this view; click again in a moment.", cx);
+            });
             return None;
         }
         let s = self.store.read(cx);
         let color = s.doc.class(&s.tool.class).map_or([255, 255, 255], |c| c.color);
-        let mut wand = Wand { level, ds, x0, y0, w, h, channels, mask: vec![0; w * h], bbox: None, radius: self.brush_radius(cx), last: p, tolerance: s.tool.wand_tolerance, color, overlay: None };
+        let flood = s.tool.wand_flood;
+        let snap_edges = s.tool.wand_snap_edges;
+        let grad = sobel_gradient_map(&channels, w, h);
+        let mut wand = Wand { level, ds, x0, y0, w, h, channels, grad, mask: vec![0; w * h], bbox: None, radius: self.brush_radius(cx), flood, snap_edges, last: p, tolerance: s.tool.wand_tolerance, color, overlay: None };
         let _ = wand.level;
-        wand.stamp(p);
+        wand.stamp(p, false);
         wand.refresh_overlay();
         Some(wand)
     }
@@ -1111,7 +1454,87 @@ impl ImageCanvas {
         }
         let level = v.pyramid.level_for_zoom(self.zoom * self.scale as f64);
         let ds = v.pyramid.levels[level].downsample;
-        Some((p, level, v.service.sample(level, self.plane_at(level), (p[0] / ds) as usize, (p[1] / ds) as usize)))
+        let mut vals = v.service.sample(level, self.plane_at(level), (p[0] / ds) as usize, (p[1] / ds) as usize);
+        // Not cached at this level yet (or drawn from results): the nearest coarser level that is
+        for l2 in (level + 1)..v.pyramid.levels.len() {
+            if vals.iter().all(Option::is_some) {
+                break;
+            }
+            let d2 = v.pyramid.levels[l2].downsample;
+            let more = v.service.sample(l2, self.plane_at(l2), (p[0] / d2) as usize, (p[1] / d2) as usize);
+            for (a, b) in vals.iter_mut().zip(more) {
+                if a.is_none() {
+                    *a = b;
+                }
+            }
+        }
+        Some((p, level, vals))
+    }
+
+    /// The channels the user shows (processed ones included), or the cell's one channel.
+    fn shown_channels(&self, cx: &App) -> Vec<usize> {
+        let Some(v) = self.viewer.as_ref() else { return Vec::new() };
+        if let Some(only) = self.channel {
+            return vec![only];
+        }
+        self.store.read(cx).doc.image(&v.image).map(|i| i.channels.iter().enumerate().filter(|(_, d)| d.visible).map(|(c, _)| c).collect()).unwrap_or_default()
+    }
+
+    /// The region the wand works on: `level, x0, y0, w, h, plane`, at most 1024 px a side.
+    fn wand_region(&self) -> Option<(usize, usize, usize, usize, usize, usize)> {
+        let py = &self.viewer.as_ref()?.pyramid;
+        let rect = self.visible();
+        let mut level = py.level_for_zoom(self.zoom * self.scale as f64);
+        while level < py.coarsest() && ((rect[2] / py.levels[level].downsample) as usize).max((rect[3] / py.levels[level].downsample) as usize) > 1024 {
+            level += 1;
+        }
+        let l = &py.levels[level];
+        let ds = l.downsample;
+        let x0 = (rect[0] / ds).floor().max(0.0) as usize;
+        let y0 = (rect[1] / ds).floor().max(0.0) as usize;
+        let x1 = (((rect[0] + rect[2]) / ds).ceil().max(0.0) as usize).min(l.width);
+        let y1 = (((rect[1] + rect[3]) / ds).ceil().max(0.0) as usize).min(l.height);
+        (x1 > x0 && y1 > y0).then(|| (level, x0, y0, x1 - x0, y1 - y0, self.plane_at(level)))
+    }
+
+    /// Reads (in the background) the raw tiles of shown channels the tile service does not draw
+    /// (those drawn from their results), or ALL channels when Pixel Probe is active, so the
+    /// readout, probe HUD and wand always have real pixel values.
+    fn prefetch_raw(&mut self, cx: &mut Context<Self>) {
+        let probe_active = self.tool(cx) == Tool::Probe;
+        let chans: Vec<usize> = {
+            let Some(v) = self.viewer.as_ref() else { return };
+            if probe_active {
+                (0..v.pyramid.channels.len()).collect()
+            } else {
+                self.shown_channels(cx).into_iter().filter(|c| !v.display_docs.get(*c).is_some_and(|d| d.visible)).collect()
+            }
+        };
+        if chans.is_empty() {
+            return;
+        }
+        let Some((level, x0, y0, w, h, plane)) = self.wand_region() else { return };
+        let key = (level, x0, y0, w, h, plane, chans.clone());
+        if self.prefetched.as_ref() == Some(&key) {
+            return;
+        }
+        self.prefetched = Some(key);
+        let Some(v) = self.viewer.as_ref() else { return };
+        let reader = v.service.region_reader();
+        let coarsest = v.pyramid.coarsest();
+        let (cw, ch) = (v.pyramid.levels[coarsest].width, v.pyramid.levels[coarsest].height);
+        let cplane = self.plane_at(coarsest);
+        let task = cx.background_spawn(async move {
+            for &c in &chans {
+                let _ = reader.read_region(coarsest, cplane, c, 0, 0, cw, ch);
+                let _ = reader.read_region(level, plane, c, x0, y0, w, h);
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            task.await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
     }
 
     // ------------------------------------------------------------------------
@@ -1192,12 +1615,27 @@ impl ImageCanvas {
         match tool {
             Tool::Zoom => self.zoom_at(if e.modifiers.alt { 0.5 } else { 2.0 }, Some(local), cx),
             Tool::Probe => {
-                // The 3D cursor to the pixel clicked (the other views follow)
+                // Move 3D cursor to the clicked pixel and copy the multi-channel readout to clipboard
                 if let Some(id) = self.viewer.as_ref().map(|v| v.image.clone()) {
                     let at = [self.z, p[1].max(0.0) as usize, p[0].max(0.0) as usize];
                     self.store.update(cx, |s, cx| s.set_cursor_of(&id, at, cx));
                 }
-                self.gesture = Some(Gesture::Pan { mouse: local, center: self.center });
+                if let Some((pt, _, vals)) = self.readout() {
+                    let s = self.store.read(cx);
+                    let names: Vec<String> = s.doc.active().map(|i| i.channels.iter().map(|c| c.label.clone()).collect()).unwrap_or_default();
+                    let summary: String = names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, n)| match vals.get(i).copied().flatten() {
+                            Some(v) => format!("{n}={v:.1}"),
+                            None => format!("{n}=—"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    let line = format!("({:.1}, {:.1})  {summary}", pt[0], pt[1]);
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(line.clone()));
+                    self.store.update(cx, |s, cx| s.set_status(format!("Probe copied: {line}"), cx));
+                }
             }
             Tool::Select => {
                 match self.hit(p, cx) {
@@ -1238,8 +1676,14 @@ impl ImageCanvas {
             Tool::Rect | Tool::Ellipse | Tool::Ruler | Tool::Segment | Tool::Marquee => self.gesture = Some(Gesture::Drag { tool, a: p, b: p }),
             Tool::Lasso => self.gesture = Some(Gesture::Path { tool, points: vec![p], radius: 0.0 }),
             Tool::Brush | Tool::Eraser => {
+                // Holding Alt flips Brush <-> Eraser on the fly (Photoshop/Affinity workflow)
+                let active_tool = if e.modifiers.alt {
+                    if tool == Tool::Brush { Tool::Eraser } else { Tool::Brush }
+                } else {
+                    tool
+                };
                 let radius = self.brush_radius(cx);
-                self.gesture = Some(Gesture::Path { tool, points: vec![p], radius });
+                self.gesture = Some(Gesture::Path { tool: active_tool, points: vec![p], radius });
                 self.refresh_live(cx);
             }
             Tool::Wand => {
@@ -1304,7 +1748,7 @@ impl ImageCanvas {
             }
             Some(Gesture::Wand(w)) => {
                 let old = w.overlay.as_ref().map(|o| o.1.clone());
-                w.stroke_to(p);
+                w.stroke_to(p, e.modifiers.alt);
                 if let (Some(o), Some(n)) = (old, w.overlay.as_ref())
                     && !Arc::ptr_eq(&o, &n.1) {
                         self.drops.push(o);
@@ -1818,6 +2262,9 @@ impl Render for ImageCanvas {
         self.sync_threshold(cx);
         self.sync_paint(cx);
         self.sync_cells(cx);
+        if self.tool(cx) == Tool::Probe {
+            self.prefetch_raw(cx);
+        }
         let s = self.store.read(cx);
         let mut tool = s.tool.clone();
         if let Some(o) = self.overlays {
@@ -1825,10 +2272,18 @@ impl Render for ImageCanvas {
         }
         let image = self.viewer.as_ref().map(|v| v.image.clone());
         let um = self.viewer.as_ref().and_then(|v| v.pyramid.pixel_size_um);
-        // Result layers of the shown image
+        // Result layers of the shown image (in a single-channel cell of the Channels multiview,
+        // only draw the processed result belonging to that channel so DAPI never bleeds onto FITC/CY3/etc.)
         let mut overlays: Vec<([f64; 4], Arc<RenderImage>)> = Vec::new();
         if tool.show_results {
+            let processed_map = image.as_ref().map(|id| s.processed_channels(id)).unwrap_or_default();
             for n in s.doc.graph.views() {
+                if let Some(only_ch) = self.channel {
+                    let belongs_to_ch = processed_map.get(&only_ch).is_some_and(|vid| vid == &n.id);
+                    if !belongs_to_ch {
+                        continue;
+                    }
+                }
                 let visible = matches!(&n.kind, crate::domain::graph::NodeKind::View { style, .. } if style.visible);
                 if let Some(r) = s.results.get(&n.id).filter(|r| visible && Some(&r.image) == image.as_ref())
                     && let Some(l) = &r.layer {
@@ -1859,16 +2314,17 @@ impl Render for ImageCanvas {
         if let Some(t) = &self.threshold {
             overlays.push((t.0, t.1.clone()));
         }
-        if let Some(Gesture::Wand(w)) = &self.gesture
-            && let Some(o) = &w.overlay {
-                overlays.push((o.0, o.1.clone()));
-            }
+        let wand_overlay = match &self.gesture {
+            Some(Gesture::Wand(w)) => w.overlay.clone(),
+            _ => None,
+        };
         let strokes = self.annotation_paths(cx);
         let labels = self.labels(cx);
         let (zoom, center) = (self.zoom, self.center);
         let (vw, vh) = self.view_size();
-        // The brush outline at true size
-        let brush = match (tool.tool.uses_brush(), self.mouse, &self.gesture) {
+        // The brush outline at true size (hidden in Wand flood-fill mode)
+        let show_brush_ring = tool.tool.uses_brush() && !(tool.tool == Tool::Wand && tool.wand_flood);
+        let brush = match (show_brush_ring, self.mouse, &self.gesture) {
             (true, Some(m), None | Some(Gesture::Path { .. })) => Some((m, (self.brush_radius(cx) * zoom) as f32)),
             _ => None,
         };
@@ -1923,6 +2379,13 @@ impl Render for ImageCanvas {
                     for st in &strokes {
                         paint_stroke(window, o, st);
                     }
+                    // Outermost layer: active Magic Wand stroke paints above all channels, results, and annotations
+                    if let Some((r, img)) = wand_overlay {
+                        let sx = ((r[0] - center.0) * zoom + vw as f64 / 2.0) as f32;
+                        let sy = ((r[1] - center.1) * zoom + vh as f64 / 2.0) as f32;
+                        let b = Bounds { origin: point(o.x + px(sx), o.y + px(sy)), size: size(px((r[2] * zoom) as f32), px((r[3] * zoom) as f32)) };
+                        let _ = window.paint_image(bounds, b, Corners::default(), img, 0, false);
+                    }
                     if let Some((cx_, cy_)) = crosshair {
                         let (bw, bh) = (bounds.size.width, bounds.size.height);
                         window.paint_quad(fill(Bounds { origin: point(o.x + px(cx_), o.y), size: size(px(1.), bh) }, theme::rgb8([235, 92, 92]).opacity(0.85)));
@@ -1967,6 +2430,68 @@ impl Render for ImageCanvas {
                 .child(div().text_xs().text_color(gpui_kit::white()).child(bar_label))
                 .child(div().w(px(bar_px)).h(px(3.)).bg(gpui_kit::white()))
         });
+        let probe_hud = (tool.tool == Tool::Probe)
+            .then(|| {
+                let (pt, _, vals) = self.readout()?;
+                let img_doc = s.doc.active()?;
+                let coord_str = match um {
+                    Some(u) => format!("x {:.1}  y {:.1} µm  ({:.0}, {:.0} px)", pt[0] * u, pt[1] * u, pt[0], pt[1]),
+                    None => format!("x {:.0}  y {:.0} px", pt[0], pt[1]),
+                };
+                let rows: Vec<gpui_kit::AnyElement> = img_doc
+                    .channels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ch)| {
+                        let val = vals.get(i).copied().flatten();
+                        let frac = val
+                            .map(|v| ((v - ch.min) / (ch.max - ch.min).max(1e-6)).clamp(0.0, 1.0))
+                            .unwrap_or(0.0);
+                        let val_str = val.map_or_else(|| "…".to_string(), |v| format!("{v:.1}"));
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(div().flex_none().size(px(8.)).rounded_full().bg(theme::rgb8(ch.color)))
+                            .child(div().w(px(72.)).truncate().text_xs().text_color(color::text()).child(ch.label.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(4.))
+                                    .rounded(px(2.))
+                                    .bg(color::control())
+                                    .overflow_hidden()
+                                    .child(div().h_full().w(gpui_kit::relative(frac)).bg(theme::rgb8(ch.color))),
+                            )
+                            .child(div().w(px(46.)).text_right().text_xs().font_family("monospace").text_color(color::text_muted()).child(val_str))
+                            .into_any_element()
+                    })
+                    .collect();
+                Some(
+                    v_flex()
+                        .absolute()
+                        .top(px(12.))
+                        .left(px(12.))
+                        .w(px(236.))
+                        .p(px(10.))
+                        .gap(px(5.))
+                        .rounded(px(10.))
+                        .bg(color::panel().opacity(0.94))
+                        .border_1()
+                        .border_color(color::border())
+                        .shadow_md()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(color::text()).child("Pixel Probe"))
+                                .child(div().text_size(px(10.)).text_color(color::text_muted()).child("Click to copy")),
+                        )
+                        .child(div().text_size(px(10.)).font_family("monospace").text_color(color::text_muted()).child(coord_str))
+                        .children(rows),
+                )
+            })
+            .flatten();
+
         let plane_el = div()
             .id("image-plane")
             .relative()
@@ -1989,7 +2514,8 @@ impl Render for ImageCanvas {
             .child(plane)
             .children(label_elems)
             .children(empty)
-            .children(scale_bar);
+            .children(scale_bar)
+            .children(probe_hud);
 
         // Rulers
         let rulers = tool.rulers && image.is_some();

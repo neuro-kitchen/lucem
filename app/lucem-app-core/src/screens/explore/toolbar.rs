@@ -197,39 +197,100 @@ pub fn options_bar(store: &Entity<Store>, canvas: &Entity<ImageCanvas>, scrub: &
     };
     match t.tool {
         Tool::Brush | Tool::Eraser | Tool::Wand => {
-            let st = store.clone();
-            bar = bar.child(class_picker()).child(divider_v()).child(brush_size()).child(Checkbox::new("brush-in-image").checked(t.brush_in_image).label("Fixed on the image").on_click(move |on: &bool, _, cx| {
-                let on = *on;
-                st.update(cx, |s, cx| {
-                    s.update_tool(
-                        |t| {
-                            if on {
-                                t.brush_image_px = t.brush_px as f64 / zoom;
-                            }
-                            t.brush_in_image = on;
-                        },
-                        cx,
-                    )
-                });
-            }));
+            bar = bar.child(class_picker());
             if t.tool == Tool::Wand {
+                let (st_f1, st_f2) = (store.clone(), store.clone());
+                bar = bar
+                    .child(divider_v())
+                    .child(
+                        h_flex()
+                            .gap(px(2.))
+                            .p(px(2.))
+                            .rounded(px(6.))
+                            .bg(color::control())
+                            .child(
+                                Button::new("wand-mode-flood")
+                                    .ghost()
+                                    .xsmall()
+                                    .selected(t.wand_flood)
+                                    .label("Flood fill")
+                                    .tooltip("Click to select a whole contiguous region (QuPath / Photoshop Magic Wand)")
+                                    .on_click(move |_, _, cx| st_f1.update(cx, |s, cx| s.update_tool(|t| t.wand_flood = true, cx))),
+                            )
+                            .child(
+                                Button::new("wand-mode-brush")
+                                    .ghost()
+                                    .xsmall()
+                                    .selected(!t.wand_flood)
+                                    .label("Smart brush")
+                                    .tooltip("Drag to paint intensity-snapping strokes inside the brush circle")
+                                    .on_click(move |_, _, cx| st_f2.update(cx, |s, cx| s.update_tool(|t| t.wand_flood = false, cx))),
+                            ),
+                    );
+                if !t.wand_flood {
+                    bar = bar.child(divider_v()).child(brush_size());
+                }
                 let (st_step, st_set) = (store.clone(), store.clone());
-                bar = bar.child(divider_v()).child(label("Tolerance")).child(scrub_number(
-                    scrub,
-                    "wand-tol",
-                    format!("{:.0} %", t.wand_tolerance * 100.0),
-                    format!("{:.0}", t.wand_tolerance * 100.0),
-                    "Drag to scrub · Click to type (%) · Fills pixels like the centre",
-                    move |d, _, cx| st_step.update(cx, |s, cx| s.update_tool(|t| t.wand_tolerance = (t.wand_tolerance + d * 0.05).clamp(0.01, 1.0), cx)),
-                    move |v, _, cx| st_set.update(cx, |s, cx| s.update_tool(|t| t.wand_tolerance = (v as f32 / 100.0).clamp(0.01, 1.0), cx)),
-                    cx,
-                ));
-            } else if t.tool == Tool::Brush {
+                let (st_sm1, st_sm2) = (store.clone(), store.clone());
+                bar = bar
+                    .child(divider_v())
+                    .child(label("Tolerance"))
+                    .child(scrub_number(
+                        scrub,
+                        "wand-tol",
+                        format!("{:.0} %", t.wand_tolerance * 100.0),
+                        format!("{:.0}", t.wand_tolerance * 100.0),
+                        "Drag to scrub · Click to type (%) · Intensity tolerance around clicked seed",
+                        move |d, _, cx| st_step.update(cx, |s, cx| s.update_tool(|t| t.wand_tolerance = (t.wand_tolerance + d * 0.05).clamp(0.01, 1.0), cx)),
+                        move |v, _, cx| st_set.update(cx, |s, cx| s.update_tool(|t| t.wand_tolerance = (v as f32 / 100.0).clamp(0.01, 1.0), cx)),
+                        cx,
+                    ))
+                    .child(label("Smooth"))
+                    .child(scrub_number(
+                        scrub,
+                        "wand-smooth",
+                        format!("{:.0} px", t.wand_smooth),
+                        format!("{:.0}", t.wand_smooth),
+                        "Pre-smoothing radius (px) to eliminate speckled fluorescence holes",
+                        move |d, _, cx| st_sm1.update(cx, |s, cx| s.update_tool(|t| t.wand_smooth = (t.wand_smooth + d).clamp(0.0, 8.0), cx)),
+                        move |v, _, cx| st_sm2.update(cx, |s, cx| s.update_tool(|t| t.wand_smooth = (v as f32).clamp(0.0, 8.0), cx)),
+                        cx,
+                    ))
+                    .child(divider_v())
+                    .child({
+                        let st_snap = store.clone();
+                        Checkbox::new("wand-snap-edges")
+                            .checked(t.wand_snap_edges)
+                            .label("Snap to edges")
+                            .tooltip("Stop selection at sharp contrast edges (Affinity / Photoshop Quick Selection). Hold Alt to erase.")
+                            .on_click(move |on: &bool, _, cx| {
+                                let on = *on;
+                                st_snap.update(cx, |s, cx| s.update_tool(|t| t.wand_snap_edges = on, cx));
+                            })
+                    });
+            } else {
                 let st = store.clone();
-                bar = bar.child(Checkbox::new("brush-fill").checked(t.brush_fill).label("Fill when closed").on_click(move |on: &bool, _, cx| {
+                bar = bar.child(divider_v()).child(brush_size()).child(Checkbox::new("brush-in-image").checked(t.brush_in_image).label("Fixed on the image").on_click(move |on: &bool, _, cx| {
                     let on = *on;
-                    st.update(cx, |s, cx| s.update_tool(|t| t.brush_fill = on, cx));
+                    st.update(cx, |s, cx| {
+                        s.update_tool(
+                            |t| {
+                                if on {
+                                    t.brush_image_px = t.brush_px as f64 / zoom;
+                                }
+                                t.brush_in_image = on;
+                            },
+                            cx,
+                        )
+                    });
                 }));
+                if t.tool == Tool::Brush {
+                    let st = store.clone();
+                    bar = bar.child(Checkbox::new("brush-fill").checked(t.brush_fill).label("Fill when closed").on_click(move |on: &bool, _, cx| {
+                        let on = *on;
+                        st.update(cx, |s, cx| s.update_tool(|t| t.brush_fill = on, cx));
+                    }));
+                }
             }
         }
         Tool::Threshold => {

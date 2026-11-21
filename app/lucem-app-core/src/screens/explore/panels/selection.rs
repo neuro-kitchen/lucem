@@ -96,7 +96,7 @@ pub fn summary(store: &Entity<Store>, cx: &App) -> AnyElement {
     }
     let chosen: Vec<Annotation> = s.doc.annotations.iter().filter(|a| s.sel.shapes.contains(&a.id)).cloned().collect();
     let hier = s.hierarchy(&img);
-    let cells = s.hist.cells.get(&img).cloned().unwrap_or_default();
+    let cells: &[lucem_hist::HistObject] = s.hist.cells.get(&img).map_or(&[], Vec::as_slice);
     // The cells a region holds (with the regions inside it), by class
     let cells_by_class = |id: &str| -> BTreeMap<String, usize> {
         let sub = hier.subtree(id);

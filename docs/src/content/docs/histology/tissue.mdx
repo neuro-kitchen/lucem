@@ -1,0 +1,41 @@
+---
+title: Find tissue
+description: The tissue of a slide as regions, found at a coarse level.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+**Find tissue** looks at a coarse level of the whole image (at most 4,096 pixels across) and
+keeps what differs from the background: on brightfield slides, the stained areas against the
+bright glass; on fluorescence, the signal against the dark. The regions become shapes of class
+**Tissue**, undoable as one change.
+
+![Automatic tissue segmentation outline in Lucem](/lucem/screenshots/05_tooling_tissue-seg.png)
+
+Later steps can look in the tissue instead of a region you draw: a recorded session run on other
+images does so.
+
+<Tabs syncKey="language">
+  <TabItem label="Command line">
+    ```sh
+    lucem hist tissue slide.ome.zarr --out tissue.geojson           # brightfield
+    lucem hist tissue slide.ome.zarr --fluorescence --out tissue.geojson
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import lucem
+
+    img = lucem.io.open("slide.ome.zarr")
+    regions = lucem.hist.find_tissue(img, fluorescence=True)
+    print(f"Found {len(regions)} tissue region(s)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let regions = lucem_hist::tissue::find(&client, &pyramid, 0, &params)?;
+    ```
+  </TabItem>
+</Tabs>

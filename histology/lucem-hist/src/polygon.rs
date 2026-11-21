@@ -1,7 +1,5 @@
 //! Outlines: area, perimeter, centroid, point inside, and labels traced into outlines.
 
-use std::collections::HashMap;
-
 use crate::objects::{Point, Polygon};
 
 /// Signed area (positive when counter-clockwise in a y-down image: clockwise on screen).
@@ -68,58 +66,95 @@ pub fn bounds(p: &[Point]) -> (f64, f64, f64, f64) {
 /// edge; edges chain into loops and the largest loop of a label is its outline (holes are left
 /// out). Points along straight runs are dropped.
 pub fn trace_labels(labels: &[u32], w: usize, h: usize, origin: Point, ds: f64) -> Vec<(u32, Polygon)> {
-    type Edges = HashMap<(i32, i32), Vec<(i32, i32)>>;
+    let max_l = labels.iter().copied().max().unwrap_or(0) as usize;
+    if max_l == 0 {
+        return Vec::new();
+    }
+    // Flat per-label directed edge list `(from_x, from_y, to_x, to_y)` (zero HashMap allocations during scan!)
+    let mut by_label: Vec<Vec<(i32, i32, i32, i32)>> = vec![Vec::new(); max_l + 1];
     let at = |x: i32, y: i32| if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 { 0 } else { labels[y as usize * w + x as usize] };
-    let mut by_label: HashMap<u32, Edges> = HashMap::new();
     for y in 0..h as i32 {
+        let row = y as usize * w;
         for x in 0..w as i32 {
-            let l = at(x, y);
+            let l = labels[row + x as usize];
             if l == 0 {
                 continue;
             }
-            let e = by_label.entry(l).or_default();
+            let e = &mut by_label[l as usize];
             // Clockwise around the pixel on screen (y down)
             if at(x, y - 1) != l {
-                e.entry((x, y)).or_default().push((x + 1, y));
+                e.push((x, y, x + 1, y));
             }
             if at(x + 1, y) != l {
-                e.entry((x + 1, y)).or_default().push((x + 1, y + 1));
+                e.push((x + 1, y, x + 1, y + 1));
             }
             if at(x, y + 1) != l {
-                e.entry((x + 1, y + 1)).or_default().push((x, y + 1));
+                e.push((x + 1, y + 1, x, y + 1));
             }
             if at(x - 1, y) != l {
-                e.entry((x, y + 1)).or_default().push((x, y));
+                e.push((x, y + 1, x, y));
             }
         }
     }
-    let mut out: Vec<(u32, Polygon)> = Vec::with_capacity(by_label.len());
-    for (label, mut edges) in by_label {
+    let trace_one = |(label, mut raw_edges): (usize, Vec<(i32, i32, i32, i32)>)| -> Option<(u32, Polygon)> {
+        if raw_edges.is_empty() {
+            return None;
+        }
+        // Sort edges by `(from_x, from_y)` for O(log k) binary-search chaining with zero HashMap overhead
+        raw_edges.sort_unstable_by_key(|&(fx, fy, _, _)| (fx, fy));
+        let m = raw_edges.len();
+        let mut used = vec![false; m];
         let mut best: Vec<(i32, i32)> = Vec::new();
         let mut best_area = 0.0;
-        while let Some(&start) = edges.keys().next() {
-            let mut ring = vec![start];
-            let mut cur = start;
-            while let Some(nexts) = edges.get_mut(&cur) {
-                let next = nexts.pop().expect("an edge list is never left empty");
-                if nexts.is_empty() {
-                    edges.remove(&cur);
-                }
-                if next == start {
-                    break;
-                }
-                ring.push(next);
-                cur = next;
+        for start_idx in 0..m {
+            if used[start_idx] {
+                continue;
             }
-            let pts: Vec<Point> = ring.iter().map(|&(x, y)| [x as f64, y as f64]).collect();
-            let a = area(&pts);
-            if a > best_area {
-                best_area = a;
-                best = ring;
+            used[start_idx] = true;
+            let (sx, sy, mut cx, mut cy) = raw_edges[start_idx];
+            let start = (sx, sy);
+            let mut ring = vec![start];
+            while (cx, cy) != start {
+                ring.push((cx, cy));
+                let pos = raw_edges.partition_point(|&(fx, fy, _, _)| (fx, fy) < (cx, cy));
+                let mut found = None;
+                let mut i = pos;
+                while i < m && (raw_edges[i].0, raw_edges[i].1) == (cx, cy) {
+                    if !used[i] {
+                        used[i] = true;
+                        found = Some((raw_edges[i].2, raw_edges[i].3));
+                        break;
+                    }
+                    i += 1;
+                }
+                match found {
+                    Some(next) => {
+                        cx = next.0;
+                        cy = next.1;
+                    }
+                    None => break,
+                }
+            }
+            let n = ring.len();
+            if n >= 3 {
+                let a = (0..n)
+                    .map(|i| {
+                        let (p0, p1) = (ring[i], ring[(i + 1) % n]);
+                        (p0.0 as f64) * (p1.1 as f64) - (p1.0 as f64) * (p0.1 as f64)
+                    })
+                    .sum::<f64>()
+                    .abs()
+                    * 0.5;
+                if a > best_area {
+                    best_area = a;
+                    best = ring;
+                }
             }
         }
-        // Only the corners
         let n = best.len();
+        if n < 3 {
+            return None;
+        }
         let corners: Polygon = (0..n)
             .filter(|&i| {
                 let (p, c, q) = (best[(i + n - 1) % n], best[i], best[(i + 1) % n]);
@@ -127,11 +162,16 @@ pub fn trace_labels(labels: &[u32], w: usize, h: usize, origin: Point, ds: f64) 
             })
             .map(|i| [origin[0] + best[i].0 as f64 * ds, origin[1] + best[i].1 as f64 * ds])
             .collect();
-        if corners.len() >= 3 {
-            out.push((label, corners));
-        }
-    }
-    out.sort_by_key(|(l, _)| *l);
+        (corners.len() >= 3).then_some((label as u32, corners))
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let mut out: Vec<(u32, Polygon)> = {
+        use rayon::prelude::*;
+        by_label.into_par_iter().enumerate().skip(1).filter_map(trace_one).collect()
+    };
+    #[cfg(target_family = "wasm")]
+    let mut out: Vec<(u32, Polygon)> = by_label.into_iter().enumerate().skip(1).filter_map(trace_one).collect();
+    out.sort_unstable_by_key(|(l, _)| *l);
     out
 }
 

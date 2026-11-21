@@ -28,7 +28,7 @@ import numpy as np
 from lucem import _native
 from lucem import io as _io
 
-__all__ = ["Tile", "Transform", "blocks", "measure", "segment", "transform"]
+__all__ = ["Tile", "Transform", "blocks", "input", "measure", "op", "param", "segment", "transform"]
 
 
 @dataclass(frozen=True)
@@ -111,33 +111,55 @@ def measure(image, fn: Callable, *, level: int = 0, channels: Sequence[int] | No
 
 
 class Transform:
-    """A function of a block, ready to run over a whole image (see :func:`transform`)."""
+    """A function of a block, ready to run over a whole image (see :func:`transform` and :func:`op`)."""
 
-    def __init__(self, fn: Callable, *, halo: int = 0, halo_z: int | None = None, volume: bool = False, block: int | None = None, block_z: int | None = None):
+    _lucem_op = True
+
+    def __init__(
+        self,
+        fn: Callable,
+        *,
+        halo: int = 0,
+        halo_z: int | None = None,
+        volume: bool = False,
+        block: int | None = None,
+        block_z: int | None = None,
+        name: str | None = None,
+        family: str = "Custom",
+        description: str | None = None,
+    ):
         self.fn = fn
         self.halo = halo
         self.halo_z = halo_z
         self.volume = volume
         self.block = block
         self.block_z = block_z
+        self.name = name or getattr(fn, "__name__", "op")
+        self.family = family
+        self.description = description if description is not None else (inspect.getdoc(fn) or "")
+        self.__name__ = getattr(fn, "__name__", self.name)
+        self.__doc__ = getattr(fn, "__doc__", None)
+        self.__signature__ = inspect.signature(fn)
         self._passes_tile = _takes_tile(fn)
 
-    def __call__(self, x, tile=None):
-        return self.fn(x, tile) if self._passes_tile else self.fn(x)
+    def __call__(self, x, *args, tile=None, **kwargs):
+        if self._passes_tile and tile is not None:
+            return self.fn(x, tile, *args, **kwargs)
+        return self.fn(x, *args, **kwargs)
 
-    def blocks(self, image, *, level: int = 0, channels: Sequence[int] | None = None) -> Iterator[tuple[np.ndarray, Tile]]:
+    def blocks(self, image, *, level: int = 0, channels: Sequence[int] | None = None, **params) -> Iterator[tuple[np.ndarray, Tile]]:
         """Yields each block processed (only the part it owns) and its tile."""
         for x, tile in blocks(image, level=level, channels=channels, volume=self.volume, block=self.block, block_z=self.block_z, halo=self.halo, halo_z=self.halo_z):
-            y = np.asarray(self(x, tile))
+            y = np.asarray(self(x, tile=tile, **params))
             if y.shape != x.shape:
                 raise ValueError(f"the function returned shape {y.shape} for a block of {x.shape}")
             yield y[tile.inner], tile
 
-    def apply(self, image, *, level: int = 0, channel: int = 0) -> np.ndarray:
+    def apply(self, image, *, level: int = 0, channel: int = 0, **params) -> np.ndarray:
         """The whole result of one channel as an array (it must fit in memory)."""
         depth, height, width = image.levels[level][:3]
         out = None
-        for y, t in self.blocks(image, level=level, channels=[channel]):
+        for y, t in self.blocks(image, level=level, channels=[channel], **params):
             if out is None:
                 out = np.zeros((depth, height, width), dtype=y.dtype)
             z, r, c = t.origin
@@ -145,7 +167,7 @@ class Transform:
             out[z : z + sz, r : r + sy, c : c + sx] = y
         return out[0] if depth == 1 else out
 
-    def write(self, image, output: str | PathLike, *, level: int = 0, channels: Sequence[int] | None = None):
+    def write(self, image, output: str | PathLike, *, level: int = 0, channels: Sequence[int] | None = None, **params):
         """Writes the result to an OME-Zarr store (which must not exist), without holding it in memory."""
         depth, height, width = image.levels[level][:3]
         _, grid, _ = _schedule(image, level, self.volume, self.block, self.block_z, self.halo, self.halo_z)
@@ -155,12 +177,56 @@ class Transform:
         px, dz = image.pixel_size_um, image.z_spacing_um
         ds = image.levels[level][6]
         writer = None
-        for y, t in self.blocks(image, level=level, channels=wanted):
+        for y, t in self.blocks(image, level=level, channels=wanted, **params):
             if writer is None:
                 kind = "uint32" if np.issubdtype(y.dtype, np.integer) or y.dtype == bool else "float32"
                 writer = _io.ZarrWriter(output, names, (depth, height, width), chunks, dtype=kind, name=image.name, pixel_size_um=px * ds if px else None, z_spacing_um=dz)
             writer.write(wanted.index(t.channel), t.origin, y)
         return writer.finish()
+
+
+def op(
+    fn: Callable | None = None,
+    *,
+    name: str | None = None,
+    family: str = "Custom",
+    description: str | None = None,
+    halo: int = 0,
+    halo_z: int | None = None,
+    volume: bool = False,
+    block: int | None = None,
+    block_z: int | None = None,
+):
+    """Declare a Python function as a tiled Lucem operator (both in the app and in Python).
+
+    Typed array arguments (``image: np.ndarray``) become graph input ports in the Lucem Pipeline
+    canvas, and scalar arguments with defaults (``sigma: float = 3.0``) become Inspector controls.
+    Lucem handles image reading, ``halo``-padded tiling, ``/dev/shm`` transfer, and tile cropping.
+    """
+    def _wrap(f: Callable) -> Transform:
+        return Transform(
+            f,
+            halo=halo,
+            halo_z=halo_z,
+            volume=volume,
+            block=block,
+            block_z=block_z,
+            name=name,
+            family=family,
+            description=description,
+        )
+
+    return _wrap(fn) if fn is not None else _wrap
+
+
+def param(*_args, **_kwargs):
+    """Optional decorator for declaring an explicit numeric parameter on a Lucem script op."""
+    return lambda fn: fn
+
+
+def input(*_args, **_kwargs):  # noqa: A001
+    """Optional decorator for declaring an explicit input port on a Lucem script op."""
+    return lambda fn: fn
 
 
 def transform(fn: Callable | None = None, *, halo: int = 0, halo_z: int | None = None, volume: bool = False, block: int | None = None, block_z: int | None = None):

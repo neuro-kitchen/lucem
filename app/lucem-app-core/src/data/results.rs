@@ -452,6 +452,29 @@ pub fn analyze_remote(doc: &ProjectDoc, py: &Pyramid, image: &str, z: usize) -> 
                     }
                 }
             }
+            NodeKind::Script { output, .. } => {
+                let port = *output;
+                if port == PortType::Table {
+                    continue;
+                }
+                let (Some(link), Some(served)) = (&link, &served) else { continue };
+                let Some(spec_res) = remote_script_spec(doc, image, id) else { continue };
+                let spec = match spec_res {
+                    Ok(s) => s,
+                    Err(e) => {
+                        out.errors.insert(id.clone(), e);
+                        continue;
+                    }
+                };
+                match link.open(served, Some(spec)).map_err(|e| e.to_string()).and_then(|p| p.read_region_at(level, 0, plane, 0, 0, l.width, l.height).map_err(|e| e.to_string())) {
+                    Ok(vals) => {
+                        out.previews.insert(id.clone(), preview_from_host(&vals, l.width, l.height, port));
+                    }
+                    Err(e) => {
+                        out.errors.insert(id.clone(), e);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -622,11 +645,46 @@ pub fn spec_for(doc: &ProjectDoc, image: &str, target: &str) -> Result<lucem_pip
     Ok(spec)
 }
 
+/// If `target` is a `NodeKind::Script` fed by a channel source of `image`, encodes a
+/// `{"script_node": ...}` tile spec for `lucem serve --web` to execute on the server.
+#[cfg(target_family = "wasm")]
+fn remote_script_spec(doc: &ProjectDoc, image: &str, target: &str) -> Option<Result<String, String>> {
+    let node = doc.graph.node(target)?;
+    let NodeKind::Script { path, inputs, params, enabled, .. } = &node.kind else {
+        return None;
+    };
+    let src_id = doc.graph.input(target, 0)?;
+    let channel = match doc.graph.node(src_id).map(|n| &n.kind) {
+        Some(NodeKind::Source { image: i, channel }) if i == image => *channel,
+        _ => return Some(Err("Connect a channel Source node directly into this script node on the server".into())),
+    };
+    let input_name = inputs.first().map(|i| i.name.clone()).unwrap_or_else(|| "image".into());
+    let param_pairs: Vec<(&str, f64)> = params.iter().map(|p| (p.name.as_str(), p.value)).collect();
+    let payload = serde_json::json!({
+        "script_node": {
+            "path": path,
+            "source_channel": channel,
+            "input_name": input_name,
+            "params": param_pairs,
+            "enabled": enabled,
+            "halo": 12usize,
+            "normalize": true,
+        }
+    });
+    Some(serde_json::to_string(&payload).map_err(|e| e.to_string()))
+}
+
 /// Each raster view of `req.image`, computed by the page's server: the view's chain as a
 /// pipeline the server runs on the tiles of the region (their halo read there), drawn here as
 /// the desktop draws its own results. A browser page has no compute of its own.
 #[cfg(target_family = "wasm")]
-pub fn compute_remote(doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest) -> Vec<LayerResult> {
+pub fn compute_remote(
+    doc: &ProjectDoc,
+    pyramid: &Pyramid,
+    req: &ResultRequest,
+    latest: &std::sync::atomic::AtomicU64,
+    generation: u64,
+) -> Vec<LayerResult> {
     let mut out = Vec::new();
     let Some(link) = crate::data::remote::page_link() else { return out };
     let Some(path) = pyramid.path.as_ref().map(|p| p.to_string_lossy().into_owned()) else { return out };
@@ -642,6 +700,9 @@ pub fn compute_remote(doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest) 
         .map(|(_, v)| v)
         .collect();
     for v in doc.graph.views().filter(|v| doc.graph.images_of(&v.id).contains(&req.image)) {
+        if latest.load(std::sync::atomic::Ordering::Acquire) != generation {
+            break;
+        }
         if raw_views.contains(&v.id) {
             continue;
         }
@@ -653,12 +714,19 @@ pub fn compute_remote(doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest) 
         if port == PortType::Table || !style.visible {
             continue;
         }
-        let spec = match spec_for(doc, &req.image, &target).and_then(|s| serde_json::to_string(&s).map_err(|e| e.to_string())) {
-            Ok(s) => s,
-            Err(e) => {
+        let spec = match remote_script_spec(doc, &req.image, &target) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => {
                 out.push(LayerResult { error: Some(e), ..base });
                 continue;
             }
+            None => match spec_for(doc, &req.image, &target).and_then(|s| serde_json::to_string(&s).map_err(|e| e.to_string())) {
+                Ok(s) => s,
+                Err(e) => {
+                    out.push(LayerResult { error: Some(e), ..base });
+                    continue;
+                }
+            },
         };
         let mut level = pyramid.level_for_zoom(req.zoom);
         while level < pyramid.coarsest() && ((req.rect[2] / pyramid.levels[level].downsample) as usize).max((req.rect[3] / pyramid.levels[level].downsample) as usize) > MAX_SIDE {
@@ -675,12 +743,35 @@ pub fn compute_remote(doc: &ProjectDoc, pyramid: &Pyramid, req: &ResultRequest) 
         }
         let plane = ((req.z as f64 / l.z_downsample) as usize).min(l.depth - 1);
         let (cw, ch) = (vx1 - vx0, vy1 - vy0);
-        let values = link.open(&served, Some(spec)).map_err(|e| e.to_string()).and_then(|p| p.read_region_at(level, 0, plane, vx0, vy0, cw, ch).map_err(|e| e.to_string()));
+        let values = link.open(&served, Some(spec)).map_err(|e| e.to_string()).and_then(|p| {
+            let (tx0, tx1) = (vx0 / l.tile_w, (vx1 - 1) / l.tile_w);
+            let (ty0, ty1) = (vy0 / l.tile_h, (vy1 - 1) / l.tile_h);
+            let mut buf = vec![0.0f32; cw * ch];
+            for ty in ty0..=ty1 {
+                for tx in tx0..=tx1 {
+                    if latest.load(std::sync::atomic::Ordering::Acquire) != generation {
+                        return Err(String::new());
+                    }
+                    let tile = p.read_tile_at(level, 0, plane, tx, ty).map_err(|e| e.to_string())?;
+                    let (gx0, gy0) = (tx * l.tile_w, ty * l.tile_h);
+                    let (ix0, iy0) = (gx0.max(vx0), gy0.max(vy0));
+                    let (ix1, iy1) = ((gx0 + tile.width).min(vx1), (gy0 + tile.height).min(vy1));
+                    for y in iy0..iy1 {
+                        let src_row = (y - gy0) * tile.width + (ix0 - gx0);
+                        let dst_row = (y - vy0) * cw + (ix0 - vx0);
+                        let n = ix1 - ix0;
+                        buf[dst_row..dst_row + n].copy_from_slice(&tile.data[src_row..src_row + n]);
+                    }
+                }
+            }
+            Ok(buf)
+        });
         match values {
             Ok(crop) => {
                 let rect = [vx0 as f64 * ds, vy0 as f64 * ds, cw as f64 * ds, ch as f64 * ds];
                 out.push(drawn(doc, pyramid, req, &processed, style, base, port, &crop, (cw, ch), rect, level, t0));
             }
+            Err(e) if e.is_empty() => break,
             Err(e) => out.push(LayerResult { error: Some(e), level, ..base }),
         }
     }

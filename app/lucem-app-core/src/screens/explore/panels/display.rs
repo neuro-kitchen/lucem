@@ -635,7 +635,7 @@ impl DisplayPanel {
                     .border_1()
                     .border_color(color::border())
                     .bg(color::panel())
-                    .hover(|d| d.border_color(color::accent_mark()).bg(color::raised()))
+                    .hover(|d| d.bg(color::raised()))
                     .cursor_pointer()
                     .text_xs()
                     .text_color(color::text())

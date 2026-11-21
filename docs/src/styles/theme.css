@@ -69,19 +69,42 @@
   background-color: var(--sl-color-accent-low);
 }
 
-/* The landing hero: the headline large and tight, left-aligned like the fields under it. */
+/* The landing hero: side-by-side title + app screenshot above the fold. */
 .hero h1 {
-  font-size: clamp(2.5rem, 5vw, 3.75rem);
+  font-size: clamp(2.15rem, 3.6vw, 3.25rem);
   font-weight: 600;
   letter-spacing: -0.03em;
-  line-height: 1.05;
-  max-width: 17ch;
+  line-height: 1.06;
+  max-width: 16ch;
 }
 .hero .tagline {
-  max-width: 48ch;
+  max-width: 44ch;
 }
 .hero {
-  padding-block: 3rem 1rem;
+  padding-block: 2.25rem 1.5rem;
+}
+@media (min-width: 50rem) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.55fr);
+    gap: 2.5rem;
+    align-items: center;
+  }
+  .hero > .hero-html {
+    max-width: none;
+    width: 100%;
+    margin-inline: 0;
+  }
+}
+.hero-shot {
+  width: 100%;
+}
+.hero-shot img {
+  width: 100%;
+  max-width: none;
+  height: auto;
+  border-radius: 0.65rem;
+  border: 1px solid var(--sl-color-gray-5);
+  box-shadow: 0 20px 56px rgb(0 0 0 / 0.16);
 }
 .hero,
 .hero > .stack {
@@ -95,16 +118,16 @@
   color: var(--sl-color-gray-2);
 }
 
-/* Room in the header for the topic tabs (src/components/Header.astro). */
+/* Single-row desktop header (64rem+); compact 2-row fallback on narrow screens. */
 :root {
   --lm-tabs: 2.5rem;
   --lm-nav-base: 3.5rem;
   --sl-nav-height: calc(var(--lm-nav-base) + var(--lm-tabs));
 }
-@media (min-width: 50em) {
+@media (min-width: 64rem) {
   :root {
-    --lm-nav-base: 4rem;
-    --sl-nav-height: calc(var(--lm-nav-base) + var(--lm-tabs));
+    --lm-nav-base: 3.75rem;
+    --sl-nav-height: var(--lm-nav-base);
   }
 }
 /* The logo and the phone menu button keep to the top row, not the whole header with the tabs. */

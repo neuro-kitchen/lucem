@@ -115,15 +115,29 @@ pub fn classify(client: &Client, c: &PixelClassifier, channels: &[(String, &[f32
         return Err(invalid(format!("the classifier was trained on {:?}", c.channels)));
     }
     let planes = features(client, channels, w, h, &c.features)?;
-    let mut row = vec![0f64; planes.len()];
-    Ok((0..w * h)
-        .map(|i| {
-            for (r, (_, p)) in row.iter_mut().zip(&planes) {
-                *r = p[i] as f64;
-            }
-            (c.forest.predict(&row).0 + 1) as u8
-        })
-        .collect())
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use rayon::prelude::*;
+        Ok((0..w * h)
+            .into_par_iter()
+            .map(|i| {
+                let row: Vec<f64> = planes.iter().map(|(_, p)| p[i] as f64).collect();
+                (c.forest.predict(&row).0 + 1) as u8
+            })
+            .collect())
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let mut row = vec![0f64; planes.len()];
+        Ok((0..w * h)
+            .map(|i| {
+                for (r, (_, p)) in row.iter_mut().zip(&planes) {
+                    *r = p[i] as f64;
+                }
+                (c.forest.predict(&row).0 + 1) as u8
+            })
+            .collect())
+    }
 }
 
 /// The regions of one class of a class map lying on the slide as `grid` (pieces under

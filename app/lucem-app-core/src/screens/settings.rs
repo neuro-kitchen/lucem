@@ -73,6 +73,10 @@ pub struct SettingsView {
     env_note: Option<Result<String, String>>,
     #[cfg(not(target_family = "wasm"))]
     env_busy: bool,
+    #[cfg(target_family = "wasm")]
+    server_env: Option<Result<crate::data::server_api::ServerEnvInfo, String>>,
+    #[cfg(target_family = "wasm")]
+    server_env_loading: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -88,6 +92,10 @@ impl SettingsView {
             env_note: None,
             #[cfg(not(target_family = "wasm"))]
             env_busy: false,
+            #[cfg(target_family = "wasm")]
+            server_env: None,
+            #[cfg(target_family = "wasm")]
+            server_env_loading: false,
             _subs: Vec::new(),
         }
     }
@@ -312,29 +320,152 @@ impl SettingsView {
     fn tools(&mut self, p: &Prefs, cx: &mut Context<Self>) -> AnyElement {
         #[cfg(target_family = "wasm")]
         {
-            let _ = (p, cx);
-            return v_flex()
-                .gap(px(theme::MD))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(color::text())
-                        .child("Desktop-only environment settings"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(color::text_muted())
-                        .child("Local Python/.venv environments, warm script workers, drop-in plugin scripts, and Rust toolchains run inside the native Lucem desktop app or on a connected lucem serve host. Browsers cannot spawn local subprocesses or inspect the local filesystem."),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(color::text_muted())
-                        .child("Built-in image processing operations, 2D/3D exploration, and remote pipelines work directly in the browser."),
-                )
-                .into_any_element();
+            let _ = p;
+            if crate::data::remote::runs_alone() {
+                return v_flex()
+                    .gap(px(theme::MD))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(color::text())
+                            .child("Standalone browser viewer (no server)"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color::text_muted())
+                            .child("This page is running standalone (e.g. GitHub Pages) with only the in-browser WASM engine. Connect to a lucem serve --web host or use the native desktop app to configure Python/.venv environments and run local scripts."),
+                    )
+                    .into_any_element();
+            }
+            if self.server_env.is_none() && !self.server_env_loading {
+                self.server_env_loading = true;
+                cx.spawn(async move |this, cx| {
+                    let res = crate::data::server_api::fetch_env().await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.server_env_loading = false;
+                        s.server_env = Some(res);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            let refresh_btn = Button::new("srv-env-refresh")
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(IconName::RotateCcw))
+                .label("Refresh")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.server_env = None;
+                    this.server_env_loading = false;
+                    cx.notify();
+                }));
+            let mut col = v_flex().gap(px(theme::MD)).child(
+                h_flex()
+                    .items_center()
+                    .gap(px(theme::SM))
+                    .child(div().flex_1().text_xs().text_color(color::text_muted()).child("Connected to lucem serve — managing the server's Python/.venv, uv, Rust, and plugin script ops."))
+                    .child(refresh_btn),
+            );
+            match &self.server_env {
+                None => {
+                    col = col.child(div().text_xs().text_color(color::text_muted()).child("Querying server environment…"));
+                }
+                Some(Err(e)) => {
+                    col = col.child(div().text_xs().text_color(color::danger()).child(format!("Could not read server environment: {e}")));
+                }
+                Some(Ok(info)) => {
+                    let py_ver = info.python.version.clone().unwrap_or_else(|| "Not found".into());
+                    let py_src = info
+                        .python
+                        .configured
+                        .clone()
+                        .map(|p| format!("{p} (configured)"))
+                        .unwrap_or_else(|| format!("{} (PATH)", info.python.executable));
+                    let set_py = |label: &'static str, id: &'static str, target: Option<&'static str>, cx: &mut Context<Self>| {
+                        Button::new(id)
+                            .outline()
+                            .xsmall()
+                            .label(label)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let target = target.map(str::to_string);
+                                this.server_env_loading = true;
+                                cx.spawn(async move |this, cx| {
+                                    let res = crate::data::server_api::set_server_python(target).await;
+                                    let _ = this.update(cx, |s, cx| {
+                                        s.server_env_loading = false;
+                                        s.server_env = Some(res);
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            }))
+                    };
+                    let py_ctrl = v_flex()
+                        .items_end()
+                        .gap(px(theme::XS))
+                        .child(div().text_xs().text_color(color::text()).child(py_ver))
+                        .child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(py_src))
+                        .child(
+                            h_flex()
+                                .gap(px(theme::XS))
+                                .child(set_py("Use PATH", "srv-py-path", None, cx))
+                                .child(set_py("python3", "srv-py-3", Some("python3"), cx))
+                                .child(set_py(".venv", "srv-py-venv", Some(".venv/bin/python"), cx)),
+                        );
+                    col = col
+                        .child(Self::row("Server Python", "Python interpreter used by server script nodes and warm workers.", "PATH", py_ctrl))
+                        .child(Self::row(
+                            "uv package manager",
+                            "Auto-provisions isolated venvs for scripts with PEP 723 dependencies.",
+                            "",
+                            div().text_xs().font_family("monospace").text_color(color::text()).child(info.uv.version.clone().unwrap_or_else(|| "Not found".into())),
+                        ))
+                        .child(Self::row(
+                            "Server Rust",
+                            "Compiler used for server-side .rs script nodes.",
+                            "",
+                            div().text_xs().font_family("monospace").text_color(color::text()).child(info.rust.version.clone().unwrap_or_else(|| "Not found".into())),
+                        ));
+                    let mut ops_col = v_flex()
+                        .gap(px(theme::XS))
+                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color::text_muted()).child(format!("SERVER PLUGIN OPS ({}) · {}", info.plugin_ops.len(), info.plugins_dir)));
+                    if info.plugin_ops.is_empty() {
+                        ops_col = ops_col.child(div().text_xs().text_color(color::text_muted()).child("Drop .py or .rs ops into plugins/ops on the server to see them here."));
+                    } else {
+                        for (i, op) in info.plugin_ops.iter().enumerate() {
+                            let st = self.store.clone();
+                            let path = std::path::PathBuf::from(&op.path);
+                            ops_col = ops_col.child(
+                                h_flex()
+                                    .p(px(theme::SM))
+                                    .gap(px(theme::SM))
+                                    .items_center()
+                                    .rounded(px(theme::RADIUS_SM))
+                                    .bg(color::panel())
+                                    .child(Icon::new(IconName::FileCode).small().text_color(color::accent_mark()))
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(color::text()).child(format!("{} ({})", op.name, op.family)))
+                                            .child(div().text_size(px(10.)).text_color(color::text_muted()).truncate().child(op.description.clone())),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!("srv-op-add-{i}")))
+                                            .outline()
+                                            .xsmall()
+                                            .label("Add to Pipeline")
+                                            .on_click(move |_, _, cx| st.update(cx, |s, cx| s.add_script_file(path.clone(), cx))),
+                                    ),
+                            );
+                        }
+                    }
+                    col = col.child(ops_col);
+                }
+            }
+            return col.into_any_element();
         }
         #[cfg(not(target_family = "wasm"))]
         {

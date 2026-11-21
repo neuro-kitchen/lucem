@@ -61,11 +61,15 @@ impl Hierarchy {
             let parent = regions.iter().enumerate().take(i).filter(|(_, o)| o.area > r.area && o.holds(c) && r.outline.iter().all(|p| o.holds(*p))).last().map(|(_, o)| o.id.clone());
             region_parent.insert(r.id.clone(), parent);
         }
-        // Many objects: their regions found in parallel
+        // Many objects: their regions found in parallel on native (a browser page has no rayon
+        // pool and aborts if `par_iter` is called on the main UI thread).
+        #[cfg(not(target_family = "wasm"))]
         let object_parent: Vec<Option<String>> = {
             use rayon::prelude::*;
             objects.par_iter().map(|o| smallest(o.centroid, None)).collect()
         };
+        #[cfg(target_family = "wasm")]
+        let object_parent: Vec<Option<String>> = objects.iter().map(|o| smallest(o.centroid, None)).collect();
         // Totals with the regions inside: each object counts for its region and every ancestor
         let mut in_subtree: HashMap<String, usize> = HashMap::new();
         for p in object_parent.iter().flatten() {

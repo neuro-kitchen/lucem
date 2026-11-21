@@ -1058,15 +1058,15 @@ impl ZarrArray {
             idx[a] = z / self.chunks[a];
             z_in_chunk = z % self.chunks[a];
         }
-        // Chunks holding several planes are read again for each plane: keep them decoded
-        let multi_plane = self.z_axis.is_some_and(|a| self.chunks[a] > 1);
+        // Chunks holding several planes or several channels are read again for each plane/channel: keep them decoded
+        let multi_slice = self.z_axis.is_some_and(|a| self.chunks[a] > 1) || self.c_axis.is_some_and(|a| self.chunks[a] > 1);
         let key = (level, idx);
-        let values = match multi_plane.then(|| cache.get(&key)).flatten() {
+        let values = match multi_slice.then(|| cache.get(&key)).flatten() {
             Some(v) => v,
             None => {
                 let Some(v) = self.decode_chunk(&key.1)? else { return Ok(vec![self.fill; w * h]) };
                 let v = Arc::new(v);
-                if multi_plane {
+                if multi_slice {
                     cache.put(key, v.clone());
                 }
                 v

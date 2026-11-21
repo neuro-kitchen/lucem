@@ -586,8 +586,20 @@ impl GraphCanvas {
         let g = &doc.graph;
         let in_handles: Vec<_> = inputs.iter().enumerate().map(|(i, (t, _))| handle(Self::port_y(i, n_in), true, port_color(*t), g.input(id, i).is_some())).collect();
         let out = kind.output().map(|t| handle(Self::OUT_Y, false, port_color(Some(t)), !g.outputs(id).is_empty()));
-        let preview = self.store.read(cx).analysis.as_ref().and_then(|a| a.previews.get(id).cloned());
-        let table_rows = self.store.read(cx).analysis.as_ref().and_then(|a| a.tables.get(id).map(|t| t.rows.len()));
+        let store_ref = self.store.read(cx);
+        let preview = store_ref
+            .analysis
+            .as_ref()
+            .and_then(|a| a.previews.get(id).cloned())
+            .or_else(|| store_ref.results.get(id).and_then(|r| r.layer.clone()))
+            .or_else(|| {
+                // On wasm32, results are keyed by View node id; show the downstream live View
+                // preview on the upstream Script/Op node card as well.
+                g.outputs(id)
+                    .iter()
+                    .find_map(|(out_id, _)| store_ref.results.get(*out_id).and_then(|r| r.layer.clone()))
+            });
+        let table_rows = store_ref.analysis.as_ref().and_then(|a| a.tables.get(id).map(|t| t.rows.len()));
         div()
             .id(SharedString::from(format!("node-{id}")))
             .absolute()

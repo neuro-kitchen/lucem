@@ -176,6 +176,12 @@ pub struct ToolState {
     pub show_results: bool,
     /// Wand: how far from the seed a pixel may be (fraction of each channel's display window).
     pub wand_tolerance: f32,
+    /// Wand: true = contiguous flood fill (Photoshop/QuPath Magic Wand); false = brush-constrained smart paint.
+    pub wand_flood: bool,
+    /// Wand: pre-smoothing radius (working-buffer px) before flood fill to suppress shot-noise holes.
+    pub wand_smooth: f32,
+    /// Wand: Affinity / Photoshop Quick Selection "Snap to edges" Sobel gradient barrier & morphological edge refine.
+    pub wand_snap_edges: bool,
     /// Threshold tool: channel, value (raw units), above or below, smoothing (level-0 px) and the
     /// smallest object kept (level-0 px²).
     pub threshold_channel: usize,
@@ -199,7 +205,7 @@ pub struct ToolState {
 
 impl Default for ToolState {
     fn default() -> Self {
-        Self { tool: Tool::Select, brush_px: 24.0, brush_in_image: false, brush_image_px: 40.0, class: "Region".into(), rulers: true, show_results: true, wand_tolerance: 0.15, threshold_channel: 0, threshold_value: 0.0, threshold_above: true, threshold_sigma: 2.0, threshold_min_area: 50.0, crosshair: false, brush_fill: false, show_annotations: true, fill_annotations: true, show_names: false, overlay_opacity: 1.0, sam_through_z: false }
+        Self { tool: Tool::Select, brush_px: 24.0, brush_in_image: false, brush_image_px: 40.0, class: "Region".into(), rulers: true, show_results: true, wand_tolerance: 0.15, wand_flood: true, wand_smooth: 2.0, wand_snap_edges: true, threshold_channel: 0, threshold_value: 0.0, threshold_above: true, threshold_sigma: 2.0, threshold_min_area: 50.0, crosshair: false, brush_fill: false, show_annotations: true, fill_annotations: true, show_names: false, overlay_opacity: 1.0, sam_through_z: false }
     }
 }
 

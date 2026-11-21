@@ -74,21 +74,44 @@ pub fn density_map(objects: &[HistObject], bounds: (f64, f64, f64, f64), pixel_u
     let r = (s.radius_um / s.pixel_um).max(0.0);
     let ri = r.ceil() as isize;
     let disk: Vec<(isize, isize)> = (-ri..=ri).flat_map(|dy| (-ri..=ri).map(move |dx| (dx, dy))).filter(|(dx, dy)| ((dx * dx + dy * dy) as f64) <= r * r).collect();
+    let disk_slice = disk.as_slice();
     let sum = |src: &[f32]| -> Vec<f32> {
-        let mut out = vec![0f32; n];
-        for y in 0..height as isize {
-            for x in 0..width as isize {
-                let mut acc = 0.0;
-                for (dx, dy) in &disk {
-                    let (sx, sy) = (x + dx, y + dy);
-                    if sx >= 0 && sy >= 0 && sx < width as isize && sy < height as isize {
-                        acc += src[sy as usize * width + sx as usize];
-                    }
-                }
-                out[y as usize * width + x as usize] = acc;
-            }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            use rayon::prelude::*;
+            (0..height as isize)
+                .into_par_iter()
+                .flat_map_iter(|y| {
+                    (0..width as isize).map(move |x| {
+                        let mut acc = 0.0;
+                        for (dx, dy) in disk_slice {
+                            let (sx, sy) = (x + dx, y + dy);
+                            if sx >= 0 && sy >= 0 && sx < width as isize && sy < height as isize {
+                                acc += src[sy as usize * width + sx as usize];
+                            }
+                        }
+                        acc
+                    })
+                })
+                .collect()
         }
-        out
+        #[cfg(target_family = "wasm")]
+        {
+            let mut out = vec![0f32; n];
+            for y in 0..height as isize {
+                for x in 0..width as isize {
+                    let mut acc = 0.0;
+                    for (dx, dy) in disk_slice {
+                        let (sx, sy) = (x + dx, y + dy);
+                        if sx >= 0 && sy >= 0 && sx < width as isize && sy < height as isize {
+                            acc += src[sy as usize * width + sx as usize];
+                        }
+                    }
+                    out[y as usize * width + x as usize] = acc;
+                }
+            }
+            out
+        }
     };
     let counts = sum(&all);
     let values = match s.value {

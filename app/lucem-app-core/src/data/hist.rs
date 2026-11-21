@@ -77,8 +77,13 @@ impl StainChoice {
 }
 
 pub struct HistState {
-    /// Cells by image.
+    /// Cells by image (local or lightweight preview sample when backed by `lucem serve`).
     pub cells: HashMap<String, Vec<HistObject>>,
+    /// True server-side cell count by image when backed by `lucem serve` (rendered via server
+    /// viewport tiles without downloading 100k+ JSON polygons to the browser).
+    pub remote_cells: HashMap<String, usize>,
+    /// True server-side tile count by image when backed by `lucem serve`.
+    pub remote_tiles: HashMap<String, usize>,
     /// The stains by image (a guess from the image until chosen).
     pub stains: HashMap<String, StainChoice>,
     pub detection: CellDetection,
@@ -325,10 +330,24 @@ pub(crate) fn load_folder(folder: &Path, images: &[String]) -> (HistState, Vec<S
     (st, errors)
 }
 
+impl HistState {
+    /// Total detected cells for `img` (server-side authoritative count if larger than local sample).
+    pub fn cell_count(&self, img: &str) -> usize {
+        self.cells.get(img).map_or(0, Vec::len).max(self.remote_cells.get(img).copied().unwrap_or(0))
+    }
+
+    /// Total superpixel tiles for `img`.
+    pub fn tile_count(&self, img: &str) -> usize {
+        self.tiles.get(img).map_or(0, Vec::len).max(self.remote_tiles.get(img).copied().unwrap_or(0))
+    }
+}
+
 impl Default for HistState {
     fn default() -> Self {
         Self {
             cells: HashMap::new(),
+            remote_cells: HashMap::new(),
+            remote_tiles: HashMap::new(),
             stains: HashMap::new(),
             detection: CellDetection::default(),
             auto_threshold: true,
@@ -374,7 +393,9 @@ pub(crate) fn hashed_color(name: &str) -> [u8; 3] {
 /// filled in their colour, cell outlines drawn. `None` when no cell is there.
 /// Selected objects (`selected`: their indices) are outlined in white.
 pub fn cells_raster(cells: &[HistObject], color: &dyn Fn(&HistObject) -> [u8; 3], rect: [f64; 4], ds: f64, alpha: f32, selected: &std::collections::HashSet<usize>) -> Option<Arc<RenderImage>> {
-    let (w, h) = (((rect[2] / ds).ceil() as usize).max(1), ((rect[3] / ds).ceil() as usize).max(1));
+    // Cap raster buffer to <= 1024 px per side so large viewports never allocate oversized RGBA buffers
+    let ds = ds.max(rect[2].max(rect[3]) / 1024.0);
+    let (w, h) = (((rect[2] / ds).ceil() as usize).clamp(1, 1024), ((rect[3] / ds).ceil() as usize).clamp(1, 1024));
     let origin = [rect[0], rect[1]];
     let inside: Vec<(usize, &HistObject)> = cells
         .iter()
@@ -388,23 +409,59 @@ pub fn cells_raster(cells: &[HistObject], color: &dyn Fn(&HistObject) -> [u8; 3]
         return None;
     }
     let (mut nuc, mut cell) = (vec![0u32; w * h], vec![0u32; w * h]);
+    let (mut min_px, mut min_py, mut max_px, mut max_py) = (w, h, 0usize, 0usize);
     for (i, c) in &inside {
-        lucem_hist::polygon::fill(&c.roi, &mut cell, w, h, origin, ds, *i as u32 + 1);
+        let id = *i as u32 + 1;
+        let (bx0, by0, bx1, by1) = lucem_hist::polygon::bounds(&c.roi);
+        let px0 = (((bx0 - origin[0]) / ds).floor() as isize).clamp(0, w as isize - 1) as usize;
+        let py0 = (((by0 - origin[1]) / ds).floor() as isize).clamp(0, h as isize - 1) as usize;
+        let px1 = (((bx1 - origin[0]) / ds).ceil() as isize).clamp(0, w as isize - 1) as usize;
+        let py1 = (((by1 - origin[1]) / ds).ceil() as isize).clamp(0, h as isize - 1) as usize;
+        min_px = min_px.min(px0);
+        min_py = min_py.min(py0);
+        max_px = max_px.max(px1);
+        max_py = max_py.max(py1);
+        if px1.saturating_sub(px0) <= 3 && py1.saturating_sub(py0) <= 3 {
+            for py in py0..=py1 {
+                let row = py * w;
+                for px in px0..=px1 {
+                    cell[row + px] = id;
+                    nuc[row + px] = id;
+                }
+            }
+            continue;
+        }
+        lucem_hist::polygon::fill(&c.roi, &mut cell, w, h, origin, ds, id);
         match &c.nucleus {
-            Some(n) => lucem_hist::polygon::fill(n, &mut nuc, w, h, origin, ds, *i as u32 + 1),
+            Some(n) => lucem_hist::polygon::fill(n, &mut nuc, w, h, origin, ds, id),
             // A tile or detection: filled when it has a class (else its outline only)
-            None if c.class.is_some() || c.intensity.is_some() => lucem_hist::polygon::fill(&c.roi, &mut nuc, w, h, origin, ds, *i as u32 + 1),
+            None if c.class.is_some() || c.intensity.is_some() => lucem_hist::polygon::fill(&c.roi, &mut nuc, w, h, origin, ds, id),
             None => {}
         }
+    }
+    if min_px > max_px || min_py > max_py {
+        return None;
     }
     let a_fill = (alpha.clamp(0.0, 1.0) * 150.0) as u8;
     let a_line = (alpha.clamp(0.0, 1.0) * 230.0) as u8;
     let mut out = vec![0u8; w * h * 4];
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
+    for y in min_py..=max_py {
+        let row = y * w;
+        for x in min_px..=max_px {
+            let i = row + x;
             let (n, c) = (nuc[i], cell[i]);
-            let edge = c != 0 && [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)].iter().any(|&(nx, ny)| nx >= w || ny >= h || cell[ny * w + nx] != c);
+            if c == 0 && n == 0 {
+                continue;
+            }
+            let edge = c != 0
+                && (x == 0
+                    || y == 0
+                    || x + 1 == w
+                    || y + 1 == h
+                    || cell[i - 1] != c
+                    || cell[i + 1] != c
+                    || cell[i - w] != c
+                    || cell[i + w] != c);
             let (id, a) = if edge { (c, a_line) } else if n != 0 { (n, a_fill) } else { continue };
             let picked = selected.contains(&(id as usize - 1));
             let (rgb, a) = if picked && edge { ([255, 255, 255], 255) } else { (color(&cells[id as usize - 1]), a) };
@@ -536,9 +593,10 @@ impl Store {
     /// as `lucem session run` and an agent), in the background as one job; the results come
     /// back into the project and each step done is recorded in the session.
     pub fn hist_run(&mut self, actions: Vec<Action>, what: &str, cx: &mut Context<Self>) {
-        // The page a container serves: the steps run on the server's GPU (its `hist` plugin)
+        // The page a server serves: histology & ML models ALWAYS run on the server's GPU (its
+        // `hist` plugin), even if the browser also initialized a local WebGPU device.
         #[cfg(target_family = "wasm")]
-        if self.device.is_none() && super::remote::page_link().is_some() && !super::remote::runs_alone() {
+        if super::remote::page_link().is_some() && !super::remote::runs_alone() {
             return self.hist_run_on_server(actions, what, cx);
         }
         let z = self.hist_selected_regions().first().map_or(0, |r| r.1);
@@ -612,6 +670,8 @@ impl Store {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (mut outcomes, mut error) = (Vec::new(), None);
+            let mut cell_count = 0usize;
+            let mut tile_count = 0usize;
             for (i, action) in actions.iter().enumerate() {
                 if job.cancelled() {
                     error = Some("cancelled".to_string());
@@ -629,6 +689,8 @@ impl Store {
                         if let Ok(regions) = serde_json::from_value(r["regions"].clone()) {
                             a.tissue = regions;
                         }
+                        cell_count = r["cells"].as_u64().unwrap_or(0) as usize;
+                        tile_count = r["tiles"].as_u64().unwrap_or(0) as usize;
                         outcomes.push(o);
                     }
                     Err(e) => {
@@ -638,13 +700,31 @@ impl Store {
                 }
             }
             if !outcomes.is_empty() {
-                job.set(&format!("{what}: fetching the objects"), None);
-                for (kind, list) in [("cells", &mut a.cells), ("tiles", &mut a.tiles)] {
-                    match server_objects(&link, &path, kind).await {
-                        Ok(found) => *list = found,
-                        Err(e) => {
-                            error.get_or_insert(e);
-                        }
+                // Record authoritative server counts immediately — canvas renders full-fidelity
+                // overlays via server-side `hist/raster` viewport PNGs (QuPath/Cytomine pattern),
+                // so the browser never freezes downloading 10k–1M JSON polygons!
+                let _ = this.update(cx, |s, _| {
+                    if cell_count > 0 {
+                        s.hist.remote_cells.insert(image.clone(), cell_count);
+                    } else {
+                        s.hist.remote_cells.remove(&image);
+                    }
+                    if tile_count > 0 {
+                        s.hist.remote_tiles.insert(image.clone(), tile_count);
+                    } else {
+                        s.hist.remote_tiles.remove(&image);
+                    }
+                });
+                // Fetch a compact simplified sample (1 single fast RPC, <= 2,500 objects) for
+                // instant Analyze Region LOD summaries & quick readout inspection.
+                if cell_count > 0 {
+                    if let Ok(found) = server_objects_sample(&link, &path, "cells", 2_500).await {
+                        a.cells = found;
+                    }
+                }
+                if tile_count > 0 {
+                    if let Ok(found) = server_objects_sample(&link, &path, "tiles", 2_500).await {
+                        a.tiles = found;
                     }
                 }
             }
@@ -977,6 +1057,8 @@ impl Store {
         if let Some(img) = self.doc.active_image.clone() {
             self.hist.cells.remove(&img);
             self.hist.tiles.remove(&img);
+            self.hist.remote_cells.remove(&img);
+            self.hist.remote_tiles.remove(&img);
             self.hist.rev += 1;
             self.hist_persist(vec![img], cx);
             self.hist_report(true, "Cells and tiles cleared", cx);
@@ -1209,21 +1291,87 @@ mod tests {
     }
 }
 
-/// Every object of `kind` (`cells`, `tiles`) the server's analysis of `path` holds, page by page.
+/// Fetches a compact simplified sample of `kind` (`cells`, `tiles`) in 1 single RPC for quick
+/// Analyze Region LOD summaries without downloading 10k–1M full polygons to the browser.
 #[cfg(target_family = "wasm")]
-async fn server_objects(link: &lucem_stream::web_client::PageLink, path: &str, kind: &str) -> Result<Vec<HistObject>, String> {
-    let mut out: Vec<HistObject> = Vec::new();
-    loop {
-        let answer = link.plugin_call(lucem_hist::service::PLUGIN, "objects", &serde_json::json!({ "path": path, "kind": kind, "offset": out.len() })).await.map_err(|e| e.to_string())?;
-        let total = answer["total"].as_u64().unwrap_or(0) as usize;
-        let page: Vec<HistObject> = serde_json::from_value(answer["objects"].clone()).map_err(|e| e.to_string())?;
-        if page.is_empty() {
-            break;
-        }
-        out.extend(page);
-        if out.len() >= total {
-            break;
+async fn server_objects_sample(
+    link: &lucem_stream::web_client::PageLink,
+    path: &str,
+    kind: &str,
+    limit: usize,
+) -> Result<Vec<HistObject>, String> {
+    let mut answer = link
+        .plugin_call(
+            lucem_hist::service::PLUGIN,
+            "objects",
+            &serde_json::json!({ "path": path, "kind": kind, "offset": 0, "limit": limit, "simplify": true }),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let raw = answer.get_mut("objects").map(serde_json::Value::take).unwrap_or_default();
+    serde_json::from_value(raw).map_err(|e| e.to_string())
+}
+
+#[cfg(target_family = "wasm")]
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for b in s.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => (b - b'A') as u32,
+            b'a'..=b'z' => (b - b'a' + 26) as u32,
+            b'0'..=b'9' => (b - b'0' + 52) as u32,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\n' | b'\r' | b' ' => continue,
+            _ => return None,
+        };
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
         }
     }
-    Ok(out)
+    Some(out)
+}
+
+/// Fetches a server-rasterized viewport PNG overlay of all detected cells/tiles intersecting `rect`
+/// (QuPath / Cytomine server-tile architecture: zero client polygon work, instant even for 1M cells).
+#[cfg(target_family = "wasm")]
+pub async fn server_cells_raster(
+    link: &lucem_stream::web_client::PageLink,
+    path: &str,
+    rect: [f64; 4],
+    ds: f64,
+    alpha: f32,
+    selected: Vec<String>,
+) -> Option<Arc<RenderImage>> {
+    let answer = link
+        .plugin_call(
+            lucem_hist::service::PLUGIN,
+            "raster",
+            &serde_json::json!({
+                "path": path,
+                "rect": rect,
+                "ds": ds,
+                "alpha": alpha,
+                "selected": selected,
+            }),
+        )
+        .await
+        .ok()?;
+    if answer["empty"].as_bool().unwrap_or(true) {
+        return None;
+    }
+    let png_b64 = answer["png"].as_str()?;
+    let png_bytes = base64_decode(png_b64)?;
+    let img = image::load_from_memory_with_format(&png_bytes, image::ImageFormat::Png).ok()?.to_rgba8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let mut bgra = img.into_raw();
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    Some(lucem_view::bgra_image(w, h, bgra))
 }

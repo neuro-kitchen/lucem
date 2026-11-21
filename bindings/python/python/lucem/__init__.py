@@ -7,6 +7,7 @@
 - :mod:`lucem.ml` finds the model plugins (``pip install "lucem[stardist]"``, ``"lucem[sam]"``) and talks to them.
 - :mod:`lucem.hist` adds histology: stains, tissue, cells, the app's recorded steps (``pip install "lucem[hist]"``).
 - :mod:`lucem.app` opens the desktop app (``pip install "lucem[app]"``).
+- :mod:`lucem.web` serves the browser WASM app (``pip install "lucem[web]"``).
 """
 
 import importlib
@@ -18,10 +19,11 @@ import sys
 if importlib.util.find_spec("lucem_hist") is not None:
     sys.modules["lucem._native"] = importlib.import_module("lucem_hist._native")
 
-from lucem import app, custom, io, ml, ops, runtime  # noqa: E402
+from lucem import app, custom, io, ml, ops, runtime, web  # noqa: E402
 from lucem._native import __version__  # noqa: E402
+from lucem.custom import input, op, param, transform  # noqa: E402
 
-__all__ = ["__version__", "app", "custom", "io", "ml", "ops", "runtime"]
+__all__ = ["__version__", "app", "custom", "input", "io", "ml", "op", "ops", "param", "runtime", "transform", "web"]
 if hasattr(sys.modules["lucem._native"], "hist"):
     __all__.append("hist")
 

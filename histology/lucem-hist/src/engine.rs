@@ -136,6 +136,9 @@ impl Models for PluginModels {
     fn request(&mut self, id: &str, req: &lucem_ml::Request) -> Result<serde_json::Value, String> {
         let (program, _) = self.find(id).map_err(|e| e.to_string())?;
         if !self.running.contains_key(&program) {
+            // Keep at most one ML model plugin resident in GPU VRAM at a time so switching between
+            // StarDist and InstanSeg never exhausts 8 GB laptop GPUs or triggers PCIe VRAM swapping.
+            self.running.clear();
             self.running.insert(program.clone(), lucem_ml::PluginProcess::start(&program)?);
         }
         let p = self.running.get_mut(&program).ok_or("the plugin stopped")?;

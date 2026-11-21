@@ -94,22 +94,48 @@ impl ObjectClassifier {
 
     /// Classifies every object it applies to (the others keep their class); how many changed.
     pub fn apply(&self, objects: &mut [HistObject]) -> usize {
-        let mut changed = 0;
-        for o in objects.iter_mut() {
-            let applies = match self {
-                ObjectClassifier::SingleMeasurement { filter, .. } | ObjectClassifier::RandomTrees { filter, .. } => passes(o, filter),
-                ObjectClassifier::Composite { .. } => true,
-            };
-            if !applies {
-                continue;
-            }
-            let c = self.classify(o);
-            if c != o.class {
-                o.class = c;
-                changed += 1;
-            }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            use rayon::prelude::*;
+            objects
+                .par_iter_mut()
+                .map(|o| {
+                    let applies = match self {
+                        ObjectClassifier::SingleMeasurement { filter, .. } | ObjectClassifier::RandomTrees { filter, .. } => passes(o, filter),
+                        ObjectClassifier::Composite { .. } => true,
+                    };
+                    if !applies {
+                        return 0usize;
+                    }
+                    let c = self.classify(o);
+                    if c != o.class {
+                        o.class = c;
+                        1
+                    } else {
+                        0
+                    }
+                })
+                .sum()
         }
-        changed
+        #[cfg(target_family = "wasm")]
+        {
+            let mut changed = 0;
+            for o in objects.iter_mut() {
+                let applies = match self {
+                    ObjectClassifier::SingleMeasurement { filter, .. } | ObjectClassifier::RandomTrees { filter, .. } => passes(o, filter),
+                    ObjectClassifier::Composite { .. } => true,
+                };
+                if !applies {
+                    continue;
+                }
+                let c = self.classify(o);
+                if c != o.class {
+                    o.class = c;
+                    changed += 1;
+                }
+            }
+            changed
+        }
     }
 
     pub fn to_json(&self) -> String {
