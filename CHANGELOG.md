@@ -5,6 +5,64 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+## [0.0.5] - 2026-11-20
+
+Publication-ready **Figure** composer workspace, **Zero-Freeze ML Cell Detection** (`StarDist` and
+`InstanSeg`) with canonical `512×512` batched-volume inference and server-side viewport
+rasterization, **Edge-Snapping Sobel Magic Wand**, pure-Rust **`syntect` code editor & `@lucem.op`
+pipeline scripts** with zero-copy `/dev/shm` IPC, **`lucem[web]` Python wheel**, and a **108-page
+documentation & interactive Python course overhaul**.
+
+### Added
+
+- **`Figure` Publication Composer workspace (5th tab)** (`lucem-app-core`): MVVM multi-panel
+  publication figure builder with **All channels + Merge** and **Pipeline stages** presets,
+  interactive scroll-wheel zoom and drag-to-pan per panel, **Linked zoom / Single view** toggle,
+  one-click ROI crop sync, calibrated scale bars (`Auto` or `25 µm`–`1 mm`), Dark/White/Black
+  artboard backgrounds, and high-DPI **Export PNG / SVG**.
+- **Server-side cell & tile viewport rasterization (`hist/raster`)** (`lucem-hist`,
+  `lucem-app-core`): QuPath/Cytomine-style viewport raster endpoint that renders visible cell and
+  nucleus boundaries on the server into a compact ~20 KB PNG overlay so slides with 100k+ cells
+  render and pan at 60 FPS in the browser without downloading megabytes of polygon JSON.
+- **Canonical `512×512` batched-volume ML inference & VRAM eviction** (`lucem-core::compute::batch`,
+  `lucem-model-stardist`, `lucem-model-instanseg`, `lucem-hist`): fixed `512×512` (`384 + 2×64`)
+  tile shapes eliminate per-ROI CubeCL autotune stalls (`28–32 ms/tile` warm on CUDA),
+  `LUCEM_ML_BATCH` (`1..=8`) scales batch volume to GPU VRAM, and idle ML plugins are automatically
+  evicted on model switch.
+- **Edge-Snapping Sobel Magic Wand** (`lucem-app-core`): multi-channel Sobel gradient-magnitude
+  edge barrier, 3×3 neighborhood adaptive seed statistics, 1-pass morphological hole closing,
+  drag-to-add sweep, `Alt`-to-erase, and a **Snap to edges** toolbar toggle.
+- **Code editor, `@lucem.op` scripts & `/dev/shm` Python pool** (`lucem-app-core`, `lucem-py`):
+  pure-Rust `syntect` syntax highlighting on desktop and WebAssembly, `@lucem.op` parameter comment
+  parser with live UI sliders, zero-copy `/dev/shm` shared-memory IPC in the warm Python worker
+  pool, native `ruff` lint/format buttons, and 7 runnable `playground/` scripts.
+- **`lucem[web]` (`lucem-web`) Python package & `lucem.web.serve()`** (`bindings/python`):
+  platform-independent wheel bundling the browser WebAssembly app (`uv run lucem web --open`).
+- **Live Pixel Probe HUD** (`lucem-app-core`): bottom status bar displays real-time cursor `(x, y)`
+  coordinates in `µm` and raw per-channel intensity values under the cursor.
+- **Documentation & Python Course overhaul (108 pages)** (`docs/`): single-row header, side-by-side
+  hero showcase, **Learn › Python** interactive 3-module course, **Reference › Python API**,
+  **Coming from QuPath / napari** migration guides, **Performance & Architecture** guide, and
+  `llms.txt`.
+
+### Changed
+
+- **Zero-bounce GPU pipeline & histology ops** (`lucem-ops`, `lucem-pipeline`, `lucem-hist`,
+  `lucem-io`): added CubeCL device kernels for `MaskUnion`, `MaskIntersect`, `MaskSubtract`,
+  `MaskInvert`, `MaskImage`, `ChannelRatio`, `NormalizedDiff`, and `ChannelProduct`; kept cell
+  detection linear combinations, Euclidean distance Gaussian smoothing, watershed inversion, SLIC
+  channel averaging, and `run_spec` block normalization/halo-cropping on the GPU; cached multi-channel
+  Zarr chunks in `GLOBAL_CHUNK_CACHE`; replaced `HashMap`-based `trace_labels` contour chaining with
+  a flat Rayon-parallel sorted-edge tracer (`~15×` faster on 100k+ cells).
+
+### Fixed
+
+- **Browser WASM panics after remote histology completes**: guarded `std::time::SystemTime::now()`
+  in `Session::push` and `rayon::par_iter()` in `Hierarchy::build` on `wasm32-unknown-unknown`, and
+  unconditionally routed served-browser histology and pipeline compute to `lucem serve`.
+- **Multiview channel bleed**: non-active channels in Multiview grid cards no longer inherit DAPI
+  when channel 0 is toggled off.
+
 ## [0.0.4] - 2026-11-19
 
 Fused GPU pipeline & memory budgets, native **OME-Zarr v0.5 / Zarr v3** reading, **22 new GPU

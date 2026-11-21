@@ -49,7 +49,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 rust-version = "1.95"   # burn 0.22 minimum
 authors = ["jesusdpa1"]
@@ -58,20 +58,20 @@ repository = "https://github.com/neuro-kitchen/lucem"
 
 [workspace.dependencies]
 # Workspace crates
-lucem-core = { path = "crates/lucem-core", version = "0.0.4", default-features = false }
-lucem-io = { path = "crates/lucem-io", version = "0.0.4" }
-lucem-ops = { path = "crates/lucem-ops", version = "0.0.4", default-features = false }
-lucem-ml = { path = "crates/lucem-ml", version = "0.0.4" }
-lucem-hist = { path = "histology/lucem-hist", version = "0.0.4", default-features = false }
-lucem-session = { path = "engine/lucem-session", version = "0.0.4" }
-lucem-table = { path = "crates/lucem-table", version = "0.0.4", default-features = false }
-lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.0.4" }
-lucem-view = { path = "serve/lucem-view", version = "0.0.4" }
+lucem-core = { path = "crates/lucem-core", version = "0.0.5", default-features = false }
+lucem-io = { path = "crates/lucem-io", version = "0.0.5" }
+lucem-ops = { path = "crates/lucem-ops", version = "0.0.5", default-features = false }
+lucem-ml = { path = "crates/lucem-ml", version = "0.0.5" }
+lucem-hist = { path = "histology/lucem-hist", version = "0.0.5", default-features = false }
+lucem-session = { path = "engine/lucem-session", version = "0.0.5" }
+lucem-table = { path = "crates/lucem-table", version = "0.0.5", default-features = false }
+lucem-pipeline = { path = "engine/lucem-pipeline", version = "0.0.5" }
+lucem-view = { path = "serve/lucem-view", version = "0.0.5" }
 # No default features here: a browser build asks for `web`, a computer for `native` (an older
 # cargo, as cargo-deny's, refuses a member turning off defaults the workspace turned on)
-lucem-stream = { path = "serve/lucem-stream", version = "0.0.4", default-features = false }
+lucem-stream = { path = "serve/lucem-stream", version = "0.0.5", default-features = false }
 lucem-mcp = { path = "app/lucem-mcp" }
-lucem-app-core = { path = "app/lucem-app-core", version = "0.0.4" }
+lucem-app-core = { path = "app/lucem-app-core", version = "0.0.5" }
 lucem-py-core = { path = "bindings/python/lucem-py-core", default-features = false }
 lucem-py-hist = { path = "bindings/python/lucem-py-hist", default-features = false }
 
@@ -150,10 +150,10 @@ ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dy
 ureq = "3.5.1"
 flate2 = "1.1.11"
 tar = "0.4.46"
-lucem-hub = { path = "hub/lucem-hub", version = "0.0.4" }
-lucem-model-sam = { path = "models/sam", version = "0.0.4" }
-lucem-model-stardist = { path = "models/stardist", version = "0.0.4", default-features = false }
-lucem-model-instanseg = { path = "models/instanseg", version = "0.0.4", default-features = false }
+lucem-hub = { path = "hub/lucem-hub", version = "0.0.5" }
+lucem-model-sam = { path = "models/sam", version = "0.0.5" }
+lucem-model-stardist = { path = "models/stardist", version = "0.0.5", default-features = false }
+lucem-model-instanseg = { path = "models/instanseg", version = "0.0.5", default-features = false }
 # InstanSeg's published models: a bioimage.io zip holding a TorchScript archive (also a zip)
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 # Keras weights (HDF5) read without the C library, written as safetensors
