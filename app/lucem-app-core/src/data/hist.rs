@@ -76,6 +76,31 @@ impl StainChoice {
     }
 }
 
+/// How detected cells are rendered over the slide (Auto switches smoothly by zoom LOD).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CellStyle {
+    #[default]
+    Auto,
+    Outlines,
+    FillOutline,
+    Centroids,
+    Density,
+}
+
+impl CellStyle {
+    pub const ALL: [Self; 5] = [Self::Auto, Self::Outlines, Self::FillOutline, Self::Centroids, Self::Density];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto LOD",
+            Self::Outlines => "Outlines",
+            Self::FillOutline => "Fill + outline",
+            Self::Centroids => "Centroids",
+            Self::Density => "Density",
+        }
+    }
+}
+
 pub struct HistState {
     /// Cells by image (local or lightweight preview sample when backed by `lucem serve`).
     pub cells: HashMap<String, Vec<HistObject>>,
@@ -94,6 +119,10 @@ pub struct HistState {
     /// Bumped when cells change (the canvas redraws them).
     pub rev: u64,
     pub show: bool,
+    /// Multi-resolution rendering style for detected cells.
+    pub cell_style: CellStyle,
+    /// Outline stroke thickness in screen pixels (1.0..=3.0) at micro zoom.
+    pub cell_stroke_px: f32,
     /// Superpixel tiles by image (classified like cells, by their own classifier).
     pub tiles: HashMap<String, Vec<HistObject>>,
     pub tile_classifier: Option<ObjectClassifier>,
@@ -355,6 +384,8 @@ impl Default for HistState {
             classifier: None,
             rev: 0,
             show: true,
+            cell_style: CellStyle::Auto,
+            cell_stroke_px: 1.5,
             tiles: HashMap::new(),
             tile_classifier: None,
             superpixel: SuperpixelSettings::default(),
@@ -389,39 +420,194 @@ pub(crate) fn hashed_color(name: &str) -> [u8; 3] {
     lucem_view::label_color(h | 1)
 }
 
-/// The cells of `rect` (level-0 `x, y, w, h`) as a raster at `ds` level-0 px per pixel: nuclei
-/// filled in their colour, cell outlines drawn. `None` when no cell is there.
-/// Selected objects (`selected`: their indices) are outlined in white.
-pub fn cells_raster(cells: &[HistObject], color: &dyn Fn(&HistObject) -> [u8; 3], rect: [f64; 4], ds: f64, alpha: f32, selected: &std::collections::HashSet<usize>) -> Option<Arc<RenderImage>> {
+/// Multi-resolution Level-of-Detail (LOD) cell overlay renderer:
+/// - **Macro zoom (`Density`):** smooth spatial density heatmap with weighted phenotype colors
+/// - **Mid zoom (`Centroids`):** anti-aliased soft-edged centroid disks with subtle dark halos
+/// - **Micro zoom (`Outlines` / `FillOutline`):** crisp contours with dark outer halo,
+///   configurable stroke thickness, and nucleus/cytoplasm distinction
+///
+/// Selected objects (`selected`: their indices) are highlighted in bright white.
+pub fn cells_raster(
+    cells: &[HistObject],
+    color: &dyn Fn(&HistObject) -> [u8; 3],
+    rect: [f64; 4],
+    ds: f64,
+    alpha: f32,
+    selected: &std::collections::HashSet<usize>,
+    style: CellStyle,
+    stroke_px: f32,
+) -> Option<Arc<RenderImage>> {
     // Cap raster buffer to <= 1024 px per side so large viewports never allocate oversized RGBA buffers
     let ds = ds.max(rect[2].max(rect[3]) / 1024.0);
     let (w, h) = (((rect[2] / ds).ceil() as usize).clamp(1, 1024), ((rect[3] / ds).ceil() as usize).clamp(1, 1024));
     let origin = [rect[0], rect[1]];
-    let inside: Vec<(usize, &HistObject)> = cells
+    let inside: Vec<(usize, &HistObject, [f64; 4])> = cells
         .iter()
         .enumerate()
-        .filter(|(_, c)| {
+        .filter_map(|(i, c)| {
             let (x0, y0, x1, y1) = lucem_hist::polygon::bounds(&c.roi);
-            x1 >= rect[0] && y1 >= rect[1] && x0 <= rect[0] + rect[2] && y0 <= rect[1] + rect[3]
+            (x1 >= rect[0] && y1 >= rect[1] && x0 <= rect[0] + rect[2] && y0 <= rect[1] + rect[3]).then_some((i, c, [x0, y0, x1, y1]))
         })
         .collect();
     if inside.is_empty() {
         return None;
     }
+
+    // Estimate average cell diameter in screen pixels from a quick sample
+    let sample_step = (inside.len() / 64).max(1);
+    let (mut sum_diam, mut n_sample) = (0.0f64, 0usize);
+    for (_, _, b) in inside.iter().step_by(sample_step) {
+        sum_diam += ((b[2] - b[0]) + (b[3] - b[1])) * 0.5 / ds;
+        n_sample += 1;
+    }
+    let avg_px = if n_sample > 0 { sum_diam / n_sample as f64 } else { 12.0 };
+    let effective = match style {
+        CellStyle::Auto => {
+            if avg_px < 3.5 {
+                CellStyle::Density
+            } else if avg_px < 10.0 {
+                CellStyle::Centroids
+            } else {
+                CellStyle::FillOutline
+            }
+        }
+        other => other,
+    };
+
+    let alpha = alpha.clamp(0.0, 1.0);
+    let mut out = vec![0u8; w * h * 4];
+
+    match effective {
+        CellStyle::Density => {
+            // Tier 1 (Macro LOD): 4px-binned smooth spatial density heatmap with phenotype blending
+            const BIN: usize = 4;
+            let (gw, gh) = (w.div_ceil(BIN), h.div_ceil(BIN));
+            let mut count = vec![0.0f32; gw * gh];
+            let mut sum_r = vec![0.0f32; gw * gh];
+            let mut sum_g = vec![0.0f32; gw * gh];
+            let mut sum_b = vec![0.0f32; gw * gh];
+            for (_, c, b) in &inside {
+                let cx = ((b[0] + b[2]) * 0.5 - origin[0]) / ds;
+                let cy = ((b[1] + b[3]) * 0.5 - origin[1]) / ds;
+                let gx = ((cx / BIN as f64).floor() as isize).clamp(0, gw as isize - 1) as usize;
+                let gy = ((cy / BIN as f64).floor() as isize).clamp(0, gh as isize - 1) as usize;
+                let rgb = color(c);
+                // Soft 3x3 tent splat for smooth heatmap appearance
+                for dy in -1isize..=1 {
+                    let ny = gy as isize + dy;
+                    if ny < 0 || ny >= gh as isize {
+                        continue;
+                    }
+                    for dx in -1isize..=1 {
+                        let nx = gx as isize + dx;
+                        if nx < 0 || nx >= gw as isize {
+                            continue;
+                        }
+                        let weight = match (dx.abs(), dy.abs()) {
+                            (0, 0) => 1.0f32,
+                            (1, 0) | (0, 1) => 0.45f32,
+                            _ => 0.20f32,
+                        };
+                        let idx = ny as usize * gw + nx as usize;
+                        count[idx] += weight;
+                        sum_r[idx] += rgb[0] as f32 * weight;
+                        sum_g[idx] += rgb[1] as f32 * weight;
+                        sum_b[idx] += rgb[2] as f32 * weight;
+                    }
+                }
+            }
+            let max_c = count.iter().copied().fold(0.0f32, f32::max).max(1.0);
+            let denom = (1.0 + max_c).ln().max(1e-3);
+            for y in 0..h {
+                let gy = (y / BIN).min(gh - 1);
+                let row = y * w;
+                for x in 0..w {
+                    let gx = (x / BIN).min(gw - 1);
+                    let gi = gy * gw + gx;
+                    let c = count[gi];
+                    if c < 0.05 {
+                        continue;
+                    }
+                    let norm = ((1.0 + c).ln() / denom).clamp(0.0, 1.0);
+                    let a = (norm.powf(0.75) * alpha * 210.0).clamp(0.0, 230.0) as u8;
+                    if a == 0 {
+                        continue;
+                    }
+                    let r = (sum_r[gi] / c).clamp(0.0, 255.0) as u8;
+                    let g = (sum_g[gi] / c).clamp(0.0, 255.0) as u8;
+                    let b = (sum_b[gi] / c).clamp(0.0, 255.0) as u8;
+                    let i = (row + x) * 4;
+                    out[i..i + 4].copy_from_slice(&[b, g, r, a]);
+                }
+            }
+            return Some(lucem_view::bgra_image(w, h, out));
+        }
+        CellStyle::Centroids => {
+            // Tier 2 (Mid LOD): anti-aliased centroid disks with dark halo & selection ring
+            let base_r = (avg_px as f32 * 0.36).clamp(2.2, 4.2);
+            let halo_r = base_r + 1.0;
+            // Density-aware alpha scaling so crowded regions stay readable
+            let density = inside.len() as f32 / ((w * h) as f32 / 100.0).max(1.0);
+            let a_scale = (1.0 / (1.0 + density * 0.15)).clamp(0.45, 1.0);
+            let a_max = alpha * a_scale * 225.0;
+            for (idx, c, b) in &inside {
+                let cx = (((b[0] + b[2]) * 0.5 - origin[0]) / ds) as f32;
+                let cy = (((b[1] + b[3]) * 0.5 - origin[1]) / ds) as f32;
+                let picked = selected.contains(idx);
+                let r = if picked { base_r + 1.2 } else { base_r };
+                let hr = if picked { r + 1.4 } else { halo_r };
+                let rgb = if picked { [255, 255, 255] } else { color(c) };
+                let px0 = ((cx - hr - 1.0).floor() as isize).clamp(0, w as isize - 1) as usize;
+                let py0 = ((cy - hr - 1.0).floor() as isize).clamp(0, h as isize - 1) as usize;
+                let px1 = ((cx + hr + 1.0).ceil() as isize).clamp(0, w as isize - 1) as usize;
+                let py1 = ((cy + hr + 1.0).ceil() as isize).clamp(0, h as isize - 1) as usize;
+                for py in py0..=py1 {
+                    let dy = py as f32 + 0.5 - cy;
+                    let row = py * w;
+                    for px in px0..=px1 {
+                        let dx = px as f32 + 0.5 - cx;
+                        let dist = dx.hypot(dy);
+                        if dist > hr {
+                            continue;
+                        }
+                        let i = (row + px) * 4;
+                        if dist <= r {
+                            // Anti-aliased interior edge
+                            let cov = (r + 0.6 - dist).clamp(0.0, 1.0);
+                            let a = if picked { (cov * 255.0) as u8 } else { (cov * a_max) as u8 };
+                            if a >= out[i + 3] {
+                                out[i..i + 4].copy_from_slice(&[rgb[2], rgb[1], rgb[0], a]);
+                            }
+                        } else {
+                            // Subtle dark halo ring
+                            let cov = (hr - dist).clamp(0.0, 1.0);
+                            let ha = (cov * alpha * 140.0) as u8;
+                            if ha > out[i + 3] {
+                                out[i..i + 4].copy_from_slice(&[0, 0, 0, ha]);
+                            }
+                        }
+                    }
+                }
+            }
+            return Some(lucem_view::bgra_image(w, h, out));
+        }
+        CellStyle::Outlines | CellStyle::FillOutline | CellStyle::Auto => {}
+    }
+
+    // Tier 3 (Micro LOD): crisp contours with dark outer halo, configurable stroke, & nucleus tint
     let (mut nuc, mut cell) = (vec![0u32; w * h], vec![0u32; w * h]);
     let (mut min_px, mut min_py, mut max_px, mut max_py) = (w, h, 0usize, 0usize);
-    for (i, c) in &inside {
+    for (i, c, b) in &inside {
         let id = *i as u32 + 1;
-        let (bx0, by0, bx1, by1) = lucem_hist::polygon::bounds(&c.roi);
-        let px0 = (((bx0 - origin[0]) / ds).floor() as isize).clamp(0, w as isize - 1) as usize;
-        let py0 = (((by0 - origin[1]) / ds).floor() as isize).clamp(0, h as isize - 1) as usize;
-        let px1 = (((bx1 - origin[0]) / ds).ceil() as isize).clamp(0, w as isize - 1) as usize;
-        let py1 = (((by1 - origin[1]) / ds).ceil() as isize).clamp(0, h as isize - 1) as usize;
+        let px0 = (((b[0] - origin[0]) / ds).floor() as isize).clamp(0, w as isize - 1) as usize;
+        let py0 = (((b[1] - origin[1]) / ds).floor() as isize).clamp(0, h as isize - 1) as usize;
+        let px1 = (((b[2] - origin[0]) / ds).ceil() as isize).clamp(0, w as isize - 1) as usize;
+        let py1 = (((b[3] - origin[1]) / ds).ceil() as isize).clamp(0, h as isize - 1) as usize;
         min_px = min_px.min(px0);
         min_py = min_py.min(py0);
         max_px = max_px.max(px1);
         max_py = max_py.max(py1);
-        if px1.saturating_sub(px0) <= 3 && py1.saturating_sub(py0) <= 3 {
+        if px1.saturating_sub(px0) <= 2 && py1.saturating_sub(py0) <= 2 {
             for py in py0..=py1 {
                 let row = py * w;
                 for px in px0..=px1 {
@@ -432,39 +618,87 @@ pub fn cells_raster(cells: &[HistObject], color: &dyn Fn(&HistObject) -> [u8; 3]
             continue;
         }
         lucem_hist::polygon::fill(&c.roi, &mut cell, w, h, origin, ds, id);
-        match &c.nucleus {
-            Some(n) => lucem_hist::polygon::fill(n, &mut nuc, w, h, origin, ds, id),
-            // A tile or detection: filled when it has a class (else its outline only)
-            None if c.class.is_some() || c.intensity.is_some() => lucem_hist::polygon::fill(&c.roi, &mut nuc, w, h, origin, ds, id),
-            None => {}
+        if effective != CellStyle::Outlines {
+            match &c.nucleus {
+                Some(n) => lucem_hist::polygon::fill(n, &mut nuc, w, h, origin, ds, id),
+                None if c.class.is_some() || c.intensity.is_some() => lucem_hist::polygon::fill(&c.roi, &mut nuc, w, h, origin, ds, id),
+                None => {}
+            }
         }
     }
     if min_px > max_px || min_py > max_py {
         return None;
     }
-    let a_fill = (alpha.clamp(0.0, 1.0) * 150.0) as u8;
-    let a_line = (alpha.clamp(0.0, 1.0) * 230.0) as u8;
-    let mut out = vec![0u8; w * h * 4];
-    for y in min_py..=max_py {
+    let y_start = min_py.saturating_sub(1);
+    let y_end = (max_py + 1).min(h - 1);
+    let x_start = min_px.saturating_sub(1);
+    let x_end = (max_px + 1).min(w - 1);
+    let thick = stroke_px.round().clamp(1.0, 3.0) as isize;
+    let a_fill = (alpha * 72.0) as u8;
+    let a_nuc = (alpha * 115.0) as u8;
+    let a_line = (alpha * 238.0) as u8;
+    let a_halo = (alpha * 145.0) as u8;
+    for y in y_start..=y_end {
         let row = y * w;
-        for x in min_px..=max_px {
+        for x in x_start..=x_end {
             let i = row + x;
             let (n, c) = (nuc[i], cell[i]);
             if c == 0 && n == 0 {
+                // Dark 1px outer halo around cell exterior for crisp contrast on bright tissue
+                let adj = (x > 0 && cell[i - 1] != 0)
+                    || (x + 1 < w && cell[i + 1] != 0)
+                    || (y > 0 && cell[i - w] != 0)
+                    || (y + 1 < h && cell[i + w] != 0);
+                if adj {
+                    out[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, 0, a_halo]);
+                }
                 continue;
             }
-            let edge = c != 0
-                && (x == 0
-                    || y == 0
-                    || x + 1 == w
-                    || y + 1 == h
-                    || cell[i - 1] != c
-                    || cell[i + 1] != c
-                    || cell[i - w] != c
-                    || cell[i + w] != c);
-            let (id, a) = if edge { (c, a_line) } else if n != 0 { (n, a_fill) } else { continue };
+            let mut is_edge = false;
+            if c != 0 {
+                'edge_check: for dy in -thick..=thick {
+                    let ny = y as isize + dy;
+                    if ny < 0 || ny >= h as isize {
+                        is_edge = true;
+                        break;
+                    }
+                    let nrow = ny as usize * w;
+                    for dx in -thick..=thick {
+                        if dx * dx + dy * dy > thick * thick {
+                            continue;
+                        }
+                        let nx = x as isize + dx;
+                        if nx < 0 || nx >= w as isize || cell[nrow + nx as usize] != c {
+                            is_edge = true;
+                            break 'edge_check;
+                        }
+                    }
+                }
+            }
+            let is_nuc_edge = n != 0
+                && effective != CellStyle::Outlines
+                && (x == 0 || y == 0 || x + 1 == w || y + 1 == h || nuc[i - 1] != n || nuc[i + 1] != n || nuc[i - w] != n || nuc[i + w] != n);
+
+            let (id, a) = if is_edge {
+                (c, a_line)
+            } else if is_nuc_edge {
+                (n, (a_line as f32 * 0.72) as u8)
+            } else if effective != CellStyle::Outlines && n != 0 {
+                (n, a_nuc)
+            } else if effective != CellStyle::Outlines && c != 0 {
+                (c, a_fill)
+            } else {
+                continue;
+            };
             let picked = selected.contains(&(id as usize - 1));
-            let (rgb, a) = if picked && edge { ([255, 255, 255], 255) } else { (color(&cells[id as usize - 1]), a) };
+            let (rgb, a) = if picked && is_edge {
+                ([255, 255, 255], 255)
+            } else if picked {
+                let base = color(&cells[id as usize - 1]);
+                ([(base[0] as u16 + 120).min(255) as u8, (base[1] as u16 + 120).min(255) as u8, (base[2] as u16 + 120).min(255) as u8], a.max(120))
+            } else {
+                (color(&cells[id as usize - 1]), a)
+            };
             out[i * 4..i * 4 + 4].copy_from_slice(&[rgb[2], rgb[1], rgb[0], a]);
         }
     }
@@ -518,6 +752,82 @@ impl Store {
     /// Whether a histology step is running.
     pub fn hist_busy(&self) -> Option<super::jobs::Job> {
         super::jobs::of(HIST_JOB)
+    }
+
+    /// Removes the currently selected detected cells/tiles on the active image.
+    pub fn hist_delete_selected_objects(&mut self, cx: &mut Context<Self>) {
+        let Some(img) = self.doc.active_image.clone() else { return };
+        if self.sel.objects.is_empty() {
+            return;
+        }
+        let sel: std::collections::HashSet<&str> = self.sel.objects.iter().map(String::as_str).collect();
+        let mut removed = 0usize;
+        if let Some(cells) = self.hist.cells.get_mut(&img) {
+            let before = cells.len();
+            cells.retain(|o| !sel.contains(format!("c{}", o.id).as_str()));
+            removed += before - cells.len();
+        }
+        if let Some(tiles) = self.hist.tiles.get_mut(&img) {
+            let before = tiles.len();
+            tiles.retain(|o| !sel.contains(format!("t{}", o.id).as_str()));
+            removed += before - tiles.len();
+        }
+        if removed > 0 {
+            self.sel.objects.clear();
+            self.hist.rev = self.hist.rev.wrapping_add(1);
+            self.set_status(format!("Deleted {removed} detected object(s)"), cx);
+            cx.notify();
+        }
+    }
+
+    /// Merges 2+ selected detected cells on the active image into their convex hull.
+    pub fn hist_merge_selected_objects(&mut self, cx: &mut Context<Self>) {
+        let Some(img) = self.doc.active_image.clone() else { return };
+        let sel: std::collections::HashSet<&str> = self.sel.objects.iter().map(String::as_str).collect();
+        let Some(cells) = self.hist.cells.get_mut(&img) else { return };
+        let picked: Vec<usize> = cells.iter().enumerate().filter_map(|(i, o)| sel.contains(format!("c{}", o.id).as_str()).then_some(i)).collect();
+        if picked.len() < 2 {
+            return;
+        }
+        // Gather all ROI vertices and build a simple monotone-chain convex hull
+        let mut pts: Vec<[f64; 2]> = picked.iter().flat_map(|&i| cells[i].roi.iter().copied()).collect();
+        pts.sort_by(|a, b| a[0].total_cmp(&b[0]).then_with(|| a[1].total_cmp(&b[1])));
+        pts.dedup();
+        if pts.len() < 3 {
+            return;
+        }
+        let cross = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        let mut lower: Vec<[f64; 2]> = Vec::new();
+        for &p in &pts {
+            while lower.len() >= 2 && cross(lower[lower.len() - 2], lower[lower.len() - 1], p) <= 0.0 {
+                lower.pop();
+            }
+            lower.push(p);
+        }
+        let mut upper: Vec<[f64; 2]> = Vec::new();
+        for &p in pts.iter().rev() {
+            while upper.len() >= 2 && cross(upper[upper.len() - 2], upper[upper.len() - 1], p) <= 0.0 {
+                upper.pop();
+            }
+            upper.push(p);
+        }
+        lower.pop();
+        upper.pop();
+        lower.extend(upper);
+        let keep_idx = picked[0];
+        let keep_id = cells[keep_idx].id;
+        cells[keep_idx].roi = lower;
+        let remove_set: std::collections::HashSet<usize> = picked[1..].iter().copied().collect();
+        let mut idx = 0usize;
+        cells.retain(|_| {
+            let keep = !remove_set.contains(&idx);
+            idx += 1;
+            keep
+        });
+        self.sel.objects = vec![format!("c{keep_id}")];
+        self.hist.rev = self.hist.rev.wrapping_add(1);
+        self.set_status(format!("Merged {} cells into cell #{keep_id}", picked.len()), cx);
+        cx.notify();
     }
 
     /// The stains used for `image` (chosen, else guessed: RGB is H-DAB, else fluorescence with
