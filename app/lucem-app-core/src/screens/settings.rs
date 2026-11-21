@@ -256,10 +256,26 @@ impl SettingsView {
         if let Some((what, f)) = &busy {
             col = col.child(div().text_sm().text_color(color::accent_mark()).child(format!("{what}{}", f.map_or(String::new(), |f| format!(" — {:.0} %", f * 100.0)))));
         }
+        #[cfg(target_family = "wasm")]
+        if crate::data::remote::runs_alone() {
+            return v_flex()
+                .gap(px(theme::MD))
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(color::text()).child("ML models require the desktop app or lucem serve"))
+                .child(
+                    div()
+                        .p(px(theme::MD))
+                        .rounded(px(theme::RADIUS_LG))
+                        .bg(color::panel())
+                        .text_xs()
+                        .text_color(color::text_muted())
+                        .child("This page is running standalone in your browser (WebAssembly engine). Image viewing, OME-Zarr, 3D volume rendering, GPU/CPU pipelines, Figure maker, and classical histology all run locally in the browser. For deep-learning model plugins (StarDist, InstanSeg, SAM 2), run the desktop app (`lucem app`) or connect to `lucem serve --web`, and install plugins with `lucem plugins install all`."),
+                )
+                .into_any_element();
+        }
         if s.ml.scanning || !s.ml.scanned {
             col = col.child(div().text_sm().text_color(color::text_muted()).child("Looking for plugins…"));
         } else if s.ml.plugins.is_empty() {
-            col = col.child(div().text_sm().child("No model plugin found.")).child(div().text_xs().text_color(color::text_muted()).child("Build one (cargo build -p lucem-ml-sam: it lands next to lucem-app) or copy a lucem-ml-* program into one of:"));
+            col = col.child(div().text_sm().child("No model plugin found.")).child(div().text_xs().text_color(color::text_muted()).child("Install prebuilt binaries with `lucem plugins install all`, or build from source (`cargo build --release -p lucem-ml-stardist`) into one of:"));
             for d in lucem_ml::plugin_dirs().into_iter().take(3) {
                 col = col.child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(crate::domain::paths::short_path(&d)));
             }
@@ -674,7 +690,25 @@ impl SettingsView {
         });
         let _ = p;
         v_flex()
-            .child(Self::row("Lucem", "GPU workstation for histology and radiology images.", env!("CARGO_PKG_VERSION"), div()))
+            .child(
+                h_flex()
+                    .w_full()
+                    .py(px(theme::MD))
+                    .gap(px(theme::MD))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(color::border())
+                    .child(gpui_kit::img(crate::ui::assets::logo_path()).size(px(40.)).rounded(px(9.)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(div().font_family(crate::ui::assets::BRAND_FONT).text_size(px(20.)).child("Lucem"))
+                            .child(div().text_xs().text_color(color::text_muted()).child("GPU workstation for histology and radiology images.")),
+                    )
+                    .child(div().text_xs().font_family("monospace").text_color(color::text_muted()).child(env!("CARGO_PKG_VERSION"))),
+            )
             .child(Self::row("Settings file", &path, "per user", div()))
             .child(Self::row(
                 "Compute runtimes",

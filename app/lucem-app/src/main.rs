@@ -19,6 +19,7 @@ fn main() {
     let open = std::env::args().nth(1).map(std::path::PathBuf::from);
     gpui_kit::application().with_assets(lucem_app_core::ui::assets::app_assets()).run(move |cx| {
         gpui_kit::init(cx);
+        lucem_app_core::ui::assets::register_brand_fonts(cx);
         actions::bind_keys(cx);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         let prefs_path = Prefs::path();

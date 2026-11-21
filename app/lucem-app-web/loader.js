@@ -172,6 +172,11 @@ window.lucemPickFolder = async () => {
 // ---- the browser -------------------------------------------------------------------------
 const note = document.getElementById("note");
 const say = (html) => (note.firstElementChild.innerHTML = html);
+const saySub = (text) => {
+  const sub = note.querySelector(".sub");
+  if (sub) sub.textContent = text;
+  else say(`<p>${text}</p>`);
+};
 const params = new URLSearchParams(location.search);
 
 /** Hardware WebGL2: refused when the browser would draw in software. */
@@ -233,7 +238,7 @@ if (!threads) {
   drawing ??= "webgl";
   // What the app reads at start (`lucem_app_web::backend`)
   window.lucemWeb = { drawing, server: served.server ?? null, webtransport: "lucemTransport" in window };
-  say(`<p>Loading Lucem (${drawing === "webgpu" ? "WebGPU" : "WebGL2"})…</p>`);
+  saySub(`Starting ${drawing === "webgpu" ? "WebGPU" : "WebGL2"} workspace…`);
   try {
     const app = await import("./mt/lucem_app_web.js");
     await app.default();
