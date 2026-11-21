@@ -212,6 +212,18 @@ fn recipe_body(store: &Entity<Store>, s: &Store, r: Recipe, img: &str, cells: &[
                     st.update(cx, |s, cx| s.hist_set_detector(d, cx))
                 }),
             ));
+            #[cfg(target_family = "wasm")]
+            if crate::data::remote::runs_alone() {
+                body = body.child(
+                    div()
+                        .p(px(theme::SM))
+                        .rounded(px(theme::RADIUS_SM))
+                        .bg(color::control())
+                        .text_xs()
+                        .text_color(color::text_muted())
+                        .child("Browser-only viewer: classical threshold/watershed detection runs locally here. Deep-learning detectors (StarDist, InstanSeg, SAM 2) require the desktop app or `lucem serve --web` (`lucem plugins install all`)."),
+                );
+            }
             if s.hist.detector.is_some() && cur.is_none() {
                 body = body.child(div().text_xs().text_color(color::warning()).child("The chosen model does not fit this image; choose another."));
             }

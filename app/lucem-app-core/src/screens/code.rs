@@ -575,6 +575,31 @@ impl Render for CodeWorkspaceView {
             tree
         });
 
+        #[cfg(target_family = "wasm")]
+        let standalone_banner = crate::data::remote::runs_alone().then(|| {
+            h_flex()
+                .flex_none()
+                .w_full()
+                .px(px(theme::MD))
+                .py(px(theme::SM))
+                .gap(px(theme::SM))
+                .items_center()
+                .bg(color::panel())
+                .border_b_1()
+                .border_color(color::border())
+                .child(Icon::new(IconName::Info).small().text_color(color::accent_mark()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(color::text_muted())
+                        .child("Browser-only viewer: live Python/Rust script execution and local file saving require the desktop app (`lucem app`) or a connected GPU server (`lucem serve --web`)."),
+                )
+        });
+        #[cfg(not(target_family = "wasm"))]
+        let standalone_banner: Option<gpui_kit::Div> = None;
+
         h_flex()
             .id("code-workspace")
             .size_full()
@@ -589,6 +614,7 @@ impl Render for CodeWorkspaceView {
                     .rounded(px(theme::RADIUS_LG))
                     .overflow_hidden()
                     .bg(color::canvas())
+                    .children(standalone_banner)
                     .child(tab_bar)
                     .child(div().flex_1().min_h_0().w_full().child(self.editor.clone()))
                     .children(console),

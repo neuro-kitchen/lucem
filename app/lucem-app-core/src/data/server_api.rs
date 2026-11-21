@@ -64,6 +64,9 @@ pub struct ServerTableData {
 
 #[cfg(target_family = "wasm")]
 async fn fetch_json(url: &str, method: &str, body: Option<String>) -> Result<serde_json::Value, String> {
+    if crate::data::remote::runs_alone() {
+        return Err("standalone browser mode (no lucem serve backend)".into());
+    }
     let win = web_sys::window().ok_or("no browser window")?;
     let opts = web_sys::RequestInit::new();
     opts.set_method(method);

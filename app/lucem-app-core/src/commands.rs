@@ -222,8 +222,8 @@ pub fn register(registry: &Registry, c: &Ctx) {
     let mut list = vec![
         // File
         CommandSpec::new("file.new", "New project", IconName::FilePlus, st(|s, cx| s.new_project(cx))).group("File").hint("Close the project and start an empty one").key("secondary-n"),
-        CommandSpec::new("file.open_image", "Open file…", IconName::ImagePlus, move |_, cx| open_image(&s1, cx)).group("File").hint("An image: OME-Zarr, TIFF, PNG, JPEG").key("secondary-o"),
-        CommandSpec::new("file.open_project", "Open project…", IconName::FolderOpen, move |_, cx| open_project(&s2, cx)).group("File").hint("A project (project.lucem.json and what it names), or an OME-Zarr").key("secondary-shift-o"),
+        CommandSpec::new("file.open_image", "Open image file…", IconName::ImagePlus, move |_, cx| open_image(&s1, cx)).group("File").hint("A single image file: TIFF, PNG, JPEG").key("secondary-o"),
+        CommandSpec::new("file.open_project", "Open OME-Zarr / folder…", IconName::FolderOpen, move |_, cx| open_project(&s2, cx)).group("File").hint("An OME-Zarr directory or Lucem project folder").key("secondary-shift-o"),
         CommandSpec::new("file.save_in", "Save project in folder…", IconName::Save, move |_, cx| save_project(&s3, cx)).group("File").hint("Writes project.lucem.json, pipeline.json and layout.json in a folder").key("secondary-shift-s"),
         CommandSpec::with_args::<PathArgs>("file.open", "Open a file", IconName::FolderOpen, move |a, _, cx| {
             s4.update(cx, |s, cx| s.open(a.path.into(), cx));
