@@ -18,10 +18,10 @@ dependencies = ["numpy>=2.5"]
 # Pinned to this release; .github/workflows/release.yml checks them against the workspace version.
 # ML model plugins (`lucem-ml-*`) ship as standalone Rust binaries on GitHub Releases
 # (`lucem plugins install all`), not as PyPI wheels.
-hist = ["lucem-hist==0.0.5"]
-app = ["lucem-app==0.0.5"]
-web = ["lucem-web==0.0.5"]
-all = ["lucem-hist==0.0.5", "lucem-app==0.0.5", "lucem-web==0.0.5"]
+hist = ["lucem-hist==0.0.6"]
+app = ["lucem-app==0.0.6"]
+web = ["lucem-web==0.0.6"]
+all = ["lucem-hist==0.0.6", "lucem-app==0.0.6", "lucem-web==0.0.6"]
 
 [project.scripts]
 lucem = "lucem._cli:main"

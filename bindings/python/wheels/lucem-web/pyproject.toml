@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lucem-web"
-version = "0.0.5"
+version = "0.0.6"
 description = "The lucem browser WASM app bundle: install with pip install 'lucem[web]' or uv add 'lucem[web]'"
 readme = "README.md"
 authors = [{ name = "jesusdpa1" }]

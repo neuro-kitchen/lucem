@@ -5,6 +5,17 @@ All notable changes, newest first. Versions follow [Semantic Versioning](https:/
 
 ## Unreleased
 
+## [0.0.6] - 2026-11-21
+
+Multi-resolution **Cell Overlay LOD Pyramid** (density heatmap → anti-aliased centroids → crisp
+contours with dark halo & nucleus/cytoplasm distinction), **Plugin-Contributed Pipeline Tabs**
+(`Histology` tab right after `Process`), **Async WebGPU CubeCL Compute** in the standalone browser
+worker, **ML Plugin Binary Distribution** (`lucem plugins list|install`), **Spatial Inspection &
+Editing UX** (Split curtain compare, Hover Cell Tooltip, Pinned Single-Cell Inspector, interactive
+box/ellipse/ruler edge & corner resizing), **Determinate Job Progress Card**, and refreshed
+**Lucem branding** (hand-sketched cell logo with dark + cream light theme, `Matemasie` wordmark,
+and `Help › About Lucem`).
+
 ### Added
 
 - **Multi-resolution Cell Overlay Pyramid (LOD):** detected cells now render smoothly across all
